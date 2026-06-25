@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { callModel, isRetryable, type Message, type ContentBlock, type ToolDef, type Usage, type SystemBlock } from "../providers/gateway.ts";
 import { modelSpec, isRouterModel, supportsEffort } from "../providers/models.ts";
-import { isDestructiveCall, normalizeToolOutput, toolResultContent, type Tool, type ReadCache } from "./tools.ts";
+import { isDestructiveCall, normalizeToolOutput, toolCallMutates, toolResultContent, type Tool, type ReadCache } from "./tools.ts";
 import { classifyIntent } from "../safety/bash-validation.ts";
 import { recoveryHint } from "./recovery.ts";
 import { evaluatePolicy, type PolicyRule } from "../safety/policy.ts";
@@ -416,6 +416,16 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
     addStable("Write-subagents are ON: you have the `spawn_write_subagents` tool for editing tasks that split into parts touching DISJOINT files. Assign each agent an explicit, non-overlapping `files` lane; they edit in isolated worktrees and the merge is approval-gated. Any file overlap aborts the batch. Prefer editing yourself for small or interdependent changes.");
   if (tools.has("update_tasks"))
     addStable("For a longer task with several distinct steps, keep a visible task list with `update_tasks`: create it up front with the planned steps (status \"pending\"), mark the step you're starting \"in_progress\" (a single one at a time), and flip each to \"completed\" the moment it's done. Always pass the FULL list (it replaces the previous one); clear it with an empty `tasks` array when the whole task is finished. Skip it for simple one- or two-step tasks.");
+  // Delivery surface (PR/CI, DB, secrets, public hosting) — guidance only when the tool is wired, so the
+  // prompt that "follows the capability" never advertises a tool this context doesn't have.
+  if (tools.has("create_pr"))
+    addStable("Shipping a change as a PR: do the work, then commit it with run_bash (`git add -A && git commit -m \"…\"`) on a feature branch — never commit straight to the default branch — then call `create_pr` (title + a real body) to push and open the PR. It does NOT commit for you and refuses an empty PR. After opening, run `pr_checks` (wait:true) and DON'T report the task done until CI is green — fix failures and re-check until it passes (or say plainly why a failure is pre-existing).");
+  if (tools.has("execute_sql"))
+    addStable("Database work: use `execute_sql` for SQLite (Bun built-in; default file .ob1/app.db). Reads (SELECT) are free; for changes prefer scoped statements (always a WHERE on UPDATE/DELETE) and do schema changes as explicit CREATE/ALTER migrations. A DROP/TRUNCATE or a whole-table DELETE/UPDATE is refused unless you pass allow_destructive:true — only do that when the user clearly wants data wiped.");
+  if (tools.has("request_secret"))
+    addStable("Secrets: when a command needs an API key/token/password, call `request_secret` (UPPER_SNAKE name) so the USER types it into a masked prompt — never ask them to paste a secret into the chat, and never put a literal key in a command. The value is exposed to run_bash as $NAME (reference it as \"$NAME\"); you never see it. NEVER print, echo, log, or commit a secret value. Use `check_secret` to see if one is already set.");
+  if (tools.has("expose_port"))
+    addStable("Public preview: to test a web app over a real URL (not just localhost), start its dev server with run_bash background, then call `expose_port` with the port to get a temporary public https URL (it auto-picks an installed tunnel client). It's a throwaway tunnel — fine for testing/sharing, not production hosting.");
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (deps.signal?.aborted) return {}; // ESC between steps — the drain loop prints "⊘ stopped" once
@@ -621,10 +631,10 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         results.push({ type: "tool_result", tool_use_id: tu.id, content: `unknown tool: ${tu.name}`, is_error: true });
         continue;
       }
-      // Plan-mode gate. A genuinely READ-ONLY run_bash (ls/grep/git log/…) is still allowed in Plan mode
-      // — it changes nothing, and investigation is the whole point of Plan mode (readOnlyValidation parity).
-      const readOnlyBash = tu.name === "run_bash" && classifyIntent(String((tu.input as any)?.command ?? "")) === "read-only";
-      if (tool.mutating && cfg.planMode && !readOnlyBash) {
+      // Plan-mode gate. Some statically mutating tools have read-only calls (run_bash ls/grep/git log,
+      // execute_sql SELECT/PRAGMA), and investigation is the point of Plan mode.
+      const mutatingCall = toolCallMutates(tool, tu.name, tu.input);
+      if (mutatingCall && cfg.planMode) {
         log(c.yellow(`  ⛔ ${tu.name} blocked (Plan mode is read-only)`));
         results.push({ type: "tool_result", tool_use_id: tu.id, content: "Blocked: Plan mode is read-only. User must /act to allow this.", is_error: true });
         continue;
@@ -638,7 +648,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       // deny → block; allow → auto-approve (skip the prompt); warn → tag the prompt. No match → "ask".
       let preApproved = false;
       let policyNote = "";
-      if (deps.policy?.length && tool.mutating && !readOnlyBash) {
+      if (deps.policy?.length && mutatingCall) {
         const d = evaluatePolicy(deps.policy, callCtx);
         if (d.action === "deny") {
           log(c.yellow(`  ⛔ ${tu.name} denied by policy rule "${d.rule?.name}"`));
@@ -650,15 +660,15 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       }
       // Capability tokens: a user-granted standing approval (/allow) auto-approves a matching call so the
       // gate doesn't re-prompt for, e.g., every git command. Consumes a finite token's use.
-      if (!preApproved && tool.mutating && !readOnlyBash && deps.approvals?.consume(callCtx)) {
+      if (!preApproved && mutatingCall && deps.approvals?.consume(callCtx)) {
         preApproved = true;
         log(c.dim(`  ✓ pre-approved by an active /allow grant`));
       }
       // Approval gate — "autopilot" never prompts; "ask" (default) prompts for every mutating tool. A
-      // read-only run_bash (ls/grep/git log) changes nothing, so it's never gated and never marks the turn
-      // mutated (no needless prompt, no spurious auto-verify). A policy "allow" or a token also skips it.
+      // Read-only calls change nothing, so they are never gated and never mark the turn mutated. A policy
+      // "allow" or a token also skips the interactive prompt.
       const destructive = tool.destructive || isDestructiveCall(tu.name, tu.input);
-      if (tool.mutating && !readOnlyBash && !preApproved && cfg.permissionMode !== "autopilot") {
+      if (mutatingCall && !preApproved && cfg.permissionMode !== "autopilot") {
         const ok = await approve(describe(tu.name, tu.input) + (destructive ? c.red("  [destructive]") : "") + policyNote);
         if (!ok) {
           log(c.yellow(`  ✗ denied: ${tu.name}`));
@@ -666,7 +676,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
           continue;
         }
       }
-      if (tool.mutating && !readOnlyBash) { mutated = true; deps.onMutate?.(); invalidateRepoMap(); } // mutation → ESC-warning + auto-verify + refresh the repo map next turn
+      if (mutatingCall) { mutated = true; deps.onMutate?.(); invalidateRepoMap(); } // mutation → ESC-warning + auto-verify + refresh the repo map next turn
       // PreToolUse hooks: a user-defined command runs BEFORE the tool and can block it (exit 2 /
       // {"decision":"block"}) or inject context. No-op when no hooks are configured.
       const hooks = deps.hooks; const hookExec = deps.hookExec;

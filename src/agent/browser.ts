@@ -108,7 +108,10 @@ export async function runBrowserCheck(opts: BrowserCheckOpts): Promise<BrowserCh
 
   let pw: any;
   try {
-    pw = await import("playwright");
+    // Keep this non-literal so Bun's fixed single-file bundle check does not inline Playwright's optional
+    // native watcher stack. Runtime still resolves it from node_modules when browser_check is used.
+    const playwrightPackage = "playwright";
+    pw = await import(playwrightPackage);
   } catch {
     result.error = "Playwright is not available in this project. (It ships with OB-1 — if this persists, the install is broken.)";
     return result;

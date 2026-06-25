@@ -12,7 +12,7 @@
 // uses); omit it for an isolated throwaway copy (Fusion candidates) where gating is pointless.
 import { callModel, type Message, type ContentBlock } from "../providers/gateway.ts";
 import { isOpenRouterEndpoint, type Config } from "../config.ts";
-import { normalizeToolOutput, type Tool } from "../agent/tools.ts";
+import { normalizeToolOutput, readOnlyToolView, toolCallMutates, type Tool } from "../agent/tools.ts";
 
 export interface WorkerResult {
   label: string;
@@ -52,7 +52,11 @@ function actionDesc(name: string, input: any): string {
 export function readOnlyTools(all: Map<string, Tool>): Map<string, Tool> {
   const deny = new Set(["memory_add", "relate", "load_mcp_tool"]);
   const m = new Map<string, Tool>();
-  for (const [k, t] of all) if (!t.mutating && !deny.has(t.def.name)) m.set(k, t);
+  for (const [k, t] of all) {
+    if (deny.has(t.def.name)) continue;
+    const view = readOnlyToolView(t);
+    if (view) m.set(k, view);
+  }
   return m;
 }
 
@@ -118,7 +122,7 @@ export async function runWorker(opts: {
         if (!tool) { results.push({ type: "tool_result", tool_use_id: tu.id, content: `unknown tool: ${tu.name}`, is_error: true }); continue; }
         // Capability is set by the tools map the caller passed; here we only gate a mutating call when an
         // `approve` callback is wired (Council writing the real tree). No callback ⇒ runs (Fusion copy).
-        if (tool.mutating && opts.approve && !(await opts.approve(actionDesc(tu.name, tu.input)))) {
+        if (toolCallMutates(tool, tu.name, tu.input) && opts.approve && !(await opts.approve(actionDesc(tu.name, tu.input)))) {
           results.push({ type: "tool_result", tool_use_id: tu.id, content: "User denied this action.", is_error: true }); continue;
         }
         // Read-only minds don't consume images — keep just the text (and avoid "[object Object]" on a

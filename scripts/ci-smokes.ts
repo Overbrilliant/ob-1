@@ -61,6 +61,8 @@ const SMOKES = [
   "slash-menu-smoke.ts",      // every /help command is reachable from the TUI slash menu (guards /rewind etc.)
   "error-format-smoke.ts",    // human-readable errors: API <status>:{json} → friendly title + action link + retry-only-when-useful
   "ask-smoke.ts",             // ask_user clarification tool (registration + request normalization)
+  "delivery-smoke.ts",        // delivery surface: execute_sql (real SQLite) + secrets + create_pr/pr_checks + expose_port
+  "delivery-e2e-smoke.ts",    // delivery surface DRIVEN THROUGH runTurn: sql/secret/pr tool roundtrips + no secret leak + prompt guidance
   "procs-smoke.ts",           // run_bash process registry (footer + ⌃P kill manager)
   "procs-reap-smoke.ts",      // background procs reaped on harness exit/signal: reapAll + detached group-kill (subtree) + e2e SIGTERM
   "subagents-smoke.ts",       // spawn_subagents: registry + runSubagents parallel/cap + runTurn integration

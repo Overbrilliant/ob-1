@@ -22,6 +22,10 @@ import { runArchitectEdit } from "./architect.ts";
 import { callModel } from "../providers/gateway.ts";
 import { makeProcKiller, type ProcRegistry } from "./procs.ts";
 import { runBrowserCheck, formatBrowserCheck, defaultScreenshotPath } from "./browser.ts";
+import { classifySql, sqlMutates, runSqlite, formatSqlResult } from "./sql.ts";
+import { SecretStore } from "./secrets.ts";
+import { createPr, prChecks } from "./pr.ts";
+import { exposePort } from "./expose.ts";
 
 /** A one-shot model call returning plain text — the architect/editor pipeline's model seam (item #10). */
 async function askEditModel(cfg: Config, model: string, prompt: string): Promise<string> {
@@ -46,6 +50,38 @@ export interface Tool {
   mutating: boolean;     // requires approval + blocked in Plan mode
   destructive?: boolean; // tagged [destructive] in the approval prompt (in "ask" mode)
   run(input: any, ctx?: ToolRunCtx): Promise<ToolOutput> | ToolOutput;
+}
+
+/** Some tools are statically mutating but input-sensitive at call time. Treat pure reads as read-only so
+ *  they stay available in Plan mode / read-only workers without weakening the gate for writes. */
+export function isReadOnlyToolCall(name: string, input: any): boolean {
+  if (name === "run_bash") return classifyIntent(String(input?.command ?? "")) === "read-only";
+  if (name === "execute_sql" && typeof input?.sql === "string") {
+    const kind = classifySql(input.sql);
+    return kind === "read" || kind === "empty";
+  }
+  return false;
+}
+
+export function toolCallMutates(tool: Tool, name: string, input: any): boolean {
+  return tool.mutating && !isReadOnlyToolCall(name, input);
+}
+
+/** A read-only view of a tool for autonomous investigators. Input-sensitive readers like execute_sql
+ *  are wrapped so SELECT works while INSERT/DDL/destructive SQL is refused at execution time. */
+export function readOnlyToolView(tool: Tool): Tool | null {
+  if (!tool.mutating) return tool;
+  if (tool.def.name !== "execute_sql") return null;
+  return {
+    ...tool,
+    mutating: false,
+    run: (input, ctx) => {
+      if (toolCallMutates(tool, tool.def.name, input)) {
+        throw new Error("execute_sql is read-only in this context; use SELECT/PRAGMA/EXPLAIN only.");
+      }
+      return tool.run(input, ctx);
+    },
+  };
 }
 
 /** Normalize any tool return value to {text, images}. A string (or anything unexpected) → text-only, so
@@ -189,7 +225,12 @@ export class ReadCache {
 
 const MIN_DEDUP_CHARS = 200; // don't bother deduping tiny reads — the pointer barely saves anything
 
-export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn, procs?: ProcRegistry, todos?: TodoRegistry, readCache: ReadCache = new ReadCache()): Map<string, Tool> {
+/** Optional host-wired extras: the session secret store (interactive masked input) for request_secret /
+ *  check_secret. Omitted in non-interactive contexts (subagents, smokes) — those tools then degrade to
+ *  reading already-set environment secrets. */
+export interface ToolExtras { secrets?: SecretStore }
+
+export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn, procs?: ProcRegistry, todos?: TodoRegistry, readCache: ReadCache = new ReadCache(), extras: ToolExtras = {}): Map<string, Tool> {
   const tools = new Map<string, Tool>();
   const add = (t: Tool) => tools.set(t.def.name, t);
 
@@ -950,6 +991,164 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
     },
   });
 
+  // ── Delivery surface: database, secrets, PR/CI, public hosting ──────────────────────────────────
+
+  // execute_sql — run SQL against a SQLite database file in the workspace. Reads return rows; writes are
+  // approval-gated; whole-table DELETE/UPDATE and DROP/TRUNCATE are blocked unless allow_destructive:true.
+  add({
+    def: {
+      name: "execute_sql",
+      description:
+        "Run SQL against a SQLite database file in the workspace (uses Bun's built-in SQLite — no setup; " +
+        "the file is created if absent). A read (SELECT/PRAGMA/EXPLAIN) returns rows; INSERT/UPDATE/DELETE/" +
+        "CREATE/ALTER mutate and pass the approval gate. SAFETY: a DROP/TRUNCATE, or a DELETE/UPDATE with NO " +
+        "WHERE clause (whole-table), is REFUSED unless you set allow_destructive:true — prefer scoping with a " +
+        "WHERE, and use migrations for schema changes. Default db file is `.ob1/app.db`; pass `db` for another.",
+      input_schema: {
+        type: "object",
+        properties: {
+          sql: { type: "string", description: "the SQL statement(s) to run" },
+          db: { type: "string", description: "sqlite file path relative to the workspace (default .ob1/app.db)" },
+          allow_destructive: { type: "boolean", description: "required to run a DROP/TRUNCATE or an unscoped DELETE/UPDATE" },
+        },
+        required: ["sql"],
+      },
+    },
+    // Mutating: writes are approval-gated and blocked in Plan mode. (A read SELECT also passes the gate in
+    // "ask" mode — a small, safe cost; autopilot / a policy `allow` rule skip it. The destructive subset is
+    // additionally tagged [destructive] via isDestructiveCall and hard-blocked at run time unless opted in.)
+    mutating: true,
+    run: ({ sql, db, allow_destructive }) => {
+      if (typeof sql !== "string" || !sql.trim()) throw new Error("execute_sql needs a non-empty `sql` string");
+      const kind = classifySql(sql);
+      if (kind === "empty") return "execute_sql: empty statement.";
+      if (kind === "destructive" && !allow_destructive) {
+        throw new Error(`refused a ${/^\s*drop/i.test(sql) ? "DROP" : /^\s*truncate/i.test(sql) ? "TRUNCATE" : "whole-table DELETE/UPDATE"} — this is destructive. Add a WHERE clause to scope it, or pass allow_destructive:true if you really intend to wipe data.`);
+      }
+      const dbFile = (typeof db === "string" && db.trim()) ? db.trim() : ".ob1/app.db";
+      const dbPath = safePath(cfg, dbFile); // keep the DB inside the workspace
+      if (sqlMutates(sql)) mkdirSync(dirname(dbPath), { recursive: true });
+      return formatSqlResult(runSqlite(cfg.cwd, dbFile, sql));
+    },
+  });
+
+  // request_secret / check_secret — secure credential entry. Only meaningful when a secret store is wired
+  // (interactive host); both still report on secrets already present in the environment.
+  if (extras.secrets) {
+    const secrets = extras.secrets;
+    add({
+      def: {
+        name: "request_secret",
+        description:
+          "Ask the USER to provide a secret/credential (an API key, token, password) by name. The user types " +
+          "it into a masked prompt — it is NEVER shown to you, logged, or written to disk — and it becomes " +
+          "available to run_bash as an environment variable of that name. Use this instead of asking the user " +
+          "to paste a key into the chat. Name it in UPPER_SNAKE_CASE (e.g. OPENAI_API_KEY, STRIPE_SECRET_KEY). " +
+          "NEVER echo, print, or commit a secret's value. If it's already set, this is a no-op.",
+        input_schema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "UPPER_SNAKE_CASE env-var name for the secret" },
+            reason: { type: "string", description: "short note shown to the user explaining why it's needed" },
+          },
+          required: ["name"],
+        },
+      },
+      mutating: false, // gathers user input; touches no files (like ask_user)
+      run: async ({ name, reason }) => {
+        if (!SecretStore.validName(String(name ?? ""))) throw new Error(`invalid secret name "${name}" — use UPPER_SNAKE_CASE (e.g. OPENAI_API_KEY)`);
+        if (secrets.has(name)) return `secret ${name} is already available (source: ${secrets.source(name)}); not re-requesting. It's exposed to run_bash as $${name}.`;
+        const captured = await secrets.request(name, reason ? String(reason) : undefined);
+        return captured
+          ? `secret ${name} captured from the user and exposed to run_bash as $${name} (value hidden). Reference it as "$${name}" in commands; never print or commit it.`
+          : `secret ${name} was not provided (the user cancelled or left it blank).`;
+      },
+    });
+    add({
+      def: {
+        name: "check_secret",
+        description: "Check whether a named secret is available (without revealing its value). Returns set/unset and where it came from. Use before a command that needs a credential.",
+        input_schema: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
+      },
+      mutating: false,
+      run: ({ name }) => {
+        const src = secrets.source(String(name ?? ""));
+        return src === "missing" ? `secret ${name} is NOT set. Use request_secret to ask the user for it.` : `secret ${name} is available (source: ${src}); reference it as $${name} in run_bash. Value not shown.`;
+      },
+    });
+  }
+
+  // create_pr / pr_checks — open a GitHub PR and gate on CI. Both shell out to `gh`; they degrade with
+  // actionable guidance when gh is absent. create_pr mutates (pushes a branch, opens a PR).
+  add({
+    def: {
+      name: "create_pr",
+      description:
+        "Open a GitHub pull request for the current branch's work (via the `gh` CLI). Pushes the branch and " +
+        "creates the PR with your title/body. It does NOT commit — stage & commit with run_bash first (it " +
+        "refuses to open a PR with no commits ahead of base). If you're on the default branch it derives a " +
+        "feature branch `ob1/<slug>` from the title; pass `branch` to choose one. Returns the PR URL. After " +
+        "opening, poll pr_checks and don't call the task done until CI is green.",
+      input_schema: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "PR title" },
+          body: { type: "string", description: "PR description (markdown)" },
+          base: { type: "string", description: "base branch to merge into (default: the repo's default branch)" },
+          branch: { type: "string", description: "feature branch to use/create (default: current, or ob1/<slug> if on base)" },
+          draft: { type: "boolean", description: "open as a draft PR" },
+        },
+        required: ["title"],
+      },
+    },
+    mutating: true,
+    run: (input) => createPr(input, { cwd: cfg.cwd }),
+  });
+  add({
+    def: {
+      name: "pr_checks",
+      description:
+        "Report the CI check status for a pull request (via `gh pr checks`). With wait:true it polls until " +
+        "the checks finish (or timeout_s elapses). Use this as the completion gate: treat the task as done " +
+        "only when this reports all checks passed. Defaults to the PR for the current branch.",
+      input_schema: {
+        type: "object",
+        properties: {
+          pr: { type: "string", description: "PR number or URL (default: the current branch's PR)" },
+          wait: { type: "boolean", description: "poll until checks finish (default false)" },
+          timeout_s: { type: "number", description: "max seconds to wait when wait:true (default 600, max 1800)" },
+        },
+      },
+    },
+    mutating: false, // read-only status poll
+    run: ({ pr, wait, timeout_s }, ctx) => prChecks({ pr, wait, timeoutS: timeout_s }, { cwd: cfg.cwd }).then((s) => ctx?.signal?.aborted ? "pr_checks: aborted." : s),
+  });
+
+  // expose_port — public tunnel to a local server. Needs the process registry (interactive host) to track
+  // the tunnel; mutating because it exposes a port to the public internet (an outward-facing side effect).
+  add({
+    def: {
+      name: "expose_port",
+      description:
+        "Open a PUBLIC URL tunnelling to a local server (e.g. a dev server you started with run_bash " +
+        "background). Auto-selects an installed tunnel client (cloudflared / localtunnel / localhost.run), " +
+        "runs it in the background, and returns the public https URL — so a frontend/app can be tested via a " +
+        "real URL, not just localhost. The tunnel is TEMPORARY (not production hosting). Start the server " +
+        "first, then expose its port.",
+      input_schema: {
+        type: "object",
+        properties: {
+          port: { type: "number", description: "the local port to expose (the server must already be listening)" },
+          provider: { type: "string", enum: ["cloudflared", "localtunnel", "localhost.run"], description: "force a specific tunnel client (default: first installed)" },
+        },
+        required: ["port"],
+      },
+    },
+    mutating: true,
+    destructive: false,
+    run: ({ port, provider }, ctx) => exposePort(Number(port), { cwd: cfg.cwd, procs, signal: ctx?.signal }, provider),
+  });
+
   return tools;
 }
 
@@ -958,5 +1157,7 @@ export function isDestructiveCall(name: string, input: any): boolean {
   // Semantic intent (rm/shred/dd/mkfs, git reset --hard / push --force / clean -fd, …) — richer and more
   // accurate than the old single regex, so the approval gate's [destructive] tag catches more real cases.
   if (name === "run_bash" && typeof input?.command === "string") return classifyIntent(input.command) === "destructive";
+  // A destructive SQL statement (DROP/TRUNCATE or an unscoped DELETE/UPDATE) gets the [destructive] tag too.
+  if (name === "execute_sql" && typeof input?.sql === "string") return classifySql(input.sql) === "destructive";
   return false;
 }

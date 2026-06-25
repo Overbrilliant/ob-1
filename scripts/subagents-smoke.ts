@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { AgentRegistry } from "../src/agent/agent-registry.ts";
 import { runSubagents, formatSubagentFindings, formatSubagentReport, writeSubagentReport, reportEnabled, stripTools, MAX_SUBTASKS, type SubagentsResult, type SubagentTask } from "../src/multimind/subagents.ts";
 import { runTurn, type TurnDeps } from "../src/agent/loop.ts";
-import type { WorkerResult, runWorker } from "../src/multimind/runtime.ts";
+import { readOnlyTools, type WorkerResult, type runWorker } from "../src/multimind/runtime.ts";
 import type { Tool } from "../src/agent/tools.ts";
 import type { ModelResponse } from "../src/providers/types.ts";
 import { loadConfig } from "../src/config.ts";
@@ -55,6 +55,22 @@ const cfg = { ...loadConfig(), apiKey: "test-key", dataDir } as any;
   const tools = new Map<string, Tool>([mk("read_file"), mk("spawn_subagents"), mk("escalate"), mk("write_file", true)]);
   const stripped = stripTools(tools, ["spawn_subagents", "escalate"]);
   check("stripTools removes the named tools", !stripped.has("spawn_subagents") && !stripped.has("escalate") && stripped.has("read_file"));
+}
+
+// ── readOnlyTools: input-sensitive mutating tools keep their read-only surface ──
+{
+  const mk = (name: string, mutating = false, run: Tool["run"] = async () => ""): [string, Tool] => [name, { def: { name, description: "", input_schema: { type: "object" } }, mutating, run }];
+  const tools = new Map<string, Tool>([
+    mk("read_file"),
+    mk("write_file", true),
+    mk("execute_sql", true, async () => "sql-ok"),
+  ]);
+  const ro = readOnlyTools(tools);
+  check("readOnlyTools keeps read tools and drops generic mutators", ro.has("read_file") && !ro.has("write_file"));
+  check("readOnlyTools keeps execute_sql for SELECT", ro.has("execute_sql") && String(await ro.get("execute_sql")!.run({ sql: "SELECT 1" })) === "sql-ok");
+  let blocked = false;
+  try { await ro.get("execute_sql")!.run({ sql: "INSERT INTO t VALUES (1)" }); } catch { blocked = true; }
+  check("readOnlyTools blocks mutating execute_sql input", blocked);
 }
 
 // ── runSubagents: parallel under cap + clamp + registry + read-only/no-nesting tool set ──

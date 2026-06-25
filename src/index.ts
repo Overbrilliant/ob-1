@@ -24,6 +24,7 @@ import { maybeLearnSkill } from "./skills/learn.ts";
 import { approxTokens } from "./agent/context.ts";
 import { runCurator, readUsage } from "./skills/usage.ts";
 import { buildTools, ReadCache, type Tool, type AskUserFn, type AskUserRequest } from "./agent/tools.ts";
+import { SecretStore } from "./agent/secrets.ts";
 import { ProcRegistry } from "./agent/procs.ts";
 import { AgentRegistry } from "./agent/agent-registry.ts";
 import { TodoRegistry } from "./agent/todo-registry.ts";
@@ -157,7 +158,14 @@ const todos = new TodoRegistry();
 // Shared per-turn read-dedup cache (token optimization). The same instance is baked into `tools`'
 // read_file and handed to runTurn (via turnDeps) so the loop can clear it at turn start / on eviction.
 const readCache = new ReadCache();
-const tools = buildTools(cfg, store, uiAskUser, procs, todos, readCache);
+// Session secret store for request_secret / check_secret. The masked prompt routes through the active UI
+// (ui.prompt — implemented in both the REPL and the TUI); the closure runs lazily mid-turn, by which point
+// `ui` is set. A captured value is exposed to run_bash children as $NAME and is never logged/persisted.
+const secrets = new SecretStore({
+  prompt: async (name, reason) =>
+    ui.prompt ? ui.prompt({ title: `Secret · ${name}`, question: reason ? `Enter ${name} — ${reason}` : `Enter value for ${name}`, mask: true }) : null,
+});
+const tools = buildTools(cfg, store, uiAskUser, procs, todos, readCache, { secrets });
 // Declarative policy rules (.ob1/policy.json in the workspace): pre-decide tool calls (allow/deny/warn)
 // before the approval gate. Best-effort: a malformed file just yields no rules (errors surfaced at boot).
 const policy = loadPolicy(cfg.cwd);
@@ -178,7 +186,7 @@ const hookExec = async (command: string, stdin: string): Promise<{ code: number;
 // Build a fresh tool map scoped to a different cwd — used by Fusion to give each candidate the FULL
 // toolset inside its own writable workspace copy (file tools close over cfg.cwd, so a copy needs its
 // own map, not just a different cfg passed to runWorker). Shares the same store/procs/todos/askUser.
-const mkTools = (cwd: string): Map<string, Tool> => buildTools({ ...cfg, cwd }, store, uiAskUser, procs, todos);
+const mkTools = (cwd: string): Map<string, Tool> => buildTools({ ...cfg, cwd }, store, uiAskUser, procs, todos, undefined, { secrets });
 let mcp: McpLoadResult = { clients: [], tools: [], summary: [] };
 let deferredMcp = new Map<string, Tool>(); // MCP tools not sent to the model until load_mcp_tool activates them
 let history: Message[] = [];
