@@ -1,5 +1,5 @@
 // Compile OB-1 to a single self-contained executable (bundles the Bun runtime — no Bun needed to RUN
-// it). Usage: bun run scripts/build-bin.ts [outfile]   (default ./ob1)
+// it). Usage: bun run scripts/build-bin.ts [outfile] [bun-target]   (default ./ob1, current platform)
 //
 // Ink lazily imports `react-devtools-core` only under DEV (reconciler.js gates it on
 // process.env.DEV === 'true'), but the bundler still pulls `devtools.js` into the graph, which
@@ -13,12 +13,13 @@
 export {}; // make this a module so top-level await is allowed
 
 const outfile = process.argv[2] ?? "ob1";
+const target = process.argv[3] || process.env.OB1_BUILD_TARGET || undefined;
 
 const out = await Bun.build({
   entrypoints: ["./src/index.ts"],
   target: "bun",
   // @ts-ignore — `compile` is supported by Bun.build (produces a standalone executable)
-  compile: { outfile },
+  compile: target ? { outfile, target } : { outfile },
   plugins: [
     {
       name: "stub-react-devtools-core",
@@ -35,4 +36,4 @@ if (!out.success) {
   for (const log of out.logs) console.error("  " + log.message);
   process.exit(1);
 }
-console.log(`✓ built ${outfile}`);
+console.log(`✓ built ${outfile}${target ? ` (${target})` : ""}`);

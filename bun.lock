@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "ob1",
+      "name": "@overbrilliant/ob1",
       "dependencies": {
         "ink": "^7.1.0",
         "ink-text-input": "^6.0.0",

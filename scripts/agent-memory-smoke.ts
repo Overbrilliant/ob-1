@@ -54,6 +54,10 @@ try {
   const history: Message[] = [
     { role: "assistant", content: [{ type: "tool_use", id: "bash-1", name: "run_bash", input: { command: "bun test" } }] },
     { role: "user", content: [{ type: "tool_result", tool_use_id: "bash-1", content: "exit 0\n2 tests passed" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "browser-1", name: "browser_check", input: { url: "site/index.html" } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "browser-1", content: "✓ browser_check PASSED" }] },
+    { role: "assistant", content: [{ type: "tool_use", id: "tasks-1", name: "update_tasks", input: { tasks: [{ content: "Verify", status: "completed" }] } }] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "tasks-1", content: "task list updated" }] },
     { role: "assistant", content: [{ type: "text", text: "Done. Known issue: follow-up by adding browser coverage." }] },
   ];
   const { episode } = rememberEpisode(dir, "verify episode memory", "solo", history);
@@ -66,8 +70,10 @@ try {
 
   const candidates = listPromotionCandidates(dir);
   check("promotion candidates are created from durable signals", candidates.some((c) => c.kind === "validated-check") && candidates.some((c) => c.kind === "known-issue"));
+  check("behavior and quality-pattern candidates are created", candidates.some((c) => c.kind === "validated-behavior-check") && candidates.some((c) => c.kind === "quality-pattern"));
   const promoted = promoteCandidates(dir, "all");
   check("promotion writes candidates into memory", promoted.promoted.length === candidates.length && (promoted.memory.knownIssues?.length ?? 0) > 0);
+  check("promotion writes behavior checks and quality patterns", (promoted.memory.validatedBehaviorChecks?.length ?? 0) > 0 && (promoted.memory.qualityPatterns?.length ?? 0) > 0);
   check("promoted candidates disappear from review list", listPromotionCandidates(dir).length === 0);
 } finally {
   rmSync(dir, { recursive: true, force: true });

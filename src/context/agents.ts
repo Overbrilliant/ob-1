@@ -14,7 +14,10 @@ export interface ProjectInfo {
 
 export interface AgentsMemory {
   validatedChecks?: string[];
+  validatedBehaviorChecks?: string[];
   projectFacts?: string[];
+  qualityPatterns?: string[];
+  failurePatterns?: string[];
   knownIssues?: string[];
   lastEpisode?: { id: string; title: string; ts: string };
 }
@@ -84,7 +87,10 @@ ${PROJECT_END}`;
 
 function memoryBlock(memory: AgentsMemory = {}): string {
   const checks = memory.validatedChecks?.length ? memory.validatedChecks : ["(none recorded yet)"];
+  const behavior = memory.validatedBehaviorChecks?.length ? memory.validatedBehaviorChecks : ["(none recorded yet)"];
   const facts = memory.projectFacts?.length ? memory.projectFacts : ["(none promoted yet)"];
+  const quality = memory.qualityPatterns?.length ? memory.qualityPatterns : ["(none promoted yet)"];
+  const failures = memory.failurePatterns?.length ? memory.failurePatterns : ["(none recorded)"];
   const issues = memory.knownIssues?.length ? memory.knownIssues : ["(none recorded)"];
   const episode = memory.lastEpisode
     ? `- Last episode: \`${memory.lastEpisode.id}\` — ${memory.lastEpisode.title} (${memory.lastEpisode.ts})`
@@ -95,8 +101,17 @@ function memoryBlock(memory: AgentsMemory = {}): string {
 ### Validated checks
 ${checks.map((x) => `- ${x}`).join("\n")}
 
+### Validated behavior checks
+${behavior.map((x) => `- ${x}`).join("\n")}
+
 ### Durable facts
 ${facts.map((x) => `- ${x}`).join("\n")}
+
+### Quality patterns
+${quality.map((x) => `- ${x}`).join("\n")}
+
+### Failure patterns
+${failures.map((x) => `- ${x}`).join("\n")}
 
 ### Known issues / follow-ups
 ${issues.map((x) => `- ${x}`).join("\n")}

@@ -5,7 +5,7 @@ import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, saveSettings, savedProviderCreds, bakedProviderCreds, hasPersistedSettings, persistedSettings, settingsHealth, ob1ServerUrl, loadAuthToken, persistSubscription, isOpenRouterEndpoint, type Mode, type SandboxMode, type PermissionMode, type Effort } from "./config.ts";
+import { loadConfig, saveSettings, savedProviderCreds, bakedProviderCreds, hasPersistedSettings, persistedSettings, settingsHealth, ob1ServerUrl, loadAuthToken, persistSubscription, isOpenRouterEndpoint, type Mode, type SandboxMode, type PermissionMode, type Effort, type QualityMode } from "./config.ts";
 import { formatSettingsIssues } from "./config-validate.ts";
 import { loadPolicy, loadTrust, saveTrust, recordTrust, isTrusted, effectivePermissionMode } from "./safety/policy.ts";
 import { readGitState, analyzeBranch } from "./context/git-state.ts";
@@ -47,6 +47,8 @@ import { runEval, computeMatched, computeCapability } from "./eval/harness.ts";
 import { renderReport, renderCapability } from "./eval/report.ts";
 import { runTurn, describe as describeTool } from "./agent/loop.ts";
 import { runVerification, shellExec } from "./agent/verify.ts";
+import { latestQualityLedger, formatQualityLedger } from "./agent/task-quality.ts";
+import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
 import type { Message, Usage } from "./providers/types.ts";
 import { callModel } from "./providers/gateway.ts";
 import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning } from "./providers/models.ts";
@@ -54,11 +56,33 @@ import { FREELLMAPI, profileById, normalizeBaseUrl, fetchModels, type ProviderPr
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
 
+const CLI_VERSION = "0.1.0";
+const SHELL_HELP = `OB-1 ${CLI_VERSION}
+
+Usage:
+  ob1                 Start the interactive CLI in the current directory
+  ob1 onboard         Run guided setup
+  ob1 login           Sign in to the managed OB-1 server
+  ob1 signup          Create an account on the managed OB-1 server
+  ob1 logout          Remove the local token
+  ob1 --help          Show this help
+  ob1 --version       Print the version
+
+Inside OB-1, use /help for interactive commands.`;
+
 // `ob1 login` / `ob1 signup` / `ob1 logout` — handled before any heavy startup (memory, MCP,
 // tree-sitter). Auth is email + password straight to the managed server, which returns the per-user
 // bearer token — the only credential the open-source client holds (real provider keys live server-side).
 {
   const sub = Bun.argv[2];
+  if (sub === "--version" || sub === "-v" || sub === "version") {
+    console.log(CLI_VERSION);
+    process.exit(0);
+  }
+  if (sub === "--help" || sub === "-h" || sub === "help") {
+    console.log(SHELL_HELP);
+    process.exit(0);
+  }
   if (sub === "login" || sub === "signup" || sub === "logout") {
     const { runLogin, runLogout } = await import("./cli/login.ts");
     if (sub === "logout") runLogout();
@@ -381,6 +405,7 @@ ${c.bold("Commands")}
   ${c.cyan("/memory evolve")} on|off  consolidate new facts (add/update/supersede/dedup) instead of just appending
   ${c.cyan("/memory reflect")} on|off  distil accumulated facts into higher-level insights (reflection trees)
   ${c.cyan("/memory autolink")} on|off  auto-link related facts on write (rides /memory evolve)
+  ${c.cyan("/quality")} ${c.dim("[normal|strict|off|show|scenarios]")}  task-quality contract + evidence ledger
   ${c.cyan("/usage")}                monthly credit pool + token/cost analytics
 
   ${c.bold("Orchestration modes")}
@@ -803,6 +828,17 @@ function setEffort(e: Effort): void {
   console.log(`  effort → ${c.yellow(e)}${note}`);
 }
 
+function setQualityMode(q: QualityMode): void {
+  cfg.qualityMode = q;
+  saveSettings(cfg);
+  const note = q === "strict"
+    ? " — missing required evidence marks the run blocked"
+    : q === "normal"
+      ? " — compact contract + evidence ledger"
+      : " — quality contract disabled";
+  console.log(`  quality → ${q === "off" ? "off" : c.yellow(q)}${c.dim(note)}`);
+}
+
 // ─── Per-setting pickers ───────────────────────────────────────────────────────
 // Each opens the same arrow-key list — no typing (↑↓ navigate · ↵/→ select · ←/Esc back). Shared by
 // /models and by the bare /mode · /sandbox · /skill · /agents commands on a TTY. The TUI footer
@@ -874,6 +910,15 @@ async function pickRepoMap(): Promise<void> {
     { label: "off", hint: "don't inject it (the repo_map tool still works on demand)", value: "off" },
   ], cfg.repoMap ? "on" : "off");
   if (a) { cfg.repoMap = a === "on"; console.log(`  repo map ${cfg.repoMap ? c.yellow("ON") : "off"}${c.dim(" — auto codebase structure in context, refreshed as files change")}`); }
+}
+async function pickQuality(): Promise<void> {
+  if (!ui.pick) return;
+  const q = await ui.pick("Task quality", [
+    { label: "normal", hint: "compact quality contract + .ob1/runs evidence ledger (default)", value: "normal" },
+    { label: "strict", hint: "same, but marks the run blocked if required evidence is missing", value: "strict" },
+    { label: "off", hint: "no quality contract or run ledger", value: "off" },
+  ], cfg.qualityMode);
+  if (q) setQualityMode(q as QualityMode);
 }
 async function pickSkill(): Promise<void> {
   if (!ui.pick) return;
@@ -1289,7 +1334,7 @@ async function handleCommand(line: string): Promise<boolean> {
       // /settings was a menu that just duplicated the slash commands. It's gone — every setting is now a
       // first-class command. Keep a friendly redirect so old muscle memory isn't a dead "unknown command".
       console.log(c.dim("  settings are now individual commands — press / to browse them:"));
-      console.log(c.dim("    /mode · /model · /effort · /freellm · /permission · /sandbox · /autoroute · /subagents · /repomap · /trust · /allow"));
+      console.log(c.dim("    /mode · /model · /effort · /freellm · /permission · /sandbox · /autoroute · /subagents · /repomap · /quality · /trust · /allow"));
       break;
     case "freellm": case "free-llm": {
       if (ui.pick) { await pickFreeLLM(); break; } // managed setup / manage on a TTY
@@ -1309,6 +1354,30 @@ async function handleCommand(line: string): Promise<boolean> {
       if (rest[0] === "on" || rest[0] === "off") { cfg.repoMap = rest[0] === "on"; console.log(`  repo map ${cfg.repoMap ? c.yellow("ON") : "off"}${c.dim(" — auto codebase structure in context, refreshed as files change")}`); }
       else if (!rest[0] && ui.pick) await pickRepoMap();     // bare /repomap opens the picker on a TTY
       else console.log(c.red(`  usage: /repomap on|off (current: ${cfg.repoMap ? "on" : "off"})`));
+      break;
+    }
+    case "quality": {
+      const sub = rest[0]?.toLowerCase();
+      if (sub === "normal" || sub === "strict" || sub === "off") setQualityMode(sub as QualityMode);
+      else if (sub === "show" || !sub) {
+        if (!sub && ui.pick) { await pickQuality(); break; }
+        const latest = latestQualityLedger(cfg.cwd);
+        console.log(latest ? "\n" + formatQualityLedger(latest.ledger, latest.path) + "\n" : c.dim("  no quality runs yet — complete a task first"));
+      } else if (sub === "scenarios") {
+        const scenarios = loadQualityScenarios(cfg.cwd);
+        const latest = latestQualityLedger(cfg.cwd);
+        console.log(c.bold(`  Quality scenarios (${scenarios.length})`));
+        if (!latest) {
+          for (const s of scenarios) console.log(`    ${c.cyan(s.id)} ${c.dim("— " + (s.description ?? s.prompt))}`);
+          console.log(c.dim("  no quality run to score yet; run a task, then /quality scenarios"));
+        } else {
+          for (const s of scenarios) {
+            const score = scoreQualityLedger(s, latest.ledger);
+            const pct = Math.round(score.score * 100);
+            console.log(`    ${score.passed ? c.green("✓") : c.yellow("✗")} ${c.cyan(s.id)} ${pct}%${score.issues.length ? c.dim(" — " + score.issues.join("; ")) : ""}`);
+          }
+        }
+      } else console.log(c.red(`  usage: /quality normal|strict|off|show|scenarios (current: ${cfg.qualityMode})`));
       break;
     }
     case "autoroute": {

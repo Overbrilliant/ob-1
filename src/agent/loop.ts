@@ -19,6 +19,7 @@ import { repoMapSummary, invalidateRepoMap } from "../context/repomap.ts";
 import { listSkills } from "../skills/registry.ts";
 import { editContext, compactIfNeeded } from "./context.ts";
 import { detectChecks } from "./verify.ts";
+import { QualityRun, renderTaskQualityContract } from "./task-quality.ts";
 import { c, renderDiff, renderFriendly, explainError } from "../cli/ui.ts";
 import { runWorker, type WorkerEvent } from "../multimind/runtime.ts";
 import { runSubagents, formatSubagentFindings, writeSubagentReport, reportEnabled, MAX_SUBTASKS, type SubagentTask } from "../multimind/subagents.ts";
@@ -416,6 +417,8 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
 
   history.push({ role: "user", content: userInput });
   deps.readCache?.clear(); // start each turn with a clean read-dedup cache (token optimization)
+  const qualityMode = cfg.qualityMode ?? "normal";
+  const quality = qualityMode === "off" ? null : new QualityRun(cfg.cwd, userInput, qualityMode);
 
   let mutated = false;           // did a write/edit/bash run since the last verification? → drives auto-verify
   let explicitCheckPassedSinceMutation = false; // the agent already ran a detected check after editing
@@ -431,10 +434,13 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   // Just-in-time retrieval: pull the top-k facts relevant to THIS turn into context (R3).
   let retrieved: Fact[] = [];
   try { retrieved = await store.searchSemantic(userInput, 6); } catch { /* ignore */ }
+  for (const f of retrieved) quality?.addContext(`memory:#${f.id} ${f.fact}`);
   const system = systemPrompt(cfg, store, retrieved);
-  // These toggle instructions are config-stable for the whole session, so they belong in the CACHED
-  // stable block (index 0) — not the volatile tail — so they don't break the prompt cache each turn.
+  // Config-stable toggle instructions belong in the CACHED stable block (index 0). Per-turn guidance
+  // belongs in the volatile tail (index 1), otherwise it would bust the prompt cache every task.
   const addStable = (s: string) => { system[0].text += "\n\n" + s; };
+  const addVolatile = (s: string) => { system[1].text += "\n\n" + s; };
+  if (quality) addVolatile(renderTaskQualityContract(quality.ledger.profile, qualityMode));
   if (deps.canEscalate)
     addStable("Auto-route is ON: you have the `escalate` tool. If this turn is too hard or high-stakes to solve well in a single pass, call escalate FIRST to forward it to a heavier mode; otherwise just answer (don't escalate routine work).");
   if (deps.canSpawn)
@@ -538,6 +544,8 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         const hint = recoveryHint(err.message);
         if (hint) log(c.dim(`  ↻ ${hint}`));
         deps.onErrorAction?.(fe.action);
+        quality?.recordFailure("model", "model-call", err.message);
+        quality?.finish("error", err.message);
       }
       return {};
     }
@@ -563,6 +571,8 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       if (deps.verify && mutated && !deps.signal?.aborted) {
         log(c.gray("  ⚙ verifying changes…"));
         const v = await deps.verify();
+        quality?.recordAutoVerification(v);
+        quality?.save();
         if (v?.ran && !v.ok) {
           if (fixRounds < autofixMax) {
             fixRounds++;
@@ -600,6 +610,8 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         const u = resp.usage;
         log(c.gray(`  [tokens in:${u.input_tokens} out:${u.output_tokens}${u.cache_read_input_tokens ? ` cache-read:${u.cache_read_input_tokens}` : ""}${u.estimated ? " (est)" : ""}]`));
       }
+      const finalText = resp.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim();
+      quality?.finish("completed", finalText);
       return {};
     }
 
@@ -638,9 +650,13 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       if (tu.name === "spawn_subagents" && deps.canSpawn) {
         log(c.gray(`  → ${describe(tu.name, tu.input)}`));
         try {
-          results.push({ type: "tool_result", tool_use_id: tu.id, content: await handleSpawn(tu.input, deps, userInput) });
+          const out = await handleSpawn(tu.input, deps, userInput);
+          quality?.recordTool(tu.name, tu.input, true, out, false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
         } catch (e) {
-          results.push({ type: "tool_result", tool_use_id: tu.id, content: `error: ${(e as Error).message}`, is_error: true });
+          const msg = (e as Error).message;
+          quality?.recordFailure(tu.name, `${tu.name}:${msg}`, msg); quality?.recordTool(tu.name, tu.input, false, msg, false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: `error: ${msg}`, is_error: true });
         }
         // The finished batch stays in the footer (with done/failed status) so the user can review it
         // while Solo synthesizes; the dispatcher clears the registry when the whole turn ends.
@@ -649,14 +665,19 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       if (tu.name === "spawn_write_subagents" && deps.canSpawnWrite) {
         log(c.gray(`  → ${describe(tu.name, tu.input)}`));
         try {
-          results.push({ type: "tool_result", tool_use_id: tu.id, content: await handleSpawnWrite(tu.input, deps) });
+          const out = await handleSpawnWrite(tu.input, deps);
+          quality?.recordTool(tu.name, tu.input, true, out, true); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
         } catch (e) {
-          results.push({ type: "tool_result", tool_use_id: tu.id, content: `error: ${(e as Error).message}`, is_error: true });
+          const msg = (e as Error).message;
+          quality?.recordFailure(tu.name, `${tu.name}:${msg}`, msg); quality?.recordTool(tu.name, tu.input, false, msg, true); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: `error: ${msg}`, is_error: true });
         }
         continue;
       }
       const tool = tools.get(tu.name);
       if (!tool) {
+        quality?.recordFailure(tu.name, `unknown-tool:${tu.name}`, `unknown tool: ${tu.name}`); quality?.save();
         results.push({ type: "tool_result", tool_use_id: tu.id, content: `unknown tool: ${tu.name}`, is_error: true });
         continue;
       }
@@ -665,6 +686,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       const mutatingCall = toolCallMutates(tool, tu.name, tu.input);
       if (mutatingCall && cfg.planMode) {
         log(c.yellow(`  ⛔ ${tu.name} blocked (Plan mode is read-only)`));
+        quality?.recordTool(tu.name, tu.input, false, "Blocked: Plan mode is read-only", false); quality?.save();
         results.push({ type: "tool_result", tool_use_id: tu.id, content: "Blocked: Plan mode is read-only. User must /act to allow this.", is_error: true });
         continue;
       }
@@ -681,6 +703,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         const d = evaluatePolicy(deps.policy, callCtx);
         if (d.action === "deny") {
           log(c.yellow(`  ⛔ ${tu.name} denied by policy rule "${d.rule?.name}"`));
+          quality?.recordTool(tu.name, tu.input, false, `Blocked by policy rule "${d.rule?.name}"`, false); quality?.save();
           results.push({ type: "tool_result", tool_use_id: tu.id, content: `Blocked by policy rule "${d.rule?.name}". This action is not permitted in this workspace.`, is_error: true });
           continue;
         }
@@ -701,6 +724,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         const ok = await approve(describe(tu.name, tu.input) + (destructive ? c.red("  [destructive]") : "") + policyNote);
         if (!ok) {
           log(c.yellow(`  ✗ denied: ${tu.name}`));
+          quality?.recordTool(tu.name, tu.input, false, "User denied this action", false); quality?.save();
           results.push({ type: "tool_result", tool_use_id: tu.id, content: "User denied this action.", is_error: true });
           continue;
         }
@@ -729,6 +753,20 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
           const post = await runHooks(hooks, { event: "PostToolUse", tool: tu.name, input: tu.input, output: out }, hookExec);
           if (post.feedback) out += `\n\n[PostToolUse hook]\n${post.feedback}`;
         }
+        if (tu.name === "run_bash") {
+          const command = String((tu.input as any)?.command ?? "");
+          const recovery = quality?.recordCommandOutcome(command, out);
+          if (recovery) out += `\n\n[Quality recovery]\n${recovery}`;
+        }
+        const qualityOk = tu.name === "verify"
+          ? !/^✗|FAILED|.*NOT met/i.test(out)
+          : tu.name === "browser_check"
+            ? out.startsWith("✓ browser_check PASSED")
+            : tu.name === "run_bash"
+              ? isSuccessfulForegroundCommand(out) || out.startsWith("started background process")
+              : true;
+        quality?.recordTool(tu.name, tu.input, qualityOk, out, workspaceChange);
+        quality?.save();
         // Carry images (a browser_check screenshot) as a content-block array so a vision model can SEE
         // them; otherwise a plain string keeps the overwhelmingly-common text-only case on the wire.
         results.push({ type: "tool_result", tool_use_id: tu.id, content: toolResultContent(out, images) });
@@ -749,6 +787,10 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
           const fail = await runHooks(hooks, { event: "PostToolUseFailure", tool: tu.name, input: tu.input, error: msg }, hookExec);
           if (fail.feedback) content += `\n\n[PostToolUseFailure hook]\n${fail.feedback}`;
         }
+        const repeat = quality?.recordFailure(tu.name, `${tu.name}:${msg}`, msg) ?? 0;
+        if (repeat >= 2) content += `\n\n[Quality recovery]\nRepeated ${tu.name} failure (${repeat}×). Diagnose the root cause and run the smallest targeted check before retrying.`;
+        quality?.recordTool(tu.name, tu.input, false, msg, workspaceChange);
+        quality?.save();
         results.push({ type: "tool_result", tool_use_id: tu.id, content, is_error: true });
         log(c.red(`  ✗ ${tu.name} failed: ${msg.split("\n")[0].slice(0, 200)}`)); // surface tool errors, don't swallow them
       }
@@ -761,5 +803,6 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       ? `  (safety stop after ${MAX_STEPS} steps — likely a stuck loop; the work so far is kept, say "continue" to resume)`
       : `  (paused after ${MAX_STEPS} steps — the work so far is kept; say "continue" to keep going, or raise the limit with OB1_MAX_STEPS)`,
   ));
+  quality?.finish("blocked", `stopped after ${MAX_STEPS} steps`);
   return {};
 }

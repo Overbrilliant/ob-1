@@ -8,20 +8,21 @@ const check = (n: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} $
 // ── valid settings pass clean ─────────────────────────────────────────────────
 const good = validateSettings({
   provider: "openai", model: "qwen/qwen3.6-plus", mode: "solo", permissionMode: "autopilot",
-  sandbox: "workspace-write", effort: "high", planMode: false, repoMap: true, checkpoint: true,
+  sandbox: "workspace-write", effort: "high", qualityMode: "strict", planMode: false, repoMap: true, checkpoint: true,
   providerProfile: "openrouter", providerUrl: "https://x/v1", providerKey: "k",
   providerCreds: { openrouter: { url: "https://x/v1", key: "k" } },
 });
 check("valid settings → ok, no errors", good.ok && good.errors.length === 0);
-check("valid settings preserved verbatim", good.value.mode === "solo" && good.value.sandbox === "workspace-write" && good.value.effort === "high");
+check("valid settings preserved verbatim", good.value.mode === "solo" && good.value.sandbox === "workspace-write" && good.value.effort === "high" && good.value.qualityMode === "strict");
 check("valid providerCreds preserved", good.value.providerCreds?.openrouter?.key === "k");
 
 // ── invalid enum / type values are DROPPED with an error (default applies) ─────
-const bad = validateSettings({ mode: "yolo", sandbox: 42, permissionMode: "ask", planMode: "yes", effort: "extreme", model: "m" });
+const bad = validateSettings({ mode: "yolo", sandbox: 42, permissionMode: "ask", planMode: "yes", effort: "extreme", qualityMode: "max", model: "m" });
 check("invalid enum (mode) → error + dropped", bad.errors.some((e) => e.field === "mode") && !("mode" in bad.value));
 check("invalid type (sandbox number) → error + dropped", bad.errors.some((e) => e.field === "sandbox") && !("sandbox" in bad.value));
 check("invalid bool (planMode string) → error + dropped", bad.errors.some((e) => e.field === "planMode") && !("planMode" in bad.value));
 check("invalid effort → error + dropped", bad.errors.some((e) => e.field === "effort"));
+check("invalid qualityMode → error + dropped", bad.errors.some((e) => e.field === "qualityMode") && !("qualityMode" in bad.value));
 check("VALID fields survive alongside invalid ones", bad.value.permissionMode === "ask" && bad.value.model === "m");
 check("ok=false when there are errors", bad.ok === false);
 

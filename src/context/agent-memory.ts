@@ -17,7 +17,7 @@ export interface EpisodeRecord {
 
 export interface PromotionCandidate {
   id: string;
-  kind: "validated-check" | "project-fact" | "known-issue";
+  kind: "validated-check" | "validated-behavior-check" | "project-fact" | "quality-pattern" | "failure-pattern" | "known-issue";
   text: string;
   count: number;
   firstSeen: string;
@@ -197,6 +197,16 @@ function updateCandidates(cwd: string, episode: EpisodeRecord): PromotionCandida
   for (const cmd of episode.commands) {
     if (cmd.ok && looksLikeCheck(cmd.command)) upsertCandidate(candidates, "validated-check", `Use \`${cmd.command}\` to validate this project.`, episode);
   }
+  if (episode.tools.includes("browser_check")) {
+    upsertCandidate(candidates, "validated-behavior-check", "Use `browser_check` to validate interactive or visual UI changes.", episode);
+  }
+  if (episode.tools.includes("update_tasks")) {
+    upsertCandidate(candidates, "quality-pattern", "For multi-step work, maintain the visible task list and update it as each step changes status.", episode);
+  }
+  const failedChecks = episode.commands.filter((cmd) => cmd.ok === false && looksLikeCheck(cmd.command));
+  for (const cmd of failedChecks.slice(0, 3)) {
+    upsertCandidate(candidates, "failure-pattern", `When \`${cmd.command}\` fails, inspect the failure output and rerun the smallest targeted check after fixing it.`, episode);
+  }
   if (/pre-existing|known issue|follow[- ]?up|todo/i.test(episode.finalText ?? "")) {
     upsertCandidate(candidates, "known-issue", (episode.finalText ?? "").split("\n")[0].slice(0, 240), episode);
   }
@@ -242,6 +252,9 @@ export function promoteCandidates(cwd: string, ids: string[] | "all"): { promote
   const memory = loadAgentsMemory(cwd);
   for (const c of chosen) {
     if (c.kind === "validated-check") memory.validatedChecks = appendUnique(memory.validatedChecks, c.text);
+    else if (c.kind === "validated-behavior-check") memory.validatedBehaviorChecks = appendUnique(memory.validatedBehaviorChecks, c.text);
+    else if (c.kind === "quality-pattern") memory.qualityPatterns = appendUnique(memory.qualityPatterns, c.text);
+    else if (c.kind === "failure-pattern") memory.failurePatterns = appendUnique(memory.failurePatterns, c.text);
     else if (c.kind === "known-issue") memory.knownIssues = appendUnique(memory.knownIssues, c.text);
     else memory.projectFacts = appendUnique(memory.projectFacts, c.text);
     c.promoted = true;

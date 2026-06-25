@@ -733,6 +733,7 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/rewind", "restore code/conversation to an earlier prompt (↑↓ · Enter)"],
   ["/map", "repository map"],
   ["/memory", "facts + relationships"],
+  ["/quality", "task quality: normal/strict/off + evidence"],
   ["/usage", "token + cost analytics"],
   // ── orchestration modes ──
   ["/autoroute", "Solo auto-routing on/off (↑↓ · Enter)"],

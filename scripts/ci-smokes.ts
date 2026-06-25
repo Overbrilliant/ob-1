@@ -26,8 +26,10 @@ const SMOKES = [
   "sandbox-smoke.ts",         // sandbox argv construction (bwrap + Seatbelt)
   "bash-validation-smoke.ts", // bash command intent classifier + block/warn/allow pipeline + run_bash guard
   "config-validate-smoke.ts", // settings schema validation: drop invalid fields, warn on unknown keys
+  "cli-flags-smoke.ts",       // package-manager flags: --version / --help exit before interactive startup
   "claims-smoke.ts",          // structured claim/report schema: typing + hash dedupe + projection + render
   "green-contract-smoke.ts",  // graduated green contract: level→kinds + pass/fail + known-flake tolerance
+  "task-quality-smoke.ts",    // task quality profile + evidence ledger + scenario scoring
   "recovery-smoke.ts",        // recovery recipes: failure classification + recipes + attempt-budget ledger
   "policy-smoke.ts",          // policy engine + folder trust + stale-branch detection
   "approval-tokens-smoke.ts", // capability approval tokens: /allow scopes + cover/consume + finite/revoke

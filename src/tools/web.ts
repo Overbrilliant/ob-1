@@ -3,7 +3,7 @@
 // multi-mind workers for research. The HTTP/JSON/HTML plumbing lives here as small pure helpers +
 // an injectable `fetchFn`, so it's unit-testable without the network.
 
-const UA = "OB-1/0.1 (+https://github.com/tashfeenahmed/ob1)";
+const UA = "OB-1/0.1 (+https://github.com/tashfeenahmed/ob-1)";
 const TIMEOUT_MS = 20_000;
 export type Fetcher = typeof fetch;
 

@@ -16,7 +16,7 @@ const origCwd = process.cwd();
 // Force OpenRouter provider + clear env that would override persisted values, so the test is hermetic.
 const savedEnv = { ...process.env };
 process.env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "test-key";
-delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS;
+delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_QUALITY;
 
 try {
   process.chdir(tmp);
@@ -30,6 +30,7 @@ try {
   check("fresh workspace → defaults", base.mode === "solo" && base.sandbox === "off" && base.permissionMode === "autopilot");
   check("auto-route defaults OFF", base.autoRoute === false);
   check("subagents default ON (parallel subagents available out of the box)", base.subagents === true);
+  check("quality mode defaults normal", base.qualityMode === "normal");
   check("no settings file yet", !hasPersistedSettings(base.settingsDir));
 
   // 2) change settings + save
@@ -38,6 +39,7 @@ try {
   base.permissionMode = "ask"; // deliberate ask must survive the autopilot default
   base.autoRoute = true;
   base.subagents = false; // toggled off → must persist (so the on default doesn't clobber a deliberate off)
+  base.qualityMode = "strict";
   base.model = "anthropic/claude-opus-4.8"; // canonical OpenRouter slug, same provider
   saveSettings(base);
   check("settings file written", hasPersistedSettings(base.settingsDir));
@@ -49,6 +51,7 @@ try {
   check("permission mode restored (deliberate ask survives the autopilot default)", restored.permissionMode === "ask", restored.permissionMode);
   check("auto-route restored", restored.autoRoute === true);
   check("subagents restored (a deliberate OFF survives the ON default)", restored.subagents === false);
+  check("quality mode restored", restored.qualityMode === "strict", restored.qualityMode);
   check("model restored (same provider)", restored.model === "anthropic/claude-opus-4.8", restored.model);
 
   // 4) explicit env var wins over persisted
@@ -61,7 +64,9 @@ try {
   check("env OB1_AUTO_ROUTE overrides persisted", loadConfig().autoRoute === false);
   process.env.OB1_SUBAGENTS = "on"; // persisted is false (above) → env must win
   check("env OB1_SUBAGENTS overrides persisted", loadConfig().subagents === true);
-  delete process.env.OB1_SANDBOX; delete process.env.OB1_MODEL; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS;
+  process.env.OB1_QUALITY = "off"; // persisted is strict (above) → env must win
+  check("env OB1_QUALITY overrides persisted", loadConfig().qualityMode === "off");
+  delete process.env.OB1_SANDBOX; delete process.env.OB1_MODEL; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_QUALITY;
 
   // 5) a saved model from a DIFFERENT provider is not applied (guard against cross-provider mismatch)
   saveSettings({ ...base, provider: "anthropic", model: "claude-some-direct-id" } as any);

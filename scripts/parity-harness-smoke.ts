@@ -8,14 +8,14 @@ import { runTurn, type TurnDeps } from "../src/agent/loop.ts";
 import { buildTools } from "../src/agent/tools.ts";
 import { loadConfig } from "../src/config.ts";
 import { MockBrain, asText, asToolUse, toolResultsIn } from "../src/eval/parity.ts";
-import type { Message } from "../src/providers/types.ts";
+import type { CallOpts, Message } from "../src/providers/types.ts";
 
 let fail = false;
 const check = (n: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} ${n}`); if (!ok) fail = true; };
 
 const dir = mkdtempSync(join(tmpdir(), "ob1-parity-"));
 const store = { searchSemantic: async () => [], listFacts: () => [], listRelationships: () => [] } as any;
-const baseCfg = { ...loadConfig(), apiKey: "test-key", cwd: dir, dataDir: dir, planMode: false, sandbox: "off", repoMap: false } as any;
+const baseCfg = { ...loadConfig(), apiKey: "test-key", cwd: dir, dataDir: dir, planMode: false, sandbox: "off", repoMap: false, qualityMode: "normal" } as any;
 
 function deps(cfg: any, brain: MockBrain, over: Partial<TurnDeps> = {}): TurnDeps {
   return {
@@ -32,6 +32,19 @@ function deps(cfg: any, brain: MockBrain, over: Partial<TurnDeps> = {}): TurnDep
   check("streaming_text: one model call", brain.steps === 1);
   check("streaming_text: assistant text recorded in history", history.some((m) => m.role === "assistant" && Array.isArray(m.content) && m.content.some((b: any) => b.type === "text" && b.text === "Hello there")));
   check("streaming_text: the user turn was sent", !!brain.request(0)?.messages.some((m) => m.role === "user" && m.content === "hi"));
+}
+
+// ── scenario 1b: quality prompt guidance is per-turn volatile, not cached ────
+{
+  let seenSystem: CallOpts["system"] | undefined;
+  const history: Message[] = [];
+  await runTurn("Create a website with a dark mode toggle", history, deps(baseCfg, new MockBrain([]), {
+    _callModel: async (opts) => { seenSystem = opts.system; return asText("done"); },
+  }));
+  const blocks = Array.isArray(seenSystem) ? seenSystem : [];
+  check("quality_contract: cached prefix stays task-agnostic",
+    blocks[0]?.cache === true && !blocks[0]?.text.includes("Task Quality Contract") &&
+    blocks[1]?.cache === false && blocks[1]?.text.includes("Task Quality Contract"));
 }
 
 // ── scenario 2: read_file_roundtrip — tool_use → result fed back → answer ──────

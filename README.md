@@ -10,13 +10,23 @@ Full design: **[`docs/planning/ob1-plan.html`](docs/planning/ob1-plan.html)** ·
 ## Install — type `ob1` anywhere
 
 ```
-git clone https://github.com/tashfeenahmed/ob1.git && cd ob1
-./scripts/install.sh          # installs `ob1` onto your PATH — then just run: ob1
+curl -fsSL https://github.com/tashfeenahmed/ob-1/releases/latest/download/install.sh | sh
 ```
 
-The installer (needs [Bun](https://bun.sh)) runs `bun install` and drops an `ob1` command into a
-bin dir already on your PATH (prefers `~/.local/bin`); it prints a one-line PATH fix if needed. Open
-a terminal **anywhere** and run **`ob1`** — it operates on the current directory.
+The release installer detects macOS/Linux + arm64/x64, downloads the matching binary, verifies it
+against `checksums.txt`, and drops `ob1` into a bin dir already on your PATH (prefers
+`~/.local/bin`). Pin a version with:
+
+```
+curl -fsSL https://github.com/tashfeenahmed/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.0
+```
+
+For source installs:
+
+```
+git clone https://github.com/tashfeenahmed/ob-1.git && cd ob-1
+./scripts/install.sh          # installs `ob1` onto your PATH — then just run: ob1
+```
 
 - **`./scripts/install.sh`** (default) installs a tiny **launcher** that runs through Bun from the
   repo, so you get the full native experience (tree-sitter repo map, sqlite-vec KNN) and `git pull`

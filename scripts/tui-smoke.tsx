@@ -15,7 +15,7 @@ const check = (n: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} $
 
 const ctrl = new TuiController({ model: "qwen/qwen3.6-plus", mode: "solo", plan: false, inTok: 0, outTok: 0, cacheTok: 0 });
 ctrl.pushLine("hello from scrollback");
-const { lastFrame } = render(<TuiApp ctrl={ctrl} />);
+const { lastFrame, stdin } = render(<TuiApp ctrl={ctrl} />);
 await tick();
 let f = strip(lastFrame() ?? "");
 check("status bar shows OB-1 + model", f.includes("OB-1") && f.includes("qwen/qwen3.6-plus"));
@@ -116,23 +116,20 @@ check("pickerCancel (Esc) resolves null", (await pk2) === null);
 // Left/right arrow nav (driven through real keystrokes): → selects (forward) like Enter; ← backs out
 // ONE level (dismiss=back; in /settings this returns a sub-picker to the menu); Esc leaves (dismiss=escape).
 {
-  const cn = new TuiController({ model: "m", mode: "solo", plan: false, inTok: 0, outTok: 0, cacheTok: 0 });
-  const { stdin: sin } = render(<TuiApp ctrl={cn} />);
+  const pr = ctrl.pick("Mode", [{ label: "solo", value: "solo" }, { label: "fusion", value: "fusion" }], "solo");
   await tick();
-  const pr = cn.pick("Mode", [{ label: "solo", value: "solo" }, { label: "fusion", value: "fusion" }], "solo");
+  stdin.write("\x1b[B");                     // ↓ → fusion
   await tick();
-  sin.write("\x1b[B");                       // ↓ → fusion
+  stdin.write("\x1b[C");                     // → selects (forward)
+  check("right arrow selects (forward) in a picker", (await pr) === "fusion" && ctrl.pickerDismiss === "select");
+  const pr2 = ctrl.pick("Sandbox", [{ label: "off", value: "off" }, { label: "read-only", value: "read-only" }], "off");
   await tick();
-  sin.write("\x1b[C");                       // → selects (forward)
-  check("right arrow selects (forward) in a picker", (await pr) === "fusion" && cn.pickerDismiss === "select");
-  const pr2 = cn.pick("Sandbox", [{ label: "off", value: "off" }, { label: "read-only", value: "read-only" }], "off");
+  stdin.write("\x1b[D");                     // ← backs out one level
+  check("left arrow backs out a picker (null, dismiss=back)", (await pr2) === null && ctrl.pickerDismiss === "back");
+  const pr3 = ctrl.pick("Sandbox", [{ label: "off", value: "off" }], "off");
   await tick();
-  sin.write("\x1b[D");                       // ← backs out one level
-  check("left arrow backs out a picker (null, dismiss=back)", (await pr2) === null && cn.pickerDismiss === "back");
-  const pr3 = cn.pick("Sandbox", [{ label: "off", value: "off" }], "off");
-  await tick();
-  sin.write("\x1b");                         // Esc leaves
-  check("Esc closes a picker (null, dismiss=escape)", (await pr3) === null && cn.pickerDismiss === "escape");
+  stdin.write("\x1b");                       // Esc leaves
+  check("Esc closes a picker (null, dismiss=escape)", (await pr3) === null && ctrl.pickerDismiss === "escape");
 }
 
 // A picker opened inside a busy turn (e.g. /settings) renders cleanly above the pinned input.

@@ -13,6 +13,7 @@ const ENUMS: Record<string, readonly string[]> = {
   permissionMode: ["ask", "autopilot"],
   sandbox: ["off", "read-only", "workspace-write"],
   effort: ["low", "medium", "high"],
+  qualityMode: ["off", "normal", "strict"],
 };
 const BOOLS = ["planMode", "autoRoute", "subagents", "repoMap", "memEvolve", "memReflect", "memAutolink", "skillLearn", "checkpoint"] as const;
 const STRINGS = ["model", "providerProfile", "providerUrl", "providerKey"] as const;

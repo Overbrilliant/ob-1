@@ -9,6 +9,7 @@ import { validateSettings } from "./config-validate.ts";
 
 export type Mode = "solo" | "fusion" | "council" | "personas" | "adaptive";
 export type SandboxMode = "off" | "read-only" | "workspace-write";
+export type QualityMode = "off" | "normal" | "strict";
 /** Permission mode: "autopilot" (the default) executes mutating tools without prompting; "ask" gates each
  *  one behind an approval prompt. (Default resolved in loadConfig: autopilot unless a saved value is "ask".) */
 export type PermissionMode = "ask" | "autopilot";
@@ -102,6 +103,9 @@ export interface Config {
    *  reusable skill (create/update under .ob1/skills) via one cheap LLM call. Costs a call per
    *  substantive turn, so OFF by default (opt-in). Env override: OB1_SKILL_LEARN=on|off. */
   skillLearn: boolean;
+  /** Per-task quality layer. normal (default) injects a compact contract + records .ob1/runs evidence;
+   *  strict additionally blocks "completed" status in the ledger when required evidence is missing. */
+  qualityMode: QualityMode;
   /** OS sandbox for run_bash (defense-in-depth). off | read-only | workspace-write. */
   sandbox: SandboxMode;
   /** Checkpointing for /rewind. ON (default) → before each prompt the whole worktree is snapshotted to a
@@ -134,6 +138,7 @@ export interface PersistedSettings {
   memReflect?: boolean;
   memAutolink?: boolean;
   skillLearn?: boolean;
+  qualityMode?: QualityMode;
   permissionMode?: PermissionMode;
   sandbox?: SandboxMode;
   checkpoint?: boolean;
@@ -153,6 +158,7 @@ export interface PersistedSettings {
 const SETTINGS_FILE = "settings.json";
 const MODES: Mode[] = ["solo", "fusion", "council", "personas", "adaptive"];
 const SANDBOXES: SandboxMode[] = ["off", "read-only", "workspace-write"];
+const QUALITY_MODES: QualityMode[] = ["off", "normal", "strict"];
 
 /** Parse OB1_MAX_TOKENS to a positive integer, or undefined (let the provider pick its own cap). A
  *  malformed value must NOT become NaN — that 400s the Anthropic API on every request. */
@@ -221,7 +227,7 @@ function writeSettingsFile(dir: string, data: PersistedSettings): void {
 export function saveSettings(cfg: Config): void {
   const data: PersistedSettings = {
     provider: cfg.provider, model: cfg.model, mode: cfg.mode, planMode: cfg.planMode,
-    autoRoute: cfg.autoRoute, subagents: cfg.subagents, repoMap: cfg.repoMap, memEvolve: cfg.memEvolve, memReflect: cfg.memReflect, memAutolink: cfg.memAutolink, skillLearn: cfg.skillLearn, permissionMode: cfg.permissionMode, sandbox: cfg.sandbox, checkpoint: cfg.checkpoint, effort: cfg.effort,
+    autoRoute: cfg.autoRoute, subagents: cfg.subagents, repoMap: cfg.repoMap, memEvolve: cfg.memEvolve, memReflect: cfg.memReflect, memAutolink: cfg.memAutolink, skillLearn: cfg.skillLearn, qualityMode: cfg.qualityMode, permissionMode: cfg.permissionMode, sandbox: cfg.sandbox, checkpoint: cfg.checkpoint, effort: cfg.effort,
   };
   // Provider creds. The single tuple (providerProfile/Url/Key) names the ACTIVE provider; the
   // providerCreds map remembers EVERY configured provider so switching free⇄paid needs no re-entry.
@@ -343,6 +349,7 @@ export function loadConfig(): Config {
     : /^(0|false|off)$/i.test(process.env.OB1_MEM_AUTOLINK ?? "") ? false : undefined;
   const envSkillLearn = /^(1|true|on)$/i.test(process.env.OB1_SKILL_LEARN ?? "") ? true
     : /^(0|false|off)$/i.test(process.env.OB1_SKILL_LEARN ?? "") ? false : undefined;
+  const envQualityMode = QUALITY_MODES.includes(process.env.OB1_QUALITY as QualityMode) ? process.env.OB1_QUALITY as QualityMode : undefined;
   const envCheckpoint = /^(1|true|on)$/i.test(process.env.OB1_CHECKPOINT ?? "") ? true
     : /^(0|false|off)$/i.test(process.env.OB1_CHECKPOINT ?? "") ? false : undefined;
   // Migration: `adaptive` is retired as an interactive mode — it's now the off-by-default Solo
@@ -376,6 +383,7 @@ export function loadConfig(): Config {
     memReflect: envMemReflect ?? saved.memReflect ?? false,
     memAutolink: envMemAutolink ?? saved.memAutolink ?? false,
     skillLearn: envSkillLearn ?? saved.skillLearn ?? false,
+    qualityMode: envQualityMode ?? (saved.qualityMode && QUALITY_MODES.includes(saved.qualityMode) ? saved.qualityMode : "normal"),
     permissionMode: envPerm ?? (saved.permissionMode === "ask" ? "ask" : "autopilot"),
     sandbox: (process.env.OB1_SANDBOX as SandboxMode | undefined) ?? (saved.sandbox && SANDBOXES.includes(saved.sandbox) ? saved.sandbox : "off"),
     checkpoint: envCheckpoint ?? saved.checkpoint ?? true,
