@@ -10,7 +10,7 @@ Full design: **[`docs/planning/ob1-plan.html`](docs/planning/ob1-plan.html)** ·
 ## Install — type `ob1` anywhere
 
 ```
-curl -fsSL https://github.com/tashfeenahmed/ob-1/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh | sh
 ```
 
 The release installer detects macOS/Linux + arm64/x64, downloads the matching binary, verifies it
@@ -18,13 +18,13 @@ against `checksums.txt`, and drops `ob1` into a bin dir already on your PATH (pr
 `~/.local/bin`). Pin a version with:
 
 ```
-curl -fsSL https://github.com/tashfeenahmed/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.0
+curl -fsSL https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.1
 ```
 
 For source installs:
 
 ```
-git clone https://github.com/tashfeenahmed/ob-1.git && cd ob-1
+git clone https://github.com/overbrilliant/ob-1.git && cd ob-1
 ./scripts/install.sh          # installs `ob1` onto your PATH — then just run: ob1
 ```
 

@@ -56,7 +56,7 @@ import { FREELLMAPI, profileById, normalizeBaseUrl, fetchModels, type ProviderPr
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
 
-const CLI_VERSION = "0.1.0";
+const CLI_VERSION = "0.1.1";
 const SHELL_HELP = `OB-1 ${CLI_VERSION}
 
 Usage:

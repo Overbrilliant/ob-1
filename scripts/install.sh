@@ -2,15 +2,15 @@
 # Install OB-1 so you can type `ob1` anywhere.
 #
 # Release install, no Bun required:
-#   curl -fsSL https://github.com/tashfeenahmed/ob-1/releases/latest/download/install.sh | sh
-#   curl -fsSL https://github.com/tashfeenahmed/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.0
+#   curl -fsSL https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh | sh
+#   curl -fsSL https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.1
 #
 # Local repo install:
 #   ./scripts/install.sh            # launcher (default), runs via Bun from this repo
 #   ./scripts/install.sh --binary   # compile a local standalone executable
 set -eu
 
-REPO_SLUG="${OB1_REPO:-tashfeenahmed/ob-1}"
+REPO_SLUG="${OB1_REPO:-overbrilliant/ob-1}"
 VERSION="${OB1_VERSION:-latest}"
 MODE=""
 LOCAL_REPO=""
@@ -21,8 +21,8 @@ usage() {
 Install OB-1.
 
 Usage:
-  install.sh [--version v0.1.0] [--repo owner/name] [--install-dir DIR]
-  install.sh --release [--version v0.1.0]
+  install.sh [--version v0.1.1] [--repo owner/name] [--install-dir DIR]
+  install.sh --release [--version v0.1.1]
   install.sh --launcher
   install.sh --binary
 
@@ -33,7 +33,7 @@ Modes:
 
 Environment:
   OB1_VERSION      Release tag to install. Defaults to latest.
-  OB1_REPO         GitHub repo slug. Defaults to tashfeenahmed/ob-1.
+  OB1_REPO         GitHub repo slug. Defaults to overbrilliant/ob-1.
   OB1_INSTALL_DIR  Install directory. Defaults to the first writable PATH bin dir.
 EOF
 }
