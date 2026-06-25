@@ -5,7 +5,11 @@
 // Launches a real headless Chromium (shipped with OB-1). If the browser binary isn't installed in this
 // environment, the smoke SKIPS cleanly rather than failing. Run: bun run scripts/browser-check-smoke.ts
 export {};
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runBrowserCheck, formatBrowserCheck } from "../src/agent/browser.ts";
+import { buildTools } from "../src/agent/tools.ts";
 
 let fail = false;
 const check = (n: string, ok: boolean, d = "") => { console.log(`${ok ? "✓" : "✗"} ${n}${ok || !d ? "" : `  — ${d}`}`); if (!ok) fail = true; };
@@ -86,6 +90,24 @@ try {
   const good = await runBrowserCheck(togglePlan("/"));
   check("WORKING toggle → browser_check PASSES", good.ok, formatBrowserCheck(good));
   check("  · both assertions passed", good.assertions.length === 2 && good.assertions.every((a) => a.ok));
+
+  // Static-site UX: the tool wrapper accepts a workspace file path, normalizes it to file://, and avoids
+  // needing a local dev server (important when the shell sandbox blocks local networking).
+  const dir = mkdtempSync(join(tmpdir(), "ob1-browser-file-"));
+  try {
+    writeFileSync(join(dir, "index.html"), WORKING);
+    const tool = buildTools({ cwd: dir, model: "qwen/qwen3.6-plus" } as any, {} as any).get("browser_check")!;
+    const raw = await tool.run({
+      url: "index.html",
+      actions: togglePlan("/").actions,
+      assert: togglePlan("/").assert,
+      screenshot: "off",
+    });
+    const text = typeof raw === "string" ? raw : raw.text;
+    check("tool wrapper: browser_check accepts a static workspace file path", text.includes("✓ browser_check PASSED") && text.includes("file://"), text);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 
   const bad = await runBrowserCheck(togglePlan("/broken"));
   check("BROKEN toggle → browser_check FAILS (catches the inert toggle)", !bad.ok);

@@ -69,7 +69,10 @@ const SMOKES = [
   "subagents-write-smoke.ts", // write-subagents (real git): partition refusal + worktree merge + conflict abort + gated apply
   "todo-smoke.ts",            // update_tasks tool + TodoRegistry (task list above the input)
   "topics-smoke.ts",          // on-demand topic files
+  "agent-memory-smoke.ts",    // AGENTS.md managed blocks + episode capture + review/promote pipeline
+  "tool-ux-smoke.ts",         // friendly tool failures that steer recovery instead of loops/rewrites
   "treesitter-smoke.ts",      // tree-sitter repo-map symbol extraction (+ regex fallback)
+  "git-exclude-smoke.ts",     // startup excludes .ob1/ from repo-local git status without touching .gitignore
   "settings-persist-smoke.ts",// settings persistence (.ob1/settings.json round-trip + precedence)
   "freellm-smoke.ts",         // FreeLLMAPI provider: profile registry + url normalization + config round-trip
   "auth-route-smoke.ts",      // managed-server routing: token precedence + /v1 + web_search bearer/402/401

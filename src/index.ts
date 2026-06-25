@@ -18,7 +18,9 @@ import { makeEmbedder } from "./memory/embed.ts";
 import { buildRepoMap, renderRepoMap, invalidateRepoMap } from "./context/repomap.ts";
 import { CheckpointStore, type Checkpoint } from "./agent/checkpoint.ts";
 import { initTreeSitter, treeSitterStatus } from "./context/treesitter.ts";
-import { ensureAgentsMd, generateAgentsMd, loadAgentsMd } from "./context/agents.ts";
+import { ensureAgentsMd, generateAgentsMd, loadAgentsMd, refreshAgentsMd } from "./context/agents.ts";
+import { listEpisodes, listPromotionCandidates, loadAgentsMemory, promoteCandidates, rememberEpisode } from "./context/agent-memory.ts";
+import { ensureOb1GitExclude } from "./context/git-exclude.ts";
 import { listSkills, readSkill, deleteSkill } from "./skills/registry.ts";
 import { maybeLearnSkill } from "./skills/learn.ts";
 import { approxTokens } from "./agent/context.ts";
@@ -80,6 +82,7 @@ let onboardingRan = false;
 }
 
 let cfg = loadConfig();
+ensureOb1GitExclude(cfg.cwd, cfg.dataDir);
 
 // Auth guard: when we rely on the managed OB-1 server but the saved token is missing or REJECTED
 // (expired, or the account was reset), (re)authenticate before doing anything — otherwise the first
@@ -216,7 +219,7 @@ interface UI {
   // under the REPL — command handlers fall back to printing a plain list when it's absent.
   pick?: (title: string, items: { label: string; hint?: string; value: string }[], current?: string) => Promise<string | null>;
   // How the most recent pick() closed: "select" (a value), "back" (←, up one level) or "escape" (Esc,
-  // leave). /settings uses this to make ← return to the menu while Esc exits the whole flow.
+  // leave). Nested pickers use this to make ← return to the parent while Esc exits the whole flow.
   pickReason?: () => "select" | "back" | "escape";
   // Clarification question (TUI shows radio/checkbox + a free-text row; REPL prompts on the next line).
   // Returns a human-readable answer string for the tool result.
@@ -225,7 +228,7 @@ interface UI {
   // connection test. Returns the entered {url, key} or null if cancelled.
   providerSetup?: (opts: ProviderSetupOpts) => Promise<ProviderSetupResult>;
   // Inline single-field text prompt (TUI modal / REPL line). Used by the managed Free LLM API setup from
-  // /settings for email/password (mask hides the value). Returns the text, or null if cancelled (Esc).
+  // /freellm for email/password (mask hides the value). Returns the text, or null if cancelled (Esc).
   prompt?: (opts: { title: string; question: string; mask?: boolean; placeholder?: string }) => Promise<string | null>;
 }
 let ui: UI;                            // set by runRepl()/runTui() before any turn runs
@@ -349,7 +352,7 @@ ${c.bold("Commands")}
   ${c.cyan("/exit")} ${c.dim("|")} ${c.cyan("/quit")}          exit the session
 
   ${c.bold("Model & mode")}
-  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model ${c.dim("(↑↓ · Enter)")}; if no provider is set up yet, connect ${c.bold("FreeLLMAPI")} (a self-hosted proxy stacking ~16 free LLM tiers; default model ${c.bold("auto")})
+  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("FreeLLMAPI")} gives free/local models, frontier models need a subscription
   ${c.cyan("/mode")} ${c.dim("[m]")}             pick a mode ${c.dim("(↑↓ · Enter)")} or /mode solo|fusion|council|personas ${c.dim("— heavy modes stay on (sticky); /solo exits")}
   ${c.cyan("/solo")}                 exit a heavy mode (fusion/council/personas) → back to Solo
   ${c.cyan("/plan")} ${c.dim("|")} ${c.cyan("/act")}           toggle read-only Plan vs Act mode
@@ -395,7 +398,7 @@ ${c.bold("Commands")}
   ${c.cyan("/mcp")}                  list connected MCP servers + their tools
   ${c.cyan("/skills")}               list skills ${c.dim("(✦learned + usage)")} · ${c.cyan("/skills learn on|off")} auto-learn · ${c.cyan("/skills curate")} · ${c.cyan("/skills rm <name>")}
   ${c.cyan("/skill")} ${c.dim("[name]")}        pick a skill ${c.dim("(↑↓ · Enter)")} or /skill <name>
-  ${c.cyan("/agents")} ${c.dim("[regen]")}       AGENTS.md project index — pick show / regenerate ${c.dim("(↑↓ · Enter)")}
+  ${c.cyan("/agents")} ${c.dim("[cmd]")}         project memory index — show/update/episodes/review/promote/regen ${c.dim("(↑↓ · Enter)")}
 
 ${c.bold("Account")} ${c.dim("(shell)")}
   ${c.bold("ob1 onboard")}           guided setup: sign in + connect a model provider (Free LLM API)
@@ -666,7 +669,7 @@ async function ensureProvider(prof: ProviderProfile): Promise<boolean> {
 }
 
 /** Make FreeLLMAPI the active provider, OFFERING the managed setup first when nothing is configured yet.
- *  This is the difference from the bare ensureProvider(): reached from the model picker (Settings → model
+ *  This is the difference from the bare ensureProvider(): reached from the model picker (/models →
  *  → Free LLM API), a first-time user should be offered "OB-1 downloads + runs + wires the proxy for you"
  *  (clone→run→auto-wire from the repo) — not dropped straight onto a manual URL/key form. Once a proxy is
  *  managed or creds are remembered, it just activates them (via ensureProvider). Returns true when active. */
@@ -739,7 +742,8 @@ async function pickModel(): Promise<void> {
     const title = subscribed
       ? "Select a model  ↑↓ · Enter · Esc"
       : "Select a model  ↑↓ · Enter · Esc  ·  🔒 = subscribe to unlock";
-    const picked = await ui.pick(title, items, onFree ? "__free__" : cfg.model);
+    const initial = (onFree || (!cfg.apiKey && !subscribed)) ? "__free__" : cfg.model;
+    const picked = await ui.pick(title, items, initial);
     if (picked == null) return;
     if (picked === "__free__") { await pickFreeModel(); if (ui.pickReason?.() === "back") continue; return; }
     // A frontier model.
@@ -801,7 +805,7 @@ function setEffort(e: Effort): void {
 
 // ─── Per-setting pickers ───────────────────────────────────────────────────────
 // Each opens the same arrow-key list — no typing (↑↓ navigate · ↵/→ select · ←/Esc back). Shared by
-// /settings and by the bare /mode · /sandbox · /skill · /agents commands on a TTY. The TUI footer
+// /models and by the bare /mode · /sandbox · /skill · /agents commands on a TTY. The TUI footer
 // shows the keys, so titles stay terse.
 async function pickMode(): Promise<void> {
   if (!ui.pick) return;
@@ -882,10 +886,57 @@ async function pickAgents(): Promise<void> {
   if (!ui.pick) return;
   const a = await ui.pick("AGENTS.md", [
     { label: "show", hint: "print the current project index", value: "show" },
-    { label: "regenerate", hint: "rebuild AGENTS.md from the repo", value: "regen" },
+    { label: "update", hint: "refresh OB-1 managed sections from repo + memory", value: "update" },
+    { label: "episodes", hint: "show recent project-memory episodes", value: "episodes" },
+    { label: "review", hint: "show pending memory promotion candidates", value: "review" },
+    { label: "promote all", hint: "promote all pending candidates into project memory", value: "promote-all" },
   ]);
   if (a === "show") { const md = loadAgentsMd(cfg.cwd); console.log(md ? "\n" + md + "\n" : c.dim("  (no AGENTS.md)")); }
-  else if (a === "regen") { writeFileSync(join(cfg.cwd, "AGENTS.md"), generateAgentsMd(cfg.cwd)); console.log(c.dim("  regenerated AGENTS.md")); }
+  else if (a === "update") showAgentsUpdate();
+  else if (a === "episodes") showAgentEpisodes();
+  else if (a === "review") showAgentCandidates();
+  else if (a === "promote-all") promoteAgentCandidates(["all"]);
+}
+
+function showAgentsUpdate(): void {
+  const r = refreshAgentsMd(cfg.cwd, loadAgentsMemory(cfg.cwd));
+  console.log(r.updated ? c.green("  ✓ refreshed AGENTS.md managed sections") : c.dim("  AGENTS.md already current (or human-owned; no managed blocks changed)"));
+}
+
+function showAgentEpisodes(): void {
+  const eps = listEpisodes(cfg.cwd, 12);
+  if (!eps.length) { console.log(c.dim("  no episodes yet — run a task and OB-1 will write .ob1/episodes/*.md")); return; }
+  console.log(c.bold("  Recent episodes"));
+  for (const ep of eps) console.log(`    ${c.cyan(ep.id)} ${c.dim(ep.ts.slice(0, 10))} — ${ep.task}`);
+}
+
+function showAgentCandidates(): void {
+  const candidates = listPromotionCandidates(cfg.cwd);
+  if (!candidates.length) { console.log(c.dim("  no pending promotion candidates")); return; }
+  console.log(c.bold("  Pending memory candidates"));
+  for (const cand of candidates) {
+    console.log(`    ${c.cyan(cand.id)} ${c.dim(`${cand.kind} · seen ${cand.count}×`)}\n      ${cand.text}`);
+  }
+  console.log(c.dim("  promote with /agents promote <id> or /agents promote all"));
+}
+
+function promoteAgentCandidates(args: string[]): void {
+  const target = args[0] === "all" ? "all" : args;
+  if (target !== "all" && !target.length) { console.log(c.red("  usage: /agents promote <id>|all")); return; }
+  const r = promoteCandidates(cfg.cwd, target);
+  if (!r.promoted.length) { console.log(c.dim("  no matching pending candidates")); return; }
+  console.log(c.green(`  ✓ promoted ${r.promoted.length} item${r.promoted.length === 1 ? "" : "s"} into project memory`));
+}
+
+function rememberTurn(task: string, startLen: number, mode: string): void {
+  const slice = history.slice(startLen);
+  if (!slice.length) return;
+  try {
+    const { episode } = rememberEpisode(cfg.cwd, task, mode, slice);
+    console.log(c.dim(`  🧭 episode saved: ${episode.id}`));
+  } catch {
+    /* project memory must never break a turn */
+  }
 }
 
 /** Run the managed FreeLLMAPI setup (clone → run proxy → dashboard account → auto-wire) INLINE — using
@@ -957,7 +1008,7 @@ function fmtAgo(iso: string): string {
  *  only). In the non-TTY REPL: `/rewind` lists them, `/rewind <n> [code|conv|both]` restores. Code restore
  *  reverts the whole worktree via the shadow repo; conversation restore truncates the in-memory history. */
 async function rewindCmd(rest: string[]): Promise<void> {
-  if (!cfg.checkpoint) { console.log(c.yellow("  checkpointing is OFF — set OB1_CHECKPOINT=on (or /settings) to enable /rewind.")); return; }
+  if (!cfg.checkpoint) { console.log(c.yellow("  checkpointing is OFF — set OB1_CHECKPOINT=on and restart to enable /rewind.")); return; }
   if (!checkpoints.available()) { console.log(c.yellow("  /rewind needs the `git` binary (checkpoints use a private shadow repo — your real repo is untouched).")); return; }
   const all = checkpoints.list();
   if (!all.length) { console.log(c.dim("  no checkpoints yet — one is saved automatically before each prompt.")); return; }
@@ -1143,11 +1194,20 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     }
     case "agents": {
-      if (rest[0] === "regen") {
-        writeFileSync(join(cfg.cwd, "AGENTS.md"), generateAgentsMd(cfg.cwd));
+      const sub = rest[0];
+      if (sub === "regen") {
+        writeFileSync(join(cfg.cwd, "AGENTS.md"), generateAgentsMd(cfg.cwd, loadAgentsMemory(cfg.cwd)));
         console.log(c.dim("  regenerated AGENTS.md"));
+      } else if (sub === "update") {
+        showAgentsUpdate();
+      } else if (sub === "episodes") {
+        showAgentEpisodes();
+      } else if (sub === "review") {
+        showAgentCandidates();
+      } else if (sub === "promote") {
+        promoteAgentCandidates(rest.slice(1));
       } else if (!rest[0] && ui.pick) {
-        await pickAgents();                             // bare /agents → show / regenerate picker
+        await pickAgents();                             // bare /agents → project-memory picker
       } else {
         const a = loadAgentsMd(cfg.cwd);
         console.log(a ? "\n" + a + "\n" : c.dim("  (no AGENTS.md)"));
@@ -1503,14 +1563,14 @@ async function ensureProxyHealthy(): Promise<void> {
     if (await flm.isUp(st.url)) return; // healthy — the hot path
     const now = Date.now();
     if (now - lastProxyHealAt < 15000) { // crash-loop guard: at most one respawn attempt per 15s
-      console.log(c.yellow("  ⚠ Free LLM API proxy is down — retrying shortly · /settings → free-llm to restart"));
+      console.log(c.yellow("  ⚠ Free LLM API proxy is down — retrying shortly · run /freellm to restart"));
       return;
     }
     lastProxyHealAt = now;
     console.log(c.dim("  Free LLM API proxy stopped — restarting it locally…"));
     console.log(await flm.ensureRunning(st)
       ? c.dim("  ✓ proxy back up")
-      : c.yellow("  ⚠ couldn't restart the Free LLM API proxy — /settings → free-llm to fix"));
+      : c.yellow("  ⚠ couldn't restart the Free LLM API proxy — run /freellm to fix"));
   } catch { /* best-effort — never block a turn on the heal check */ }
 }
 
@@ -1530,9 +1590,10 @@ async function processLine(line: string): Promise<boolean> {
     if (!modeJustSet) console.log(c.yellow(`  ⚠ still in ${modeColor(cfg.mode)(cfg.mode.toUpperCase())} (${modeCostHint(cfg.mode)}) · ${c.cyan("/solo")} to exit`));
     modeJustSet = false;
   }
-  if (cfg.mode === "fusion") { await fusionTurn(t); return false; }
-  if (cfg.mode === "council") { await councilTurn(t); return false; }
-  if (cfg.mode === "personas") { await personasTurn(t); return false; }
+  const startLen = history.length;
+  if (cfg.mode === "fusion") { await fusionTurn(t); rememberTurn(t, startLen, "fusion"); return false; }
+  if (cfg.mode === "council") { await councilTurn(t); rememberTurn(t, startLen, "council"); return false; }
+  if (cfg.mode === "personas") { await personasTurn(t); rememberTurn(t, startLen, "personas"); return false; }
   // (no `adaptive` branch — it's retired as a mode; auto-routing is the cfg.autoRoute toggle below)
   // Auto-route OFF: a pure-regex *nudge* (no extra model call) suggesting a heavier mode — purely advisory.
   if (!cfg.autoRoute) {
@@ -1542,7 +1603,6 @@ async function processLine(line: string): Promise<boolean> {
   // Auto-route ON: Solo gets the `escalate` tool (offered via turnDeps.canEscalate) and decides DURING its
   // normal response whether the task needs a heavier mode. No upfront probe call — an easy turn is one Solo
   // call; only a genuinely hard turn pays for the heavier mode. If it escalated, forward the whole task.
-  const startLen = history.length;
   const outcome = await runTurn(t, history, turnDeps());
   if (outcome?.escalate) {
     const { mode, reason } = outcome.escalate;
@@ -1551,6 +1611,7 @@ async function processLine(line: string): Promise<boolean> {
     else if (mode === "council") await councilTurn(t);
     else await personasTurn(t);
   }
+  rememberTurn(t, startLen, outcome?.escalate ? `solo→${outcome.escalate.mode}` : "solo");
   // Auto skill learning (opt-in, OFF by default): distil this turn into reusable procedural memory.
   // One cheap brain call, only on a substantive non-escalated Solo turn. Never blocks/breaks the turn.
   if (cfg.skillLearn && memBrain && !outcome?.escalate) {
@@ -1779,7 +1840,7 @@ startup.push(banner());
   startup.push(c.dim(`  ${accessLine}`));
 }
 startup.push(c.dim(`  model: ${cfg.model} — ${describeModel(cfg.model)}${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : " · output governed by model"}`));
-if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restored (global ~/.ob1/settings.json) — change with /settings or /models"));
+if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restored (global ~/.ob1/settings.json) — change with /models or individual slash commands"));
 // Settings health: a hand-edited settings.json with a bad value silently fell back to a default — say
 // so, so a typo'd sandbox/mode isn't a silent mystery. Warnings (unknown keys) are shown dimmer.
 {
@@ -1810,7 +1871,7 @@ try {
 // One-time migration note: `adaptive` mode is now the Solo auto-route toggle. loadConfig collapsed any
 // adaptive workspace to Solo, so this is always accurate; saveSettings rewrites mode:"solo" → shows once.
 if (persistedSettings(cfg.settingsDir).mode === "adaptive") {
-  startup.push(c.yellow(`  note: 'adaptive' mode is now a Solo auto-route toggle — you're in Solo (auto-route ${cfg.autoRoute ? "on" : "off"}). Change it with /autoroute or /settings.`));
+  startup.push(c.yellow(`  note: 'adaptive' mode is now a Solo auto-route toggle — you're in Solo (auto-route ${cfg.autoRoute ? "on" : "off"}). Change it with /autoroute.`));
   saveSettings(cfg);
 }
 // If the active provider is an OB-1-managed FreeLLMAPI proxy, make sure it's running (Docker persists
@@ -1821,7 +1882,7 @@ if (cfg.providerProfile === "freellmapi") {
     const st = flm.loadManaged();
     if (st?.managed && !(await flm.isUp(st.url))) {
       startup.push(c.dim("  starting your local Free LLM API proxy…"));
-      if (!(await flm.ensureRunning(st))) startup.push(c.yellow("  ⚠ couldn't auto-start the Free LLM API proxy — /settings → free-llm to restart"));
+      if (!(await flm.ensureRunning(st))) startup.push(c.yellow("  ⚠ couldn't auto-start the Free LLM API proxy — run /freellm to restart"));
     }
   } catch { /* best-effort */ }
 }
@@ -1831,7 +1892,7 @@ await initTreeSitter().catch(() => false);
 { const ts = treeSitterStatus(); if (ts.ready) startup.push(c.dim(`  repo map: tree-sitter (${ts.grammars.length} grammars)`)); }
 if (store.vectorBackend() === "sqlite-vec") startup.push(c.dim("  memory: sqlite-vec KNN index"));
 if (store.recovered) startup.push(c.yellow(`  ⚠ memory.db was corrupt — moved it to ${store.recovered} and started a fresh store.`));
-const agentsFile = ensureAgentsMd(cfg.cwd);
+const agentsFile = ensureAgentsMd(cfg.cwd, loadAgentsMemory(cfg.cwd));
 if (agentsFile.created) startup.push(c.dim("  generated AGENTS.md (project index — edit it freely)"));
 // Skill curator: age learned skills by inactivity (active→stale→archived; reactivate on use). Cheap,
 // file-based, touches only agent-created skills. Surface a note only when something actually changed.

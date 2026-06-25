@@ -166,7 +166,7 @@ export async function subscribeFlow(d: SubscribeDeps): Promise<SubscribeResult> 
     await sleep(pollMs);
   }
   d.out("\n  No active subscription yet — once payment completes, OB-1 uses it automatically.");
-  d.out("  (Re-run `ob1 onboard` to re-check, or open /settings.) Until then chat will prompt you to upgrade.");
+  d.out("  (Re-run `ob1 onboard` to re-check, or use /upgrade in the TUI.) Until then chat will prompt you to upgrade.");
   return "pending";
 }
 
@@ -185,7 +185,7 @@ async function runSubscriptionSetup(out: (s?: string) => void): Promise<void> {
 }
 
 /** I/O for the managed FreeLLMAPI setup, injected so the SAME pipeline runs under readline (onboarding,
- *  pre-TUI) and inside the Ink TUI (Settings → Free LLM API). `ask` returns the entered text (mask hides
+ *  pre-TUI) and inside the Ink TUI (/freellm). `ask` returns the entered text (mask hides
  *  it — readline can't, the TUI does); `waitForDone` resolves when the user signals they've finished
  *  adding keys on the dashboard (Enter), letting us do a final key count. */
 export interface FreeLLMSetupDeps {
@@ -244,7 +244,7 @@ export async function freeLLMSetupFlow(d: FreeLLMSetupDeps): Promise<boolean> {
   if (st) flm.saveManaged({ ...st, providerKeys: Math.max(0, keys) });
   d.out(keys > 0
     ? `  ✓ ${keys} provider key${keys === 1 ? "" : "s"} added — you're all set.`
-    : "  No provider key added yet — the free anonymous models still work. Add keys anytime; OB-1 picks them up. Manage under /settings → Free LLM API.");
+    : "  No provider key added yet — the free anonymous models still work. Add keys anytime; OB-1 picks them up. Manage with /freellm.");
   return true;
 }
 

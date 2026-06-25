@@ -138,6 +138,89 @@ const done = (t: string): ModelResponse => ({ stop_reason: "end_turn", content: 
   check("self-fix: a no-edit turn does NOT verify", verifyCalls === 0);
 }
 
+{
+  // If the agent explicitly ran a recognized project check after editing, don't falsely nudge "not verified"
+  // just because the automatic fast-check scope is empty (common in JS repos with only a test script).
+  const d = mkdtemp("explicit-check");
+  writeFileSync(join(d, "package.json"), JSON.stringify({ scripts: { test: "bun test" } }));
+  const cfgWithTests = { ...cfg, cwd: d };
+  const logs: string[] = [];
+  let verifyCalls = 0;
+  const editTool: [string, Tool] = ["edit_file", { def: { name: "edit_file", description: "", input_schema: { type: "object" } }, mutating: true, run: async () => "edited" }];
+  const bashTool: [string, Tool] = ["run_bash", { def: { name: "run_bash", description: "", input_schema: { type: "object" } }, mutating: false, run: async () => "exit 0\n2 pass\n" }];
+  const toolsWithBash = new Map<string, Tool>([editTool, bashTool]);
+  const seq: ModelResponse[] = [
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "e", name: "edit_file", input: { path: "src/a.ts" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "t", name: "run_bash", input: { command: "bun test" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    done("done"),
+  ];
+  let n = 0;
+  await runTurn("fix and test", [], {
+    ...baseDeps,
+    cfg: cfgWithTests,
+    tools: toolsWithBash,
+    log: (s) => logs.push(s),
+    verify: async () => { verifyCalls++; return { ran: false, ok: true, results: [], report: "no checks matched that scope (available: test)" }; },
+    _callModel: async () => seq[n++],
+  });
+  check("self-fix: explicit successful test suppresses false unverified nudge", !logs.some((s) => s.includes("changes are NOT verified")), logs.join(" | "));
+  check("self-fix: explicit successful test is reported as verified", logs.some((s) => s.includes("explicit check passed")), logs.join(" | "));
+  check("self-fix: automatic verifier was still consulted", verifyCalls === 1, `calls=${verifyCalls}`);
+  rmSync(d, { recursive: true, force: true });
+}
+
+{
+  // A successful browser_check after a UI edit is also explicit verification. Without this, a static
+  // website task can pass browser_check and then get nudged into redundant server/browser retries because
+  // the project has no package-level auto checks.
+  const logs: string[] = [];
+  let verifyCalls = 0;
+  const editTool: [string, Tool] = ["edit_file", { def: { name: "edit_file", description: "", input_schema: { type: "object" } }, mutating: true, run: async () => "edited" }];
+  const browserTool: [string, Tool] = ["browser_check", { def: { name: "browser_check", description: "", input_schema: { type: "object" } }, mutating: false, run: async () => "✓ browser_check PASSED — file:///tmp/site/index.html" }];
+  const seq: ModelResponse[] = [
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "e", name: "edit_file", input: { path: "site/index.html" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "b", name: "browser_check", input: { url: "site/index.html" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    done("done"),
+  ];
+  let n = 0;
+  await runTurn("fix UI and browser-test it", [], {
+    ...baseDeps,
+    tools: new Map<string, Tool>([editTool, browserTool]),
+    log: (s) => logs.push(s),
+    verify: async () => { verifyCalls++; return { ran: false, ok: true, results: [], report: "no checks matched that scope" }; },
+    _callModel: async () => seq[n++],
+  });
+  check("self-fix: passing browser_check suppresses false unverified nudge", !logs.some((s) => s.includes("changes are NOT verified")), logs.join(" | "));
+  check("self-fix: passing browser_check is reported as explicit verification", logs.some((s) => s.includes("explicit check passed")), logs.join(" | "));
+  check("self-fix: browser_check path still consults automatic verifier once", verifyCalls === 1, `calls=${verifyCalls}`);
+}
+
+{
+  // Non-workspace mutating tools after a successful browser check (e.g. expose_port) must not invalidate
+  // the verification state and trigger a redundant "not verified" nudge.
+  const logs: string[] = [];
+  let verifyCalls = 0;
+  const editTool: [string, Tool] = ["edit_file", { def: { name: "edit_file", description: "", input_schema: { type: "object" } }, mutating: true, run: async () => "edited" }];
+  const browserTool: [string, Tool] = ["browser_check", { def: { name: "browser_check", description: "", input_schema: { type: "object" } }, mutating: false, run: async () => "✓ browser_check PASSED — file:///tmp/site/index.html" }];
+  const exposeTool: [string, Tool] = ["expose_port", { def: { name: "expose_port", description: "", input_schema: { type: "object" } }, mutating: true, run: async () => "https://preview.example" }];
+  const seq: ModelResponse[] = [
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "e", name: "edit_file", input: { path: "site/index.html" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "b", name: "browser_check", input: { url: "site/index.html" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "p", name: "expose_port", input: { port: 3000 } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    done("done"),
+  ];
+  let n = 0;
+  await runTurn("fix UI, verify, then preview", [], {
+    ...baseDeps,
+    tools: new Map<string, Tool>([editTool, browserTool, exposeTool]),
+    log: (s) => logs.push(s),
+    verify: async () => { verifyCalls++; return { ran: false, ok: true, results: [], report: "no checks matched that scope" }; },
+    _callModel: async () => seq[n++],
+  });
+  check("self-fix: expose_port does not invalidate a passed browser_check", !logs.some((s) => s.includes("changes are NOT verified")) && logs.some((s) => s.includes("explicit check passed")), logs.join(" | "));
+  check("self-fix: non-workspace mutations still leave one final verifier consult", verifyCalls === 1, `calls=${verifyCalls}`);
+}
+
 // ── step-retry: a mid-stream model failure (the proxy's router falling back to another model) must
 //    re-issue the step, NOT kill the whole turn ──
 {

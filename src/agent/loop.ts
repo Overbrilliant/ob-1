@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { callModel, isRetryable, type Message, type ContentBlock, type ToolDef, type Usage, type SystemBlock } from "../providers/gateway.ts";
 import { modelSpec, isRouterModel, supportsEffort } from "../providers/models.ts";
-import { isDestructiveCall, normalizeToolOutput, toolCallMutates, toolResultContent, type Tool, type ReadCache } from "./tools.ts";
+import { isDestructiveCall, normalizeToolOutput, toolCallChangesWorkspace, toolCallMutates, toolResultContent, type Tool, type ReadCache } from "./tools.ts";
 import { classifyIntent } from "../safety/bash-validation.ts";
 import { recoveryHint } from "./recovery.ts";
 import { evaluatePolicy, type PolicyRule } from "../safety/policy.ts";
@@ -18,6 +18,7 @@ import { listTopics } from "../context/topics.ts";
 import { repoMapSummary, invalidateRepoMap } from "../context/repomap.ts";
 import { listSkills } from "../skills/registry.ts";
 import { editContext, compactIfNeeded } from "./context.ts";
+import { detectChecks } from "./verify.ts";
 import { c, renderDiff, renderFriendly, explainError } from "../cli/ui.ts";
 import { runWorker, type WorkerEvent } from "../multimind/runtime.ts";
 import { runSubagents, formatSubagentFindings, writeSubagentReport, reportEnabled, MAX_SUBTASKS, type SubagentTask } from "../multimind/subagents.ts";
@@ -282,11 +283,11 @@ export function systemPrompt(cfg: Config, store: MemoryStore, retrieved?: Fact[]
       : "MODE: ACT. You may edit files and run commands; mutating actions are gated by user approval.",
     "Principles: read before you edit; make the smallest correct change; prefer edit_file (search/replace) over rewriting whole files. Prefer plain CLI tools via run_bash (e.g. `gh`, `git`, `rg`) when they are more token-efficient than reading many files. For a large file, read_file accepts offset/limit (a 1-based line range) — read only the slice you need instead of the whole file. When you learn a durable project fact or a code relationship, persist it with memory_add / relate. When the task hinges on a decision only the user can make (a missing requirement, or a choice between approaches), call ask_user with a few options instead of guessing.",
     "Don't give up early. You have full access to this machine: when a goal needs a capability you don't have, get it" + (cfg.planMode ? " (in Act mode, by installing the package or tool via run_bash)" : " — install whatever package or tool via run_bash") + " instead of declaring it impossible. Only after genuinely exhausting your options, say what's blocking and offer alternatives.",
-    "Long-lived commands: never run a server, watcher, or other process that does not exit (e.g. `npm run dev`, `bun serve`, a `localhost`) as a normal run_bash call — it would block the turn. Pass background:true; it returns immediately with a process id and keeps running. Use list_bash to read its buffered output (e.g. the served URL) and kill_bash to stop it when done.",
+    "Long-lived commands: never run a server, watcher, or other process that does not exit (e.g. `npm run dev`, `bun serve`, a `localhost`) as a normal run_bash call — it would block the turn. Pass background:true; it returns immediately with a process id and keeps running. Then call the `list_bash` TOOL to read its buffered output (e.g. the served URL), and call the `kill_bash` TOOL to stop it when done. Do NOT type `list_bash` or `kill_bash(id)` inside run_bash; they are tools, not shell commands.",
     "run_bash working directory: each command starts FRESH in the workspace root — the cwd does NOT persist between calls, so a `cd` in one call is forgotten by the next. To act inside a folder you created (e.g. a scaffolded project), pass the `cwd` argument (relative to the workspace) or chain it in ONE command, e.g. `cd overbrilliant && npm install && npm run build`. This applies to background commands too — start a dev server in the project's own directory.",
     cfg.planMode ? "" :
       "Verify your work — don't declare done on untested code. After changing code, decide which checks fit the change and run the `verify` tool: 'auto' for a fast compile/typecheck gate, or name the kinds (e.g. 'typecheck,test' or 'build') for behavioural changes. Read the failures and fix them, then re-verify until it's green. (OB-1 also auto-runs the fast gate after any file-changing turn and feeds failures back to you — so treat a reported failure as work to finish, not noise.) If a failure is genuinely pre-existing or unrelated to your change, say so explicitly rather than ignoring it. " +
-      "CRITICAL for UI / visual / interactive work (a toggle, button, form, route, styling, dark mode): a passing build or typecheck does NOT prove the feature works — code that compiles can still do nothing when clicked. You MUST verify behaviour with the `browser_check` tool: start the dev server (run_bash background), get its URL from list_bash, then browser_check it — drive the actual interaction (click the toggle) and assert the observable result CHANGED (e.g. the body background colour or the html data-theme attribute is different after the click). Never tell the user a visual feature is done until browser_check passes; `curl` and `grep` only confirm the code is PRESENT, not that it WORKS. Verify enough to be sure, then STOP: once the relevant check (or one browser_check that drives the interaction) passes green, the work is done — don't re-run the same verification again and again or keep polishing what already works.",
+      "CRITICAL for UI / visual / interactive work (a toggle, button, form, route, styling, dark mode): a passing build or typecheck does NOT prove the feature works — code that compiles can still do nothing when clicked. You MUST verify behaviour with the `browser_check` tool. For static HTML/CSS/JS pages, pass the workspace file path directly (e.g. `site/index.html`) and avoid starting a server. For framework apps, start the dev server (run_bash background), get its URL by calling the list_bash TOOL, then browser_check it. Drive the actual interaction (click the toggle) and assert the observable result CHANGED (e.g. the body background colour or the html data-theme attribute is different after the click). Never tell the user a visual feature is done until browser_check passes; `curl` and `grep` only confirm the code is PRESENT, not that it WORKS. Verify enough to be sure, then STOP: once the relevant check (or one browser_check that drives the interaction) passes green, the work is done — don't re-run the same verification again and again or keep polishing what already works.",
     "Ground facts in real sources — never fabricate. For anything about current events, external products, libraries, APIs, or install steps, use web_search and then web_fetch to verify before stating it; do not invent commands, URLs, version numbers, prices, or features. If you can't verify something (the right tool is missing, a call failed, or web_search is unavailable), say so plainly instead of guessing — and never write unverified claims into a file.",
     // Auto repo map: a fresh, budgeted view of the codebase structure so the model always knows what
     // it's working with. Lives in the CACHED block (it's session-stable: the deterministic render only
@@ -380,6 +381,31 @@ function surfaceBashOutcome(out: string, log: (s: string) => void): void {
   for (const l of body.split("\n").slice(-12)) if (l.trim()) log(c.gray("    " + l.slice(0, 200)));
 }
 
+function normalizeShellCommand(command: string): string {
+  return command
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\s+(?:2>&1|1>&2)$/g, "")
+    .trim();
+}
+
+function isSuccessfulForegroundCommand(output: string): boolean {
+  return output === "exit 0" || output.startsWith("exit 0\n");
+}
+
+function isKnownCheckCommand(cwd: string, command: string): boolean {
+  const norm = normalizeShellCommand(command);
+  if (!norm) return false;
+  const checks = detectChecks(cwd);
+  const candidates = new Set(checks.map((check) => normalizeShellCommand(check.command)));
+  if (checks.some((check) => check.kind === "test" || check.name === "test")) {
+    for (const testCmd of ["bun test", "bun run test", "npm test", "npm run test", "pnpm test", "pnpm run test", "yarn test", "yarn run test"]) {
+      candidates.add(testCmd);
+    }
+  }
+  return candidates.has(norm);
+}
+
 export async function runTurn(userInput: string, history: Message[], deps: TurnDeps): Promise<TurnOutcome> {
   const { cfg, tools, store, approve, log } = deps;
   const call = deps._callModel ?? callModel;
@@ -392,6 +418,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   deps.readCache?.clear(); // start each turn with a clean read-dedup cache (token optimization)
 
   let mutated = false;           // did a write/edit/bash run since the last verification? → drives auto-verify
+  let explicitCheckPassedSinceMutation = false; // the agent already ran a detected check after editing
   let fixRounds = 0;             // self-correction rounds spent this turn
   let unverifiedNudges = 0;      // one-time nudge when a file change matched NO automated check
   const autofixMax = deps.autofixMax ?? 3;
@@ -425,7 +452,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   if (tools.has("request_secret"))
     addStable("Secrets: when a command needs an API key/token/password, call `request_secret` (UPPER_SNAKE name) so the USER types it into a masked prompt — never ask them to paste a secret into the chat, and never put a literal key in a command. The value is exposed to run_bash as $NAME (reference it as \"$NAME\"); you never see it. NEVER print, echo, log, or commit a secret value. Use `check_secret` to see if one is already set.");
   if (tools.has("expose_port"))
-    addStable("Public preview: to test a web app over a real URL (not just localhost), start its dev server with run_bash background, then call `expose_port` with the port to get a temporary public https URL (it auto-picks an installed tunnel client). It's a throwaway tunnel — fine for testing/sharing, not production hosting.");
+    addStable("Public preview: only call `expose_port` when the user explicitly asks to share, publish, or open a public preview URL. For normal verification, prefer browser_check against a static file path or localhost. If a public preview is requested, start the dev server with run_bash background, then call `expose_port` with the port to get a temporary public https URL (throwaway tunnel; not production hosting).");
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (deps.signal?.aborted) return {}; // ESC between steps — the drain loop prints "⊘ stopped" once
@@ -548,6 +575,8 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
           log(c.yellow(`  ⚠ checks still failing after ${autofixMax} self-correction round(s) — leaving the changes for you to review`));
         } else if (v?.ran && v.ok) {
           log(c.green("  ✓ verified — checks pass"));
+        } else if (v && !v.ran && explicitCheckPassedSinceMutation) {
+          log(c.green("  ✓ verified — explicit check passed"));
         } else if (v && !v.ran && unverifiedNudges < 1) {
           // No automated check matched this project (e.g. a JS app with no typecheck/test script). That is
           // NOT the same as "verified" — a build-less UI change can compile and still do nothing. Nudge the
@@ -556,7 +585,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
           unverifiedNudges++;
           log(c.yellow("  ⚠ no automated checks ran — changes are NOT verified yet"));
           history.push({ role: "user", content:
-            "Your changes weren't covered by any automated check, so they are NOT verified. If this was a UI / visual / interactive change (a toggle, button, styling, route), VERIFY IT NOW with browser_check: make sure the dev server is running (run_bash background → list_bash for its URL), then browser_check that URL — perform the actual interaction and assert the observable result changed. If it was a change that genuinely has no runtime behaviour to check (docs, config, comments), just say so in one line and finish. Do not claim a visual feature works without a passing browser_check." });
+            "Your changes weren't covered by any automated check, so they are NOT verified. If this was a UI / visual / interactive change (a toggle, button, styling, route), VERIFY IT NOW with browser_check. For static HTML/CSS/JS, pass the workspace file path directly (e.g. site/index.html) and avoid a local server. For framework apps, make sure the dev server is running (run_bash background → call the list_bash TOOL for its URL), then browser_check that URL — perform the actual interaction and assert the observable result changed. If the current sandbox blocks local networking and the app cannot be opened as a static file, say that plainly instead of retrying server variants. If it was a change that genuinely has no runtime behaviour to check (docs, config, comments), just say so in one line and finish. Do not claim a visual feature works without a passing browser_check." });
           mutated = false; // re-arm so the follow-up turn's changes get checked too
           continue;
         } else if (v && !v.ran) {
@@ -676,7 +705,9 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
           continue;
         }
       }
-      if (mutatingCall) { mutated = true; deps.onMutate?.(); invalidateRepoMap(); } // mutation → ESC-warning + auto-verify + refresh the repo map next turn
+      const workspaceChange = toolCallChangesWorkspace(tu.name, tu.input)
+        && !(tu.name === "run_bash" && isKnownCheckCommand(cfg.cwd, String((tu.input as any)?.command ?? "")));
+      if (workspaceChange) { mutated = true; explicitCheckPassedSinceMutation = false; deps.onMutate?.(); invalidateRepoMap(); } // workspace change → ESC-warning + auto-verify + refresh repo map next turn
       // PreToolUse hooks: a user-defined command runs BEFORE the tool and can block it (exit 2 /
       // {"decision":"block"}) or inject context. No-op when no hooks are configured.
       const hooks = deps.hooks; const hookExec = deps.hookExec;
@@ -701,7 +732,15 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         // Carry images (a browser_check screenshot) as a content-block array so a vision model can SEE
         // them; otherwise a plain string keeps the overwhelmingly-common text-only case on the wire.
         results.push({ type: "tool_result", tool_use_id: tu.id, content: toolResultContent(out, images) });
-        if (tu.name === "run_bash") surfaceBashOutcome(out, log); // make bash activity/errors visible to the user
+        if (tu.name === "run_bash") {
+          surfaceBashOutcome(out, log); // make bash activity/errors visible to the user
+          const command = String((tu.input as any)?.command ?? "");
+          if (mutated && isSuccessfulForegroundCommand(out) && isKnownCheckCommand(cfg.cwd, command)) {
+            explicitCheckPassedSinceMutation = true;
+          }
+        } else if (tu.name === "browser_check" && mutated && out.startsWith("✓ browser_check PASSED")) {
+          explicitCheckPassedSinceMutation = true;
+        }
       } catch (e) {
         const msg = (e as Error).message;
         let content = `error: ${msg}`;

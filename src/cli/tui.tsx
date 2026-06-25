@@ -748,7 +748,7 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/mcp", "MCP servers"],
   ["/skills", "list skills"],
   ["/skill", "pick a skill (↑↓ · Enter)"],
-  ["/agents", "AGENTS.md — show/regen (↑↓ · Enter)"],
+  ["/agents", "project memory — show/update/episodes/review (↑↓ · Enter)"],
 ];
 
 // Commands that take a free-text argument: Enter on these COMPLETES to "/cmd " so the argument can be

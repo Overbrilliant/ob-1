@@ -4,6 +4,7 @@
 import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, existsSync } from "node:fs";
 import { resolve, relative, isAbsolute, dirname, sep } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ToolDef, ImageSource, ContentBlock } from "../providers/types.ts";
 import { visionEnabled } from "../providers/models.ts";
 import type { Config } from "../config.ts";
@@ -65,6 +66,17 @@ export function isReadOnlyToolCall(name: string, input: any): boolean {
 
 export function toolCallMutates(tool: Tool, name: string, input: any): boolean {
   return tool.mutating && !isReadOnlyToolCall(name, input);
+}
+
+/** Does this call plausibly change workspace files/code and therefore require post-change verification?
+ *  This is narrower than "mutating": process controls, public previews, secrets, memory, SQL, and PR
+ *  actions mutate external/session state but should not reset a passed browser/test verification. */
+export function toolCallChangesWorkspace(name: string, input: any): boolean {
+  if (name === "write_file" || name === "edit_file" || name === "architect_edit") return true;
+  if (name !== "run_bash") return false;
+  if (input?.background) return false; // servers/watchers mutate process state, not files
+  const intent = classifyIntent(String(input?.command ?? ""));
+  return intent === "write" || intent === "destructive" || intent === "unknown";
 }
 
 /** A read-only view of a tool for autonomous investigators. Input-sensitive readers like execute_sql
@@ -155,6 +167,20 @@ function safePath(cfg: Config, p: string): string {
   return abs;
 }
 
+function browserCheckUrl(cfg: Config, raw: string): string {
+  const s = String(raw ?? "").trim();
+  if (/^https?:\/\//i.test(s)) return s;
+  let abs: string;
+  if (/^file:\/\//i.test(s)) {
+    try { abs = safePath(cfg, fileURLToPath(s)); }
+    catch (e) { throw new Error(`browser_check file URL must point inside the workspace: ${(e as Error).message}`); }
+  } else {
+    abs = safePath(cfg, s);
+  }
+  if (!existsSync(abs)) throw new Error(`browser_check file does not exist: ${s}`);
+  return pathToFileURL(abs).href;
+}
+
 export interface EditResult { content: string; replacements: number; mode: "exact" | "flexible" }
 
 /** Apply a search/replace edit with progressive relaxation (the spec's "lenient apply + auto-retry"):
@@ -180,7 +206,7 @@ export function applyFlexibleEdit(src: string, old_string: string, new_string: s
     .join("\\n");
   const re = new RegExp(pattern, "g");
   const matches = [...src.matchAll(re)];
-  if (matches.length === 0) throw new Error("old_string not found (tried exact + whitespace-flexible match); re-read the file and copy the exact text");
+  if (matches.length === 0) throw new Error("old_string not found (tried exact + whitespace-flexible match). Re-read the narrow line range you need, copy the exact current text, then retry edit_file. Do NOT rewrite the whole file unless the user asked for a full rewrite.");
   if (matches.length > 1 && !replace_all) throw new Error(`old_string is ambiguous (${matches.length} flexible matches); pass replace_all or add surrounding context`);
   if (replace_all) return { content: src.replace(re, () => new_string), replacements: matches.length, mode: "flexible" };
   const m = matches[0];
@@ -313,6 +339,8 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
     mutating: false,
     run: ({ path = "." }) => {
       const dir = safePath(cfg, path);
+      if (!existsSync(dir)) return `directory not found: ${path} (create it first or list its parent directory)`;
+      try { if (!statSync(dir).isDirectory()) return `not a directory: ${path}`; } catch { return `cannot read directory: ${path}`; }
       return readdirSync(dir)
         .map((n) => {
           try { return statSync(resolve(dir, n)).isDirectory() ? n + "/" : n; }
@@ -325,7 +353,7 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
   add({
     def: {
       name: "write_file",
-      description: "Create or overwrite a file with the given content.",
+      description: "Create a new file or intentionally replace an entire existing file. For existing non-trivial files, prefer edit_file with a narrow exact replacement; after an edit_file mismatch, re-read the relevant range and retry edit_file instead of rewriting the whole file.",
       input_schema: {
         type: "object",
         properties: { path: { type: "string" }, content: { type: "string" } },
@@ -616,8 +644,10 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
       description:
         "VERIFY a running web app in a real headless browser — the only way to confirm a VISUAL or " +
         "INTERACTIVE change actually works (a theme toggle, a button, a form, a route). Static checks " +
-        "(typecheck/build) and `curl` CANNOT see client-side behavior; this can. Point it at the dev " +
-        "server URL (start one with run_bash background first, then read its URL via list_bash). " +
+        "(typecheck/build) and `curl` CANNOT see client-side behavior; this can. For static HTML/CSS/JS " +
+        "pages, pass a workspace file path such as `site/index.html` or a `file://` URL — no dev server " +
+        "is needed. For framework apps, point it at the dev server URL (start one with run_bash " +
+        "background first, then call the list_bash TOOL — not a shell command — to read its URL). " +
         "Drive the page with `actions` (click/fill/press/wait/eval) and verify with `assert` " +
         "(each evaluates a JS expression in page context). It captures console + uncaught page errors " +
         "(React crashes show up here, with stack traces), captures FAILED network requests (broken APIs / " +
@@ -631,7 +661,7 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
       input_schema: {
         type: "object",
         properties: {
-          url: { type: "string", description: "the page to load, e.g. http://localhost:8000/" },
+          url: { type: "string", description: "the page to load, e.g. http://localhost:8000/ or a workspace file path like site/index.html" },
           actions: {
             type: "array",
             description: "interactions to perform IN ORDER before asserting",
@@ -671,7 +701,8 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
     },
     mutating: false, // verification only — drives a local preview; auto-runs without an approval gate
     run: async ({ url, actions, assert, screenshot, snapshot, timeout_ms }, ctx) => {
-      if (typeof url !== "string" || !/^https?:\/\//i.test(url.trim())) throw new Error("browser_check needs a full http(s) `url` (e.g. http://localhost:8000/)");
+      if (typeof url !== "string" || !url.trim()) throw new Error("browser_check needs a URL or workspace file path (e.g. http://localhost:8000/ or site/index.html)");
+      const normalizedUrl = browserCheckUrl(cfg, url);
       const mode = screenshotMode(screenshot);
       const vision = visionEnabled(cfg.resolvedModel ?? cfg.model); // resolved model if the chosen one is a router alias
       const shot = mode === "off" ? undefined : defaultScreenshotPath(cfg.cwd, Date.now());
@@ -679,7 +710,7 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
       // Whether we actually ATTACH it is decided post-result by shouldAttachScreenshot (cost-aware: auto
       // attaches only on failure, so a passing check never burns vision tokens on a screenshot).
       const r = await runBrowserCheck({
-        url: url.trim(),
+        url: normalizedUrl,
         actions: Array.isArray(actions) ? actions : undefined,
         assert: Array.isArray(assert) ? assert : undefined,
         screenshotPath: shot,

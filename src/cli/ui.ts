@@ -174,7 +174,7 @@ export function banner(): string {
     "",
     "  " + c.bold(c.cyan("OB-1")) + c.dim("  free, multi-agent, token-efficient coding agent") + c.gray("   ·   v0.0.1"),
     c.gray(rule),
-    c.cyan("  /help") + c.dim(" commands   ·   ") + c.cyan("/settings") + c.dim(" configure"), // model shown once, below
+    c.cyan("  /help") + c.dim(" commands   ·   ") + c.cyan("/models") + c.dim(" setup   ·   press ") + c.cyan("/") + c.dim(" for menu"), // model shown once, below
     "",
   ].join("\n");
 }
