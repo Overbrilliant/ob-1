@@ -1,0 +1,32 @@
+{
+  "name": "ob1",
+  "version": "0.0.1",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.17",
+    "ink-testing-library": "^4.0.0",
+    "typescript": "^5"
+  },
+  "bin": {
+    "ob1": "src/index.ts"
+  },
+  "description": "OB-1 — a multi-mind, token-frugal CLI coding agent",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run --watch src/index.ts",
+    "smoke": "bun run scripts/smoke.ts",
+    "typecheck": "tsc --noEmit",
+    "build:bin": "bun run scripts/build-bin.ts",
+    "setup": "bash scripts/install.sh"
+  },
+  "type": "module",
+  "dependencies": {
+    "ink": "^7.1.0",
+    "ink-text-input": "^6.0.0",
+    "playwright": "^1.61.0",
+    "react": "^19.2.7",
+    "sqlite-vec": "^0.1.9",
+    "tree-sitter-wasms": "^0.1.13",
+    "web-tree-sitter": "0.20.8"
+  }
+}

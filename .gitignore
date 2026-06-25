@@ -1,0 +1,24 @@
+node_modules/
+.ob1/
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+dist/
+*.log
+.DS_Store
+
+# compiled standalone binary (scripts/build-bin.ts / scripts/install.sh --binary)
+/ob1
+ob1-*.bin
+*.bun-build
+.*.bun-build
+apple-pages/
+
+# Python bytecode cache (from PTY test helpers)
+__pycache__/
+*.pyc
+
+# working plan (local only, not shipped)
+PLAN-V2.md
