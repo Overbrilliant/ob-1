@@ -12,21 +12,26 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+
+env:
+  BUN_VERSION: 1.3.13
 
 jobs:
-  release:
-    name: build release binaries
+  build-linux:
+    name: build Linux binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.3.13
+          bun-version: ${{ env.BUN_VERSION }}
       - name: Install dependencies
         run: bun install --frozen-lockfile
       - name: Typecheck
         run: bun run typecheck
-      - name: Build release archives
+      - name: Build Linux archives
         shell: bash
         run: |
           set -euo pipefail
@@ -42,13 +47,161 @@ jobs:
             rm -rf "$work"
           }
 
-          build_one "ob1-darwin-arm64" "bun-darwin-arm64"
-          build_one "ob1-darwin-x64" "bun-darwin-x64"
           build_one "ob1-linux-arm64" "bun-linux-arm64"
           build_one "ob1-linux-x64" "bun-linux-x64-baseline"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
 
+  build-macos:
+    name: build macOS binaries
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build, sign, and notarize macOS archives
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/ob1-release-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+
+          cleanup_signing() {
+            if [ -f "$KEYCHAIN_PATH" ]; then
+              security delete-keychain "$KEYCHAIN_PATH" || true
+            fi
+            rm -f "$CERT_PATH"
+          }
+          trap cleanup_signing EXIT
+
+          has_notarization_secrets() {
+            [ -n "${APPLE_DEVELOPER_ID_CERTIFICATE_BASE64:-}" ] &&
+            [ -n "${APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD:-}" ] &&
+            [ -n "${APPLE_ID:-}" ] &&
+            [ -n "${APPLE_TEAM_ID:-}" ] &&
+            [ -n "${APPLE_APP_SPECIFIC_PASSWORD:-}" ]
+          }
+
+          decode_base64() {
+            local value="$1"
+            local out="$2"
+            printf '%s' "$value" | base64 --decode > "$out" 2>/dev/null ||
+              printf '%s' "$value" | base64 -D > "$out"
+          }
+
+          setup_keychain() {
+            decode_base64 "$APPLE_DEVELOPER_ID_CERTIFICATE_BASE64" "$CERT_PATH"
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+            security import "$CERT_PATH" \
+              -P "$APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD" \
+              -A \
+              -t cert \
+              -f pkcs12 \
+              -k "$KEYCHAIN_PATH"
+            security list-keychains -d user -s "$KEYCHAIN_PATH"
+            security set-key-partition-list \
+              -S apple-tool:,apple:,codesign: \
+              -s \
+              -k "$KEYCHAIN_PASSWORD" \
+              "$KEYCHAIN_PATH"
+          }
+
+          signing_identity() {
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" |
+              awk -F '"' '/Developer ID Application/ { print $2; exit }'
+          }
+
+          sign_and_notarize() {
+            local binary="$1"
+            local asset="$2"
+            local identity
+            local notary_zip
+
+            if ! has_notarization_secrets; then
+              echo "::notice::Apple Developer ID secrets are not configured; ${asset} will be unsigned and not notarized."
+              return
+            fi
+
+            identity="$(signing_identity)"
+            [ -n "$identity" ] || { echo "::error::No Developer ID Application identity found in imported certificate."; exit 1; }
+
+            codesign --force --timestamp --options runtime --sign "$identity" "$binary"
+            codesign --verify --strict --verbose=2 "$binary"
+
+            notary_zip="$RUNNER_TEMP/${asset}.notary.zip"
+            ditto -c -k --keepParent "$binary" "$notary_zip"
+            xcrun notarytool submit "$notary_zip" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait
+          }
+
+          build_one() {
+            local asset="$1"
+            local target="$2"
+            local work="dist/${asset}"
+            mkdir -p "$work"
+            bun run scripts/build-bin.ts "$work/ob1" "$target"
+            sign_and_notarize "$work/ob1" "$asset"
+            tar -C "$work" -czf "dist/${asset}.tar.gz" ob1
+            rm -rf "$work"
+          }
+
+          if has_notarization_secrets; then
+            setup_keychain
+          fi
+
+          build_one "ob1-darwin-arm64" "bun-darwin-arm64"
+          build_one "ob1-darwin-x64" "bun-darwin-x64"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs:
+      - build-linux
+      - build-macos
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Build release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
           cp scripts/install.sh dist/install.sh
           (cd dist && shasum -a 256 *.tar.gz install.sh > checksums.txt)
+          ls -lh dist
+          cat dist/checksums.txt
+      - name: Generate artifact attestations
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

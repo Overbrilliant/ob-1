@@ -9,8 +9,22 @@ Full design: **[`docs/planning/ob1-plan.html`](docs/planning/ob1-plan.html)** ·
 
 ## Install — type `ob1` anywhere
 
+Homebrew:
+
+```
+brew install overbrilliant/tap/ob-1
+```
+
+Native install script:
+
 ```
 curl -fsSL https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh | sh
+```
+
+npm (requires Bun at runtime):
+
+```
+npm install -g @overbrilliant/ob1
 ```
 
 The release installer detects macOS/Linux + arm64/x64, downloads the matching binary, verifies it
@@ -36,6 +50,9 @@ git clone https://github.com/overbrilliant/ob-1.git && cd ob-1
   fall back to OB-1's pure-TS implementations in this mode.)
 
 To run without installing: `bun run src/index.ts` (or `bun start`).
+
+Distribution details, release provenance, and Apple signing setup are documented in
+[`docs/distribution.md`](docs/distribution.md).
 
 ## Status — Phase 0/1 (skeleton that runs)
 
