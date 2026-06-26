@@ -1,3 +1,12 @@
+```text
+   ██████╗ ██████╗      ██╗
+  ██╔═══██╗██╔══██╗    ███║
+  ██║   ██║██████╔╝═══ ╚██║
+  ██║   ██║██╔══██╗     ██║
+  ╚██████╔╝██████╔╝     ██║
+   ╚═════╝ ╚═════╝      ╚═╝
+```
+
 # OB-1
 
 [![CI](https://github.com/Overbrilliant/ob-1/actions/workflows/ci.yml/badge.svg)](https://github.com/Overbrilliant/ob-1/actions/workflows/ci.yml)
