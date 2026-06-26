@@ -12,6 +12,7 @@
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, dirname } from "node:path";
+import { isBunStandaloneExecutable } from "../runtime.ts";
 import type { Sym } from "./repomap.ts";
 
 // extension → grammar name (the `tree-sitter-<name>.wasm` files in tree-sitter-wasms/out).
@@ -87,7 +88,7 @@ export function treeSitterStatus(): { ready: boolean; grammars: string[] } {
 export async function initTreeSitter(): Promise<boolean> {
   if (initDone) return ready;
   initDone = true;
-  if (process.env.OB1_TREESITTER === "0") return false;
+  if (process.env.OB1_TREESITTER === "0" || isBunStandaloneExecutable()) return false;
   try {
     const mod: any = await import("web-tree-sitter");
     const Parser: any = mod.default ?? mod;

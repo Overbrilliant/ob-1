@@ -10,6 +10,7 @@
 import { Database } from "bun:sqlite";
 import * as sqliteVec from "sqlite-vec";
 import { existsSync } from "node:fs";
+import { isBunStandaloneExecutable } from "../runtime.ts";
 
 let prepared = false;
 
@@ -38,7 +39,7 @@ function candidateLibs(): string[] {
 export function prepareCustomSqlite(): void {
   if (prepared) return;
   prepared = true;
-  if (process.env.OB1_VEC === "0") return;
+  if (process.env.OB1_VEC === "0" || isBunStandaloneExecutable()) return;
   for (const lib of candidateLibs()) {
     try {
       if (!existsSync(lib)) continue;
@@ -61,7 +62,7 @@ const toBlob = (v: Float32Array) => new Uint8Array(v.buffer, v.byteOffset, v.byt
 /** Build a sqlite-vec KNN index on `db`, or return null when the extension can't load (→ the store
  *  falls back to its pure-TS cosine index). Cosine metric matches the store's L2-normalized vectors. */
 export function tryVecIndex(db: Database): VecIndex | null {
-  if (process.env.OB1_VEC === "0") return null;
+  if (process.env.OB1_VEC === "0" || isBunStandaloneExecutable()) return null;
   try {
     db.loadExtension(sqliteVec.getLoadablePath());
   } catch {

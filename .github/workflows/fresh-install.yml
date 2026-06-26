@@ -64,6 +64,10 @@ jobs:
           echo "$install_output" | grep "${{ matrix.asset }}"
           "$RUNNER_TEMP/ob1-bin/ob1" --version | tee "$RUNNER_TEMP/ob1-version.txt"
           "$RUNNER_TEMP/ob1-bin/ob1" --help | head -20
+          tmp_home="$(mktemp -d)"
+          trap 'rm -rf "$tmp_home"' EXIT
+          mkdir -p "$tmp_home/home"
+          printf '/exit\n' | HOME="$tmp_home/home" OB1_SETTINGS_DIR="$tmp_home/settings" "$RUNNER_TEMP/ob1-bin/ob1"
           if [ "$OB1_TEST_VERSION" != "latest" ]; then
             expected="${OB1_TEST_VERSION#v}"
             actual="$(cat "$RUNNER_TEMP/ob1-version.txt")"
@@ -91,6 +95,10 @@ jobs:
           brew install overbrilliant/tap/ob-1
           ob1 --version
           ob1 --help | head -20
+          tmp_home="$(mktemp -d)"
+          trap 'rm -rf "$tmp_home"' EXIT
+          mkdir -p "$tmp_home/home"
+          printf '/exit\n' | HOME="$tmp_home/home" OB1_SETTINGS_DIR="$tmp_home/settings" ob1
 
   npm-install:
     name: npm install
@@ -106,3 +114,7 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/ob1-npm" @overbrilliant/ob1@latest
           "$RUNNER_TEMP/ob1-npm/node_modules/.bin/ob1" --version
           "$RUNNER_TEMP/ob1-npm/node_modules/.bin/ob1" --help | head -20
+          tmp_home="$(mktemp -d)"
+          trap 'rm -rf "$tmp_home"' EXIT
+          mkdir -p "$tmp_home/home"
+          printf '/exit\n' | HOME="$tmp_home/home" OB1_SETTINGS_DIR="$tmp_home/settings" "$RUNNER_TEMP/ob1-npm/node_modules/.bin/ob1"

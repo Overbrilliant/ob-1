@@ -74,6 +74,7 @@ const SMOKES = [
   "agent-memory-smoke.ts",    // AGENTS.md managed blocks + episode capture + review/promote pipeline
   "tool-ux-smoke.ts",         // friendly tool failures that steer recovery instead of loops/rewrites
   "treesitter-smoke.ts",      // tree-sitter repo-map symbol extraction (+ regex fallback)
+  "compiled-startup-smoke.ts",// standalone binary startup: no runtime node_modules assets required
   "git-exclude-smoke.ts",     // startup excludes .ob1/ from repo-local git status without touching .gitignore
   "settings-persist-smoke.ts",// settings persistence (.ob1/settings.json round-trip + precedence)
   "freellm-smoke.ts",         // FreeLLMAPI provider: profile registry + url normalization + config round-trip

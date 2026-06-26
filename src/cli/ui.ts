@@ -172,7 +172,7 @@ export function banner(): string {
     "",
     c.bold(c.brightCyan(art)),                              // prominent wordmark
     "",
-    "  " + c.bold(c.cyan("OB-1")) + c.dim("  free, multi-agent, token-efficient coding agent") + c.gray("   ·   v0.1.1"),
+    "  " + c.bold(c.cyan("OB-1")) + c.dim("  free, multi-agent, token-efficient coding agent") + c.gray("   ·   v0.1.2"),
     c.gray(rule),
     c.cyan("  /help") + c.dim(" commands   ·   ") + c.cyan("/models") + c.dim(" setup   ·   press ") + c.cyan("/") + c.dim(" for menu"), // model shown once, below
     "",

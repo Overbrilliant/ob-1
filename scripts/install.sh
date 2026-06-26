@@ -3,7 +3,7 @@
 #
 # Release install, no Bun required:
 #   curl -fsSL https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh | sh
-#   curl -fsSL https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.1
+#   curl -fsSL https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.2
 #
 # Local repo install:
 #   ./scripts/install.sh            # launcher (default), runs via Bun from this repo
@@ -21,8 +21,8 @@ usage() {
 Install OB-1.
 
 Usage:
-  install.sh [--version v0.1.1] [--repo owner/name] [--install-dir DIR]
-  install.sh --release [--version v0.1.1]
+  install.sh [--version v0.1.2] [--repo owner/name] [--install-dir DIR]
+  install.sh --release [--version v0.1.2]
   install.sh --launcher
   install.sh --binary
 
