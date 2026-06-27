@@ -341,6 +341,7 @@ export function describe(name: string, input: any): string {
   if (name === "spawn_write_subagents") return `spawn_write_subagents (${Array.isArray(input?.subtasks) ? input.subtasks.length : 0})`;
   if (name === "update_tasks") { const ts = Array.isArray(input?.tasks) ? input.tasks : []; const done = ts.filter((t: any) => /^(completed|done|complete)$/i.test(String(t?.status ?? ""))).length; return ts.length ? `update_tasks (${done}/${ts.length} done)` : "update_tasks (clear)"; }
   if (name === "manage_skill") return `manage_skill ${input?.action ?? "?"}: ${input?.name ?? "?"}`;
+  if (name === "use_skill") return `use_skill: ${input?.name ?? "?"}`;
   return `${name} ${preview(input)}`;
 }
 
