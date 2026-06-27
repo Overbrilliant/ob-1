@@ -3,9 +3,14 @@
 // multi-mind workers for research. The HTTP/JSON/HTML plumbing lives here as small pure helpers +
 // an injectable `fetchFn`, so it's unit-testable without the network.
 
+import { lookup } from "node:dns/promises";
+
 const UA = "OB-1/0.1 (+https://github.com/overbrilliant/ob-1)";
 const TIMEOUT_MS = 20_000;
 export type Fetcher = typeof fetch;
+/** Resolve a hostname to its IP address(es). Injectable so the SSRF DNS check stays hermetic in tests. */
+export type HostLookup = (host: string) => Promise<string[]>;
+const dnsLookup: HostLookup = async (host) => (await lookup(host, { all: true })).map((r) => r.address);
 
 /** Abort signal for a request: the built-in 20s timeout, OR-ed with the caller's turn signal (ESC) when
  *  present, so a fetch ends on the FIRST of "timed out" or "user stopped". */
@@ -148,13 +153,25 @@ export function isBlockedHost(hostname: string): boolean {
 /** Fetch an http(s) URL and return readable text (HTML stripped), truncated to `maxChars`. By default
  *  refuses internal/loopback/metadata hosts (SSRF guard); pass `allowPrivate` (OB1_WEB_FETCH_ALLOW_PRIVATE=1)
  *  to fetch e.g. a localhost dev server. */
-export async function webFetch(opts: { url: string; maxChars?: number; allowPrivate?: boolean; fetchFn?: Fetcher; signal?: AbortSignal }): Promise<string> {
-  const { url, maxChars = 20_000, allowPrivate = false, fetchFn = fetch, signal } = opts;
+export async function webFetch(opts: { url: string; maxChars?: number; allowPrivate?: boolean; fetchFn?: Fetcher; lookupFn?: HostLookup; signal?: AbortSignal }): Promise<string> {
+  const { url, maxChars = 20_000, allowPrivate = false, fetchFn = fetch, lookupFn = dnsLookup, signal } = opts;
   if (!/^https?:\/\//i.test(url)) throw new Error("web_fetch: url must start with http:// or https://");
   let host: string;
   try { host = new URL(url).hostname; } catch { throw new Error("web_fetch: invalid URL"); }
-  if (!allowPrivate && isBlockedHost(host)) {
-    throw new Error(`web_fetch: refusing to fetch a private/internal/loopback address (${host}); set OB1_WEB_FETCH_ALLOW_PRIVATE=1 to allow`);
+  if (!allowPrivate) {
+    if (isBlockedHost(host)) {
+      throw new Error(`web_fetch: refusing to fetch a private/internal/loopback address (${host}); set OB1_WEB_FETCH_ALLOW_PRIVATE=1 to allow`);
+    }
+    // A literal-hostname check is bypassable: a public-looking name can RESOLVE to 127.0.0.1, 10.x, or the
+    // 169.254.169.254 metadata IP. Resolve it and refuse if any address is internal. (A fetch re-resolves,
+    // so this isn't full DNS-rebinding protection, but it closes the common public-name→private-IP bypass.)
+    let addrs: string[];
+    try { addrs = await lookupFn(host); }
+    catch { throw new Error(`web_fetch: could not resolve host (${host})`); }
+    const bad = addrs.find((a) => isBlockedHost(a));
+    if (bad) {
+      throw new Error(`web_fetch: refusing to fetch ${host} — it resolves to a private/internal address (${bad}); set OB1_WEB_FETCH_ALLOW_PRIVATE=1 to allow`);
+    }
   }
   let res: Response;
   try {

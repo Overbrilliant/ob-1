@@ -32,6 +32,12 @@ check("classify unscoped DELETE → destructive", classifySql("DELETE FROM t") =
 check("classify unscoped UPDATE → destructive", classifySql("UPDATE t SET x=1") === "destructive");
 check("classify -- comment then SELECT → read", classifySql("-- note\nSELECT 1") === "read");
 check("classify empty → empty", classifySql("   ") === "empty");
+// multi-statement scripts are classified by their MOST DANGEROUS statement — a destructive statement
+// anywhere in the script must trip the gate (db.exec runs the WHOLE script).
+check("classify scoped write + trailing DROP → destructive", classifySql("UPDATE t SET x=1 WHERE id=2; DROP TABLE t") === "destructive");
+check("classify two writes → write", classifySql("INSERT INTO t VALUES (1); UPDATE t SET x=1 WHERE id=1") === "write");
+check("classify ; inside a string literal is not a split", classifySql("INSERT INTO t VALUES ('a;b')") === "write");
+check("classify DROP hidden after a comment line → destructive", classifySql("SELECT 1; -- harmless\nDROP TABLE t") === "destructive");
 
 // real round-trip against a temp db file
 runSqlite(dir, "app.db", "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)");
@@ -65,6 +71,12 @@ check("isDestructiveCall does NOT tag SELECT", isDestructiveCall("execute_sql", 
   let threw2 = false;
   try { await sqlTool!.run({ sql: "DELETE FROM users", db: "app.db" }); } catch { threw2 = true; }
   check("execute_sql refuses unscoped DELETE", threw2);
+  // P0 regression: a destructive statement smuggled after a benign one must still be refused, and the
+  // table must survive (the gate blocks BEFORE db.exec runs the script).
+  let threw3 = false;
+  try { await sqlTool!.run({ sql: "UPDATE users SET name='x' WHERE id=1; DROP TABLE users", db: "app.db" }); } catch { threw3 = true; }
+  const tableSurvived = runSqlite(dir, "app.db", "SELECT name FROM sqlite_master WHERE type='table' AND name='users'").rows.length === 1;
+  check("execute_sql refuses multi-statement DROP bypass (table survives)", threw3 && tableSurvived);
   const wiped = await sqlTool!.run({ sql: "DELETE FROM users", db: "app.db", allow_destructive: true });
   check("execute_sql allows DELETE with allow_destructive", /affected/.test(String((wiped as any).text ?? wiped)));
   const read = await sqlTool!.run({ sql: "SELECT count(*) c FROM users", db: "app.db" });

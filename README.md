@@ -25,8 +25,12 @@ review, synthesis, and eval-driven modes so you can spend more compute only when
   and keeps project notes it can reuse later.
 - **A visible memory system.** You can inspect facts, revisions, relationships, search results, and
   the memory graph from the CLI.
-- **Gated tool use.** File edits, shell commands, MCP tools, browser checks, and verification helpers
-  run through the agent loop with approvals and sandbox support.
+- **Tool use with opt-in guardrails.** File edits, shell commands, MCP tools, browser checks, and
+  verification helpers run through the agent loop. By default OB-1 runs in **autopilot** (it executes
+  tools without prompting) with the **OS sandbox off** — fast, but it acts on its own. Turn on per-action
+  approvals with `OB1_PERMISSION=ask`, and confine writes/network with `OB1_SANDBOX=workspace-write` or
+  `read-only` (or set `permissionMode` / `sandbox` in `settings.json`). Even in autopilot, catastrophic
+  commands (e.g. `rm -rf /`) are hard-blocked and destructive actions are flagged.
 - **Model setup that does not require a cloud account on day one.** Use FreeLLMAPI for the free path,
   or subscribe when you want credits for more intelligent models.
 - **Release paths people can test.** Homebrew, npm, native archives, checksums, attestations, and

@@ -1,8 +1,8 @@
 // Tool/action system (Phase 0). Read-only tools auto-run; mutating tools pass through
 // the approval gate and are blocked in Plan mode (R6). File edits use a search/replace
 // "diff" format — token-efficient and the proven pattern (R4).
-import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, existsSync } from "node:fs";
-import { resolve, relative, isAbsolute, dirname, sep } from "node:path";
+import { readFileSync, writeFileSync, readdirSync, statSync, mkdirSync, existsSync, realpathSync } from "node:fs";
+import { resolve, relative, isAbsolute, dirname, basename, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ToolDef, ImageSource, ContentBlock } from "../providers/types.ts";
@@ -151,6 +151,33 @@ export interface AskQuestion { question: string; header?: string; options: AskOp
 export interface AskUserRequest { questions: AskQuestion[] }
 export type AskUserFn = (req: AskUserRequest) => Promise<string>;
 
+/** Is `abs` inside the workspace AFTER resolving symlinks? A lexical check alone is escapable: an
+ *  in-workspace symlink that points outside passes the `relative()` test but `readFileSync`/`writeFileSync`
+ *  follow it out. We resolve the deepest EXISTING prefix of `abs` to its real location (the target itself
+ *  may not exist yet — e.g. a write_file destination) and re-check containment against the real workspace
+ *  root. The root is realpath'd too, so a workspace that itself lives under a symlinked path (e.g. macOS
+ *  /tmp → /private/tmp) doesn't produce false positives. */
+function insideWorkspaceReal(cwdRoot: string, abs: string): boolean {
+  let realRoot: string;
+  try { realRoot = realpathSync(cwdRoot); } catch { realRoot = cwdRoot; }
+  let real: string;
+  try {
+    real = realpathSync(abs); // exists → fully symlink-resolved
+  } catch {
+    // Doesn't exist yet: resolve the nearest existing ancestor, then re-attach the not-yet-created tail.
+    const tail: string[] = [];
+    let dir = abs;
+    for (;;) {
+      const parent = dirname(dir);
+      if (parent === dir) { real = resolve(dir, ...tail); break; } // reached filesystem root
+      tail.unshift(basename(dir));
+      try { real = resolve(realpathSync(parent), ...tail); break; } catch { dir = parent; }
+    }
+  }
+  const rel = relative(realRoot, real);
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel));
+}
+
 /** Keep file access inside the workspace (a basic guardrail; OS sandbox is a later phase, R7). */
 function safePath(cfg: Config, p: string): string {
   // A tool call can arrive with the path missing or non-string (the model omitted it or used the wrong
@@ -169,6 +196,11 @@ function safePath(cfg: Config, p: string): string {
     // Actionable error (names the root + the right form) so the model self-corrects in ONE step rather
     // than flailing through ~/…, /…, doubled-relative variants until its budget is gone.
     throw new Error(`path is outside the workspace: "${p}". The workspace root is ${cfg.cwd} — pass a path relative to it (e.g. "src/agent/loop.ts"), not an absolute or home-relative path.`);
+  }
+  // The lexical check above is escapable via an in-workspace symlink that points OUT. Resolve symlinks and
+  // re-verify so a read/write can't follow one outside the workspace.
+  if (!insideWorkspaceReal(cfg.cwd, abs)) {
+    throw new Error(`path resolves outside the workspace via a symlink: "${p}". The workspace root is ${cfg.cwd}; OB-1 won't follow a link out of it.`);
   }
   return abs;
 }
@@ -265,6 +297,9 @@ export interface ToolExtras { secrets?: SecretStore }
 export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn, procs?: ProcRegistry, todos?: TodoRegistry, readCache: ReadCache = new ReadCache(), extras: ToolExtras = {}): Map<string, Tool> {
   const tools = new Map<string, Tool>();
   const add = (t: Tool) => tools.set(t.def.name, t);
+  // Scrub any session secret value that leaks into shell output (an accidental `echo $TOKEN`, a tool that
+  // prints its config) before it reaches the model/transcript. No-op when no secret store is wired.
+  const redact = (s: string): string => (extras.secrets ? extras.secrets.redact(s) : s);
 
   add({
     def: {
@@ -301,7 +336,14 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
         content = lines.slice(start, end).join("\n");
         rangeNote = ` (lines ${start + 1}-${Math.min(end, lines.length)} of ${lines.length})`;
       }
-      content = content.slice(0, 100_000);
+      // Hard char cap. SAY SO when it bites — a silent slice makes the model reason about a partial file as
+      // if it were complete (e.g. "the function isn't defined here"). Tell it how to read past the cap.
+      const CHAR_CAP = 100_000;
+      const capped = content.length > CHAR_CAP;
+      if (capped) content = content.slice(0, CHAR_CAP);
+      const capNote = capped
+        ? `\n[read_file: TRUNCATED to the first ${CHAR_CAP.toLocaleString()} chars — the ${hasRange ? "selected range" : "file"} is larger. Pass offset/limit (a line range) to read past this point; do NOT assume the content ends here.]`
+        : "";
       // Cache/dedup key includes the range so a full read and a ranged read of the same file don't
       // collide on the path alone (they return different content).
       const key = hasRange ? `${abs}#${offset ?? ""}:${limit ?? ""}` : abs;
@@ -311,7 +353,9 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
         return `[read_file: ${path}${rangeNote} is unchanged since it was read earlier this turn — ${content.length} chars elided to save context; the copy above is still current]`;
       }
       readCache.note(key, content);
-      return rangeNote ? `${content}\n[read_file: returned ${rangeNote.trim()}; pass a different offset/limit for more]` : content;
+      return rangeNote || capNote
+        ? `${content}${rangeNote ? `\n[read_file: returned ${rangeNote.trim()}; pass a different offset/limit for more]` : ""}${capNote}`
+        : content;
     },
   });
 
@@ -407,8 +451,18 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
   // output into the registry buffer, and return a status line. Shared by run_bash(background:true) and
   // restart_bash, so a restart relaunches the EXACT same command in the EXACT same directory.
   const launchBackground = (command: string, workdir: string): { id: number | undefined; message: string } => {
+    // Refuse to launch a SECOND copy of an identical long-lived command BEFORE spawning it. The old guard
+    // spawned first and only THEN warned — which already created the duplicate server / port conflict it
+    // claimed to prevent. restart_bash waits for the old process to leave the registry before relaunching,
+    // so a legitimate restart never trips this.
+    const dup = procs?.list().find((p) => p.background && p.command === command);
+    if (dup) {
+      return { id: dup.id, message: `not starting a duplicate — a background process with the same command is already running (#${dup.id}); launching another would conflict (a port clash if it's a server). Use restart_bash(id: ${dup.id}) to bounce it cleanly, or kill_bash(id: ${dup.id}) to stop it first.` };
+    }
     const argv = wrapCommand(cfg.sandbox, cfg.cwd, command);
-    const proc = Bun.spawn(argv, { cwd: workdir, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
+    // Pass an explicit env snapshot: Bun.spawn does NOT propagate runtime mutations of process.env (unlike
+    // Node), so request_secret values (written to process.env) would otherwise be BLANK in the child shell.
+    const proc = Bun.spawn(argv, { cwd: workdir, env: { ...process.env }, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
     const id = procs?.add(command, makeProcKiller(proc.pid, (sig) => proc.kill(sig as any), true), proc.pid, true, workdir);
     const dec = new TextDecoder();
     const drain = async (stream: ReadableStream<Uint8Array>) => {
@@ -418,11 +472,7 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
     };
     void drain(proc.stdout); void drain(proc.stderr);
     void proc.exited.then(() => { if (id !== undefined) procs?.remove(id); });
-    // Guard against launching a second copy of the same long-lived command (re-running a dev server over
-    // an already-running one → a port conflict). restart_bash is the clean way to bounce an existing one.
-    const dup = procs?.list().find((p) => p.id !== id && p.background && p.command === command);
-    const dupNote = dup ? `\n⚠ a background process with the same command is already running (#${dup.id}) — likely a duplicate (a port conflict if it's a server). Use restart_bash(id: ${dup.id}) to bounce it cleanly, or kill_bash(id: ${dup.id}) first.` : "";
-    return { id, message: `started background process #${id} (pid ${proc.pid ?? "?"}): ${command}${dupNote}\nIt keeps running; use list_bash to read its output, restart_bash(id: ${id}) to bounce it, kill_bash(id: ${id}) to stop it.` };
+    return { id, message: `started background process #${id} (pid ${proc.pid ?? "?"}): ${command}\nIt keeps running; use list_bash to read its output, restart_bash(id: ${id}) to bounce it, kill_bash(id: ${id}) to stop it.` };
   };
 
   add({
@@ -462,15 +512,21 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
       const verdict = validateBashCommand(command, { planMode: cfg.planMode, permissionMode: cfg.permissionMode, sandbox: cfg.sandbox });
       if (verdict.kind === "block") throw new Error(`blocked by safety policy: ${verdict.reason}`);
       // Per-call working directory (relative to the workspace root); cwd does NOT carry between calls.
+      // Must stay INSIDE the workspace: `resolve()` alone happily accepts cwd:".." (or a symlinked subdir)
+      // and would run the command in the parent tree, escaping the workspace boundary.
       const workdir = cwd ? resolve(cfg.cwd, String(cwd)) : cfg.cwd;
+      if (workdir !== cfg.cwd && !insideWorkspaceReal(cfg.cwd, workdir)) {
+        throw new Error(`run_bash: cwd is outside the workspace: "${cwd}". Pass a directory relative to the workspace root ${cfg.cwd} (e.g. "packages/web"), not "..", an absolute path, or a link out.`);
+      }
       if (workdir !== cfg.cwd && !existsSync(workdir)) throw new Error(`run_bash: cwd does not exist: ${cwd} (resolved to ${workdir})`);
       // Background → hand off to the shared detached launcher (so a later restart_bash can relaunch it
       // identically). It returns immediately; the turn continues.
       if (background) return launchBackground(command, workdir).message;
 
-      // Foreground: spawn inline and await with a timeout below.
+      // Foreground: spawn inline and await with a timeout below. Explicit env (see launchBackground) so
+      // request_secret values reach the shell — Bun.spawn ignores runtime process.env mutations otherwise.
       const argv = wrapCommand(cfg.sandbox, cfg.cwd, command);
-      const proc = Bun.spawn(argv, { cwd: workdir, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+      const proc = Bun.spawn(argv, { cwd: workdir, env: { ...process.env }, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
       const id = procs?.add(command, makeProcKiller(proc.pid, (sig) => proc.kill(sig as any), false), proc.pid, false, workdir);
       // ESC: kill this foreground command directly. procs.killAll() (from the cancel handler) already
       // covers the wired TUI/REPL case; this also handles contexts with no process registry (subagents),
@@ -505,9 +561,9 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
           (sigkill as any).unref?.(); // don't keep the event loop alive just for the fallback kill
           await Promise.race([drained, new Promise((r) => setTimeout(r, 200))]);
           const secs = Math.round(timeoutMs / 1_000);
-          return clampOutput(`timed out after ${secs}s — command killed (it was still running). ` +
+          return clampOutput(redact(`timed out after ${secs}s — command killed (it was still running). ` +
             `Re-run with a larger timeout_ms if it just needs longer, or use background:true for a long-lived process.\n` +
-            `Partial output:\n${buf.out}${buf.err ? "\n[stderr]\n" + buf.err : ""}`);
+            `Partial output:\n${buf.out}${buf.err ? "\n[stderr]\n" + buf.err : ""}`));
         }
 
         const code = await proc.exited;
@@ -515,7 +571,7 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
         // detached grandchild (from a killed command) is still holding them open. Normal commands close
         // their pipes at exit, so `drained` wins instantly; the grace only matters for the kill case.
         await Promise.race([drained, new Promise((r) => setTimeout(r, 150))]);
-        return clampOutput(`exit ${code}\n${buf.out}${buf.err ? "\n[stderr]\n" + buf.err : ""}`);
+        return clampOutput(redact(`exit ${code}\n${buf.out}${buf.err ? "\n[stderr]\n" + buf.err : ""}`));
       } finally {
         ctx?.signal?.removeEventListener("abort", onAbort);
         if (id !== undefined) procs?.remove(id);
@@ -537,12 +593,12 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
       run: () => {
         const list = procs.list();
         if (list.length === 0) return "no running processes";
-        return list.map((p) => {
+        return redact(list.map((p) => {
           const secs = Math.max(0, Math.round((Date.now() - p.startedAt) / 1000));
           const head = `#${p.id} (pid ${p.pid ?? "?"}, ${secs}s${p.background ? ", background" : ""}${p.killing ? ", killing…" : ""}): ${p.command}`;
           const tail = p.background ? procs.tail(p.id, 2000).trimEnd() : "";
           return tail ? `${head}\n  ┌ output (tail):\n${tail.split("\n").map((l) => "  │ " + l).join("\n")}` : head;
-        }).join("\n");
+        }).join("\n"));
       },
     });
 

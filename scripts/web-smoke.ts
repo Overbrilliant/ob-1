@@ -77,14 +77,20 @@ check("webSearch: non-JSON → actionable error", await throws(() => webSearch({
 check("webSearch: network failure → wrapped error", await throws(() => webSearch({ base: "https://srx.example/search", query: "q", fetchFn: fakeFetch({ throwErr: "ECONNREFUSED" }).fn }), /request failed.*ECONNREFUSED/));
 
 // --- webFetch (mocked) ---
-const wf = await webFetch({ url: "https://example.com", fetchFn: fakeFetch({ text: "<html><body><p>Hello world</p></body></html>", contentType: "text/html" }).fn });
+// Hermetic DNS resolver: webFetch resolves the host (SSRF guard); a public-looking host maps to a public
+// IP so the mocked fetch is reached. Blocked-literal cases below don't get here (refused before resolve).
+const pubLookup = async () => ["93.184.216.34"];
+const wf = await webFetch({ url: "https://example.com", lookupFn: pubLookup, fetchFn: fakeFetch({ text: "<html><body><p>Hello world</p></body></html>", contentType: "text/html" }).fn });
 check("webFetch strips HTML to text", wf.includes("Hello world") && !wf.includes("<p>") && wf.includes("HTTP 200"));
 check("webFetch: rejects non-http url", await throws(() => webFetch({ url: "file:///etc/passwd", fetchFn: okFetch.fn }), /must start with http/));
 check("webFetch: refuses cloud-metadata IP (SSRF)", await throws(() => webFetch({ url: "http://169.254.169.254/latest/meta-data/", fetchFn: okFetch.fn }), /private\/internal\/loopback/));
 check("webFetch: refuses localhost (SSRF)", await throws(() => webFetch({ url: "http://localhost:8888/", fetchFn: okFetch.fn }), /private\/internal\/loopback/));
 check("webFetch: allowPrivate overrides the SSRF guard", (await webFetch({ url: "http://127.0.0.1/x", allowPrivate: true, fetchFn: fakeFetch({ text: "ok", contentType: "text/plain" }).fn })).includes("ok"));
 const longText = "x".repeat(50);
-check("webFetch truncates", (await webFetch({ url: "https://e", maxChars: 10, fetchFn: fakeFetch({ text: longText, contentType: "text/plain" }).fn })).includes("…[truncated]"));
+check("webFetch truncates", (await webFetch({ url: "https://e", maxChars: 10, lookupFn: pubLookup, fetchFn: fakeFetch({ text: longText, contentType: "text/plain" }).fn })).includes("…[truncated]"));
+// SSRF: a PUBLIC-looking host that RESOLVES to a private/metadata IP must still be refused (DNS-aware guard).
+check("webFetch: refuses a public name resolving to a private IP (SSRF)",
+  await throws(() => webFetch({ url: "https://sneaky.example.com/", lookupFn: async () => ["169.254.169.254"], fetchFn: okFetch.fn }), /resolves to a private\/internal address/));
 
 // --- abort threading (ESC): the turn's AbortSignal cancels an in-flight request, not just the model ---
 // A signal-aware fake fetch: rejects the instant the passed signal aborts (mirrors real fetch), so this
@@ -96,14 +102,14 @@ const abortAwareFetch: Fetcher = (async (_url: any, init: any) => {
 }) as Fetcher;
 const preAborted = (() => { const ac = new AbortController(); ac.abort(); return ac.signal; })();
 check("webFetch aborts on a pre-aborted signal (ESC mid-fetch)",
-  await throws(() => webFetch({ url: "https://example.com", fetchFn: abortAwareFetch, signal: preAborted }), /request failed|abort/i));
+  await throws(() => webFetch({ url: "https://example.com", lookupFn: pubLookup, fetchFn: abortAwareFetch, signal: preAborted }), /request failed|abort/i));
 check("webSearch aborts on a pre-aborted signal (ESC mid-search)",
   await throws(() => webSearch({ base: "https://srx.example/search", query: "q", fetchFn: abortAwareFetch, signal: preAborted }), /request failed|abort/i));
 // And a signal that aborts WHILE the request is in flight (the real ESC case) also unblocks it.
 check("webFetch aborts mid-flight when the signal fires",
   await throws(async () => {
     const ac = new AbortController();
-    const p = webFetch({ url: "https://example.com", fetchFn: abortAwareFetch, signal: ac.signal });
+    const p = webFetch({ url: "https://example.com", lookupFn: pubLookup, fetchFn: abortAwareFetch, signal: ac.signal });
     ac.abort();
     return p;
   }, /request failed|abort/i));

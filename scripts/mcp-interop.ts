@@ -9,7 +9,19 @@ const SERVER = ["-y", "@modelcontextprotocol/server-everything"];
 let fail = false;
 const check = (name: string, ok: boolean, extra = "") => { console.log(`${ok ? "✓" : "✗"} ${name}${extra ? ` — ${extra}` : ""}`); if (!ok) fail = true; };
 
-/** Poll an http endpoint until it accepts a connection (any HTTP status = listening). */
+/** Grab a currently-free TCP port by binding to :0 and releasing it. The reference server honors PORT
+ *  (process.env.PORT || 3001), so we run it on a port WE picked instead of the hardcoded 3001 — which may
+ *  already be taken by an unrelated service, making the test connect to (and "pass"/fail against) the wrong
+ *  server. Combined with the echo round-trip in exercise(), this pins the test to OUR server. */
+function freePort(): number {
+  const s = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+  const p = s.port ?? 0; s.stop(true);
+  if (!p) throw new Error("could not reserve a free port");
+  return p;
+}
+
+/** Poll an http endpoint until it accepts a connection (any HTTP status = listening). Safe here because the
+ *  port is one we reserved for THIS server, so anything answering on it is the server we just launched. */
 async function waitListening(url: string, ms = 20_000): Promise<boolean> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -46,12 +58,13 @@ try {
 // ── 2. Streamable HTTP ────────────────────────────────────────────────────────
 console.log("\n── Streamable HTTP transport ──");
 {
-  const proc = Bun.spawn({ cmd: ["npx", ...SERVER, "streamableHttp"], stdout: "ignore", stderr: "ignore" });
+  const port = freePort();
+  const proc = Bun.spawn({ cmd: ["npx", ...SERVER, "streamableHttp"], env: { ...process.env, PORT: String(port) }, stdout: "ignore", stderr: "ignore" });
   try {
-    const up = await waitListening("http://127.0.0.1:3001/mcp");
-    check("http: reference server listening on :3001/mcp", up);
+    const up = await waitListening(`http://127.0.0.1:${port}/mcp`);
+    check(`http: reference server listening on :${port}/mcp`, up);
     if (up) {
-      const c = new StreamableHttpMcpClient("everything-http", { type: "http", url: "http://127.0.0.1:3001/mcp" });
+      const c = new StreamableHttpMcpClient("everything-http", { type: "http", url: `http://127.0.0.1:${port}/mcp` });
       await c.connect(30_000);
       await exercise("http", c);
       c.close();
@@ -59,17 +72,18 @@ console.log("\n── Streamable HTTP transport ──");
   } catch (e) { check("http: no error", false, (e as Error).message); }
   finally { proc.kill(); Bun.spawnSync(["pkill", "-f", "server-everything"], { stdout: "ignore", stderr: "ignore" }); }
 }
-await new Promise((r) => setTimeout(r, 1500)); // let port 3001 free up
+await new Promise((r) => setTimeout(r, 1500)); // let the killed streamableHttp server fully exit before the next
 
 // ── 3. legacy HTTP+SSE ────────────────────────────────────────────────────────
 console.log("\n── legacy HTTP+SSE transport ──");
 {
-  const proc = Bun.spawn({ cmd: ["npx", ...SERVER, "sse"], stdout: "ignore", stderr: "ignore" });
+  const port = freePort();
+  const proc = Bun.spawn({ cmd: ["npx", ...SERVER, "sse"], env: { ...process.env, PORT: String(port) }, stdout: "ignore", stderr: "ignore" });
   try {
-    const up = await waitListening("http://127.0.0.1:3001/sse");
-    check("sse: reference server listening on :3001/sse", up);
+    const up = await waitListening(`http://127.0.0.1:${port}/sse`);
+    check(`sse: reference server listening on :${port}/sse`, up);
     if (up) {
-      const c = new SseMcpClient("everything-sse", { type: "sse", url: "http://127.0.0.1:3001/sse" });
+      const c = new SseMcpClient("everything-sse", { type: "sse", url: `http://127.0.0.1:${port}/sse` });
       await c.connect(30_000);
       await exercise("sse", c);
       c.close();

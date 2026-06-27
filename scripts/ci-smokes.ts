@@ -65,6 +65,7 @@ const SMOKES = [
   "ask-smoke.ts",             // ask_user clarification tool (registration + request normalization)
   "delivery-smoke.ts",        // delivery surface: execute_sql (real SQLite) + secrets + create_pr/pr_checks + expose_port
   "delivery-e2e-smoke.ts",    // delivery surface DRIVEN THROUGH runTurn: sql/secret/pr tool roundtrips + no secret leak + prompt guidance
+  "workspace-boundary-smoke.ts", // security: symlink/cwd containment + secret env propagation & redaction + read_file truncation marker + dup-bg guard
   "procs-smoke.ts",           // run_bash process registry (footer + ⌃P kill manager)
   "procs-reap-smoke.ts",      // background procs reaped on harness exit/signal: reapAll + detached group-kill (subtree) + e2e SIGTERM
   "subagents-smoke.ts",       // spawn_subagents: registry + runSubagents parallel/cap + runTurn integration
