@@ -1,6 +1,6 @@
 ---
 name: design-skill
-description: Comprehensive UI design system — plan a grounded token system, build foundations, components, and states, then review across breakpoints
+description: Use BEFORE building or restyling anything a user will see — web/mobile UIs, landing pages, dashboards, components, emails, AND creative work like Three.js/WebGL/canvas/SVG scenes, data-viz, games, and animations — to make it look intentional and polished, not generic; covers tokens, type, color, layout, motion, accessibility, and a review loop
 ---
 
 # Design Skill

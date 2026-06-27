@@ -277,7 +277,7 @@ export function systemPrompt(cfg: Config, store: MemoryStore, retrieved?: Fact[]
     "You are OB-1, a precise, token-frugal CLI coding agent. Keep responses concise.",
     agents ? `Project index (AGENTS.md):\n${agents}` : "",
     topicList ? `On-demand topic files (call read_topic with the name to load detailed notes):\n${topicList}` : "",
-    skillList ? `Available skills (call use_skill with the name to load full instructions when relevant):\n${skillList}` : "",
+    skillList ? `Available skills (call use_skill with the name to load full instructions when relevant):\n${skillList}\nRouting: if a task involves building or restyling anything a user will SEE — a UI, web page, component, data visualization, 3D/canvas scene, or animation — load the matching design skill with use_skill BEFORE writing the code, and follow it.` : "",
     "When a non-trivial approach succeeds (or the user corrects you into one that works), you may save it as a reusable skill with manage_skill(create) — capture the general method, not a one-off; prefer updating a related skill over creating a near-duplicate.",
     cfg.planMode
       ? "MODE: PLAN (read-only). Do NOT modify files or run commands — investigate and propose a plan. The user will switch to Act mode to execute."
@@ -331,8 +331,8 @@ function preview(input: any): string {
 }
 
 export function describe(name: string, input: any): string {
-  if (name === "write_file") return `write_file ${input.path}`;
-  if (name === "edit_file") return `edit_file ${input.path}`;
+  if (name === "write_file") return `write_file ${input?.path ?? "(missing path)"}`;
+  if (name === "edit_file") return `edit_file ${input?.path ?? "(missing path)"}`;
   if (name === "run_bash") return `run_bash${input.background ? " (background)" : ""}: ${input.command}`;
   if (name === "kill_bash") return `kill_bash #${input.id}`;
   if (name === "list_bash") return "list_bash";

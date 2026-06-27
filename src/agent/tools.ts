@@ -153,6 +153,12 @@ export type AskUserFn = (req: AskUserRequest) => Promise<string>;
 
 /** Keep file access inside the workspace (a basic guardrail; OS sandbox is a later phase, R7). */
 function safePath(cfg: Config, p: string): string {
+  // A tool call can arrive with the path missing or non-string (the model omitted it or used the wrong
+  // key). Fail with an actionable message instead of crashing on p.startsWith below — an opaque TypeError
+  // ("undefined is not an object") tells the model nothing and burns its whole step budget guessing.
+  if (typeof p !== "string" || p.trim() === "") {
+    throw new Error(`missing or invalid "path" argument (got ${JSON.stringify(p)}). Pass a non-empty file path relative to the workspace root ${cfg.cwd}, e.g. "src/agent/loop.ts".`);
+  }
   // Expand a leading ~ (the model often writes a home-relative path). With the workspace under the home
   // dir, ~/…/<workspace>/src/x.ts then correctly lands INSIDE the workspace instead of resolving to a
   // bogus "<cwd>/~/…" that ENOENTs and sends the model guessing at path forms for its whole step budget.
