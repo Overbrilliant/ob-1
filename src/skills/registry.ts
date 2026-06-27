@@ -19,7 +19,9 @@
 // Learned skills carry origin:agent so the curator only ever ages/edits skills the agent itself made
 // — human-authored skills are never touched (provenance gate, mirrors hermes-agent's design).
 import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { homedir } from "node:os";
 
 export type SkillOrigin = "agent" | "user";
 export type SkillState = "active" | "stale" | "archived";
@@ -34,9 +36,23 @@ export interface SkillMeta {
   updated?: string;
 }
 
-/** Read-only roots first, the writable learned root last (so a shipped skill wins a name clash). */
+/** Skills that ship WITH ob1 — the repo/install `skills/` dir, resolved relative to THIS module so they
+ *  load no matter which directory ob1 runs in (registry.ts is at <root>/src/skills/, so skills/ is two up).
+ *  This is what makes a shipped skill like design-skill available in EVERY project, not just the repo. */
+function shippedDir(): string {
+  try { return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills"); } catch { return ""; }
+}
+
+/** User-global skills root (~/.ob1/skills) — drop a markdown skill here to have it in every project. */
+function globalDir(): string {
+  return join(homedir(), ".ob1", "skills");
+}
+
+/** Resolution order, first match wins on a name clash: project (cwd/skills) → ob1's shipped skills →
+ *  user-global (~/.ob1/skills) → the writable LEARNED root last (so any curated skill wins over a learned
+ *  one). Shipped + global make skills available regardless of the working directory. */
 function skillDirs(cwd: string): string[] {
-  return [join(cwd, "skills"), learnedDir(cwd)];
+  return [join(cwd, "skills"), shippedDir(), globalDir(), learnedDir(cwd)].filter(Boolean);
 }
 
 /** The single WRITABLE skills root — where learned/agent-created skills live. */
