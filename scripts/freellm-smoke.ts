@@ -8,7 +8,7 @@
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FREELLMAPI, PROFILES, profileById, normalizeBaseUrl, fetchModels } from "../src/providers/profiles.ts";
+import { FREELLMAPI, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels } from "../src/providers/profiles.ts";
 import { loadConfig, saveSettings, savedProviderCreds, bakedProviderCreds, ob1ServerUrl } from "../src/config.ts";
 
 let fail = false;
@@ -23,8 +23,17 @@ check("FreeLLMAPI ships a blurb so users know what it is", FREELLMAPI.blurb.join
 check("FreeLLMAPI offers Local + Remote presets", FREELLMAPI.presets.length >= 2 && FREELLMAPI.presets.some((p) => p.label === "Local") && FREELLMAPI.presets.some((p) => p.label === "Remote"));
 check("no secrets baked into the profile (presets carry no key)", !(FREELLMAPI as any).presets.some((p: any) => p.key));
 
+// ── Custom endpoint: bring-your-own OpenAI-compatible server (local/LAN), key optional, model typed ──
+check("profile registry exposes Custom endpoint", profileById("custom") === CUSTOM);
+check("Custom endpoint is OpenAI-compatible on the wire", CUSTOM.wire === "openai");
+check("Custom endpoint marks the key optional", CUSTOM.keyOptional === true);
+check("Custom endpoint collects a typed model id (needsModel)", CUSTOM.needsModel === true);
+check("Custom endpoint offers Local + LAN/Remote presets", CUSTOM.presets.length >= 2 && CUSTOM.presets.some((p) => p.label === "Local"));
+check("Custom endpoint bakes no secret (presets carry no key)", !(CUSTOM as any).presets.some((p: any) => p.key));
+
 // ── frontier (paid) models are served by the managed server, NOT a user-facing provider profile ──
-check("FreeLLMAPI is the only user-facing provider profile", PROFILES.length === 1 && PROFILES[0] === FREELLMAPI);
+check("user-facing profiles are exactly FreeLLMAPI + Custom", PROFILES.length === 2 && PROFILES.includes(FREELLMAPI) && PROFILES.includes(CUSTOM));
+check("FreeLLMAPI is the free/default profile (listed first)", PROFILES[0] === FREELLMAPI);
 check("no OpenRouter profile is surfaced to users", profileById("openrouter") === undefined);
 check("profiles no longer name OpenRouter anywhere", !JSON.stringify(PROFILES).toLowerCase().includes("openrouter"));
 
