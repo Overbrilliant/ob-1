@@ -1893,6 +1893,10 @@ async function runTui(startup: string[]): Promise<void> {
           if (ac.signal.aborted) ctrl!.pushLine(c.yellow("  ⊘ stopped" + (turnMutated ? c.dim(" — edits/commands this turn may be partially applied; review before continuing") : "")));
           activeAbort = null; ctrl!.cancelTurn = null;
           agentReg.clear(); // turn over → drop any spawned-subagent batch from the footer
+          // …and if EVERY task in the list is completed, drop the finished list too — the model often
+          // forgets the empty-array clear, leaving a stale "✔ tasks (6/6)" above the prompt. Only clear
+          // when nothing is pending/in_progress, so a plan that legitimately spans turns still persists.
+          if (todos.size > 0 && todos.done === todos.size) todos.clear();
           ctrl!.setStatus({ model: cfg.model, mode: cfg.mode, plan: cfg.planMode, autopilot: cfg.permissionMode === "autopilot" }); ctrl!.setBusy(false);
           // After a real (model) turn that wasn't interrupted, propose a likely next prompt (Tab accepts).
           // Skip slash-commands (no model exchange to base it on) and the queued case (a next prompt is
