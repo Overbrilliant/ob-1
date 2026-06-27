@@ -410,8 +410,10 @@ function isKnownCheckCommand(cwd: string, command: string): boolean {
 export async function runTurn(userInput: string, history: Message[], deps: TurnDeps): Promise<TurnOutcome> {
   const { cfg, tools, store, approve, log } = deps;
   const call = deps._callModel ?? callModel;
-  if (!cfg.apiKey) {
-    log(c.yellow("No ANTHROPIC_API_KEY set — set it to enable the model. Memory and /commands still work."));
+  // A model is reachable with an API key OR a configured provider profile — a keyless Custom/LAN endpoint
+  // (key optional) has no key but is fully usable (the OpenAI-compatible path just omits the auth header).
+  if (!cfg.apiKey && !cfg.providerProfile) {
+    log(c.yellow("No model provider configured — run `ob1 login`, or use /models to connect one (a key, or a local/LAN endpoint). Memory and /commands still work."));
     return {};
   }
 

@@ -173,14 +173,15 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
   let usage: Usage | undefined;
   let resolvedModel: string | undefined; // the model the proxy actually routed to (vs. an `auto` request)
 
+  // Authorization is sent only when there IS a key. A keyless local/LAN endpoint (the Custom-endpoint
+  // profile — Ollama, llama.cpp, …) needs no auth, and sending `Bearer undefined`/`Bearer ` can trip a
+  // strict server. Every other path (managed server, FreeLLMAPI, OpenAI/OpenRouter BYOK) carries a key.
+  const headers: Record<string, string> = { "content-type": "application/json", accept: "text/event-stream", "X-Title": "OB-1" };
+  if (opts.apiKey) headers.authorization = `Bearer ${opts.apiKey}`;
+
   for await (const ev of streamSSE({
     url: `${opts.baseUrl}/chat/completions`,
-    headers: {
-      authorization: `Bearer ${opts.apiKey}`,
-      "content-type": "application/json",
-      accept: "text/event-stream",
-      "X-Title": "OB-1",
-    },
+    headers,
     body: JSON.stringify(openAIBody(opts)),
     signal: opts.signal,
   })) {

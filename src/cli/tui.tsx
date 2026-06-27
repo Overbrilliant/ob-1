@@ -145,13 +145,20 @@ export interface ProviderSetupOpts {
   keyPrefix?: string;
   initialUrl: string;
   initialKey: string;
+  /** When true, the key is OPTIONAL — Save/Test no longer require it (a keyless local/LAN endpoint). */
+  keyOptional?: boolean;
+  /** When set, the form shows a Model row to TYPE the model id (a local endpoint with no queryable
+   *  catalog). The entered value is returned as `model` and Save requires it to be non-empty. */
+  collectModel?: boolean;
+  initialModel?: string;
+  modelPlaceholder?: string;
   /** Probe the endpoint; returns a human-readable status line (✓ … / ✗ …) shown under the form. */
   onTest: (url: string, key: string) => Promise<string>;
 }
-export type ProviderSetupResult = { url: string; key: string } | null;
-type SetupRow = "location" | "url" | "key" | "test" | "save" | "cancel";
+export type ProviderSetupResult = { url: string; key: string; model?: string } | null;
+type SetupRow = "location" | "url" | "model" | "key" | "test" | "save" | "cancel";
 type Setup =
-  | (ProviderSetupOpts & { presetIndex: number; url: string; key: string; index: number; editing: null | "url" | "key"; status: string; testing: boolean; resolve: (r: ProviderSetupResult) => void })
+  | (ProviderSetupOpts & { presetIndex: number; url: string; key: string; model: string; index: number; editing: null | "url" | "key" | "model"; status: string; testing: boolean; resolve: (r: ProviderSetupResult) => void })
   | null;
 
 // Inline single-field text prompt (Settings → Free LLM API managed setup). A focused box with a label +
@@ -486,11 +493,11 @@ export class TuiController {
    *  no presets). The cursor (setup.index) indexes into this. */
   setupRowKinds = (): SetupRow[] => {
     const s = this.setup; if (!s) return [];
-    return [...(s.presets.length ? ["location" as const] : []), "url", "key", "test", "save", "cancel"];
+    return [...(s.presets.length ? ["location" as const] : []), "url", ...(s.collectModel ? ["model" as const] : []), "key", "test", "save", "cancel"];
   };
   providerSetup = (opts: ProviderSetupOpts): Promise<ProviderSetupResult> =>
     new Promise((resolve) => {
-      this.setup = { ...opts, presetIndex: 0, url: opts.initialUrl, key: opts.initialKey, index: 0, editing: null, status: "", testing: false, resolve };
+      this.setup = { ...opts, presetIndex: 0, url: opts.initialUrl, key: opts.initialKey, model: opts.initialModel ?? "", index: 0, editing: null, status: "", testing: false, resolve };
       this.emit();
     });
   private setupResolve(r: ProviderSetupResult): void { const s = this.setup; if (!s) return; this.setup = null; this.emit(); s.resolve(r); }
@@ -507,24 +514,35 @@ export class TuiController {
     s.presetIndex = (s.presetIndex + delta + n) % n;
     s.url = s.presets[s.presetIndex].url; s.status = ""; this.emit();
   };
-  // Enter / → on a row: url/key → open the text editor; test → probe; save/cancel → resolve.
+  /** What Save/Test are still missing, or "" when the form is ready. The key is required only when the
+   *  profile didn't mark it optional; the model only when the form is collecting one. */
+  private setupMissing(s: NonNullable<Setup>): string {
+    if (!s.url.trim()) return s.keyOptional ? (s.collectModel ? "enter a URL and a model first" : "enter a URL first") : "enter a URL and a key first";
+    if (s.collectModel && !s.model.trim()) return "enter a model id first";
+    if (!s.keyOptional && !s.key.trim()) return "enter a URL and a key first";
+    return "";
+  }
+  // Enter / → on a row: url/model/key → open the text editor; test → probe; save/cancel → resolve.
   setupActivate = (): void => {
     const s = this.setup; if (!s || s.editing) return;
     const row = this.setupRowKinds()[s.index];
     if (row === "url") { s.editing = "url"; this.emit(); }
+    else if (row === "model") { s.editing = "model"; this.emit(); }
     else if (row === "key") { s.editing = "key"; this.emit(); }
     else if (row === "test") void this.setupRunTest();
     else if (row === "save") {
-      if (!s.url.trim() || !s.key.trim()) { s.status = "enter a URL and a key first"; this.emit(); return; }
-      this.setupResolve({ url: s.url.trim(), key: s.key.trim() });
+      const miss = this.setupMissing(s);
+      if (miss) { s.status = miss; this.emit(); return; }
+      this.setupResolve({ url: s.url.trim(), key: s.key.trim(), model: s.collectModel ? s.model.trim() : undefined });
     } else if (row === "cancel") this.setupResolve(null);
   };
-  setupEditChange = (v: string): void => { const s = this.setup; if (!s || !s.editing) return; if (s.editing === "url") s.url = v; else s.key = v; this.emit(); };
+  setupEditChange = (v: string): void => { const s = this.setup; if (!s || !s.editing) return; if (s.editing === "url") s.url = v; else if (s.editing === "model") s.model = v; else s.key = v; this.emit(); };
   setupEditSubmit = (): void => { const s = this.setup; if (!s) return; s.editing = null; s.status = ""; this.emit(); };
   setupEditCancel = (): void => { const s = this.setup; if (!s) return; s.editing = null; this.emit(); };
   private async setupRunTest(): Promise<void> {
     const s = this.setup; if (!s) return;
-    if (!s.url.trim() || !s.key.trim()) { s.status = "enter a URL and a key first"; this.emit(); return; }
+    // Test needs a reachable endpoint (URL + key when required); the model id isn't needed to probe /models.
+    if (!s.url.trim() || (!s.keyOptional && !s.key.trim())) { s.status = s.keyOptional ? "enter a URL first" : "enter a URL and a key first"; this.emit(); return; }
     s.testing = true; s.status = "testing connection…"; this.emit();
     let result = "";
     try { result = await s.onTest(s.url.trim(), s.key.trim()); } catch (e: any) { result = "✗ " + (e?.message ?? "test failed"); }
@@ -1054,11 +1072,13 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
       ) : ctrl.setup ? (() => {
         const s = ctrl.setup!;
         const rows = ctrl.setupRowKinds();
-        const maskedKey = s.key ? "•".repeat(Math.min(s.key.length, 24)) : "(none)";
+        const maskedKey = s.key ? "•".repeat(Math.min(s.key.length, 24)) : s.keyOptional ? "(none — optional)" : "(none)";
+        const urlLabel = s.collectModel ? "Endpoint URL" : "Proxy URL";
         const rowLabel = (kind: SetupRow): { label: string; value: string; hint?: string } => {
           if (kind === "location") { const p = s.presets[s.presetIndex]; return { label: "Location", value: `◀ ${p.label} ▶`, hint: p.hint }; }
-          if (kind === "url") return { label: "Proxy URL", value: s.url || "(empty)" };
-          if (kind === "key") return { label: "API key", value: maskedKey, hint: s.keyPrefix ? `starts with ${s.keyPrefix}…` : undefined };
+          if (kind === "url") return { label: urlLabel, value: s.url || "(empty)" };
+          if (kind === "model") return { label: "Model id", value: s.model || "(empty)", hint: s.model ? undefined : "the exact model the server serves" };
+          if (kind === "key") return { label: "API key", value: maskedKey, hint: s.keyPrefix ? `starts with ${s.keyPrefix}…` : s.keyOptional ? "optional — blank for a no-auth server" : undefined };
           if (kind === "test") return { label: "", value: s.testing ? "[ Testing… ]" : "[ Test connection ]" };
           if (kind === "save") return { label: "", value: "[ Save & use ]" };
           return { label: "", value: "[ Cancel ]" };
@@ -1070,12 +1090,15 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
             <Text> </Text>
             {rows.map((kind, i) => {
               const cur = i === s.index;
-              // URL/key rows become a live <TextInput> while editing that field.
-              if (s.editing === kind && (kind === "url" || kind === "key")) {
+              // URL/model/key rows become a live <TextInput> while editing that field.
+              if (s.editing === kind && (kind === "url" || kind === "model" || kind === "key")) {
+                const editLabel = kind === "url" ? urlLabel : kind === "model" ? "Model id" : "API key";
+                const editValue = kind === "url" ? s.url : kind === "model" ? s.model : s.key;
+                const editPlaceholder = kind === "url" ? "https://host:port/v1" : kind === "model" ? (s.modelPlaceholder ?? "model-id") : (s.keyPrefix ? s.keyPrefix + "…" : "key");
                 return (
                   <Box key={kind}>
-                    <Text color="green">{`  ✎ ${kind === "url" ? "Proxy URL" : "API key"}: `}</Text>
-                    <TextInput value={kind === "url" ? s.url : s.key} onChange={ctrl.setupEditChange} onSubmit={ctrl.setupEditSubmit} placeholder={kind === "url" ? "https://host:port/v1" : "freellmapi-…"} />
+                    <Text color="green">{`  ✎ ${editLabel}: `}</Text>
+                    <TextInput value={editValue} onChange={ctrl.setupEditChange} onSubmit={ctrl.setupEditSubmit} placeholder={editPlaceholder} />
                   </Box>
                 );
               }

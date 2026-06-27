@@ -52,7 +52,7 @@ import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
 import type { Message, Usage } from "./providers/types.ts";
 import { callModel } from "./providers/gateway.ts";
 import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning } from "./providers/models.ts";
-import { FREELLMAPI, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
+import { FREELLMAPI, CUSTOM, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
 
@@ -107,6 +107,13 @@ let onboardingRan = false;
 
 let cfg = loadConfig();
 ensureOb1GitExclude(cfg.cwd, cfg.dataDir);
+
+/** Can OB-1 reach a model? True with an API key OR a configured provider profile — a keyless Custom/LAN
+ *  endpoint (key optional) has no key but is fully usable. Used to gate the model-disabled warning and the
+ *  heavier modes so they don't refuse on a working keyless provider. */
+function modelReachable(): boolean {
+  return !!cfg.apiKey || !!cfg.providerProfile;
+}
 
 // Auth guard: when we rely on the managed OB-1 server but the saved token is missing or REJECTED
 // (expired, or the account was reset), (re)authenticate before doing anything — otherwise the first
@@ -639,11 +646,17 @@ async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolea
   if (!ui.providerSetup) { console.log(c.yellow("  provider setup needs an interactive session")); return false; }
   const active = cfg.providerProfile === prof.id;
   const remembered = savedProviderCreds(cfg.settingsDir)[prof.id]; // last key entered for THIS provider
+  // A profile that wants the model typed (Custom/LAN) prefills the current model if we're editing it, else blank.
+  const initialModel = prof.needsModel ? (active && cfg.model && cfg.model !== prof.defaultModel ? cfg.model : "") : undefined;
   const res = await ui.providerSetup({
     title: `Connect ${prof.name}`,
     blurb: [prof.tagline, "", ...prof.blurb, "", `Docs: ${prof.docsUrl}`],
     presets: prof.presets,
     keyPrefix: prof.keyPrefix,
+    keyOptional: prof.keyOptional,
+    collectModel: prof.needsModel,
+    initialModel,
+    modelPlaceholder: prof.needsModel ? "e.g. ornith, llama3.1, qwen2.5-coder" : undefined,
     initialUrl: (active ? cfg.baseUrl : remembered?.url ?? "") || prof.defaultLocalUrl,
     initialKey: active ? (cfg.apiKey ?? "") : (remembered?.key ?? ""),
     onTest: async (url, key) => {
@@ -659,14 +672,17 @@ async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolea
   cacheWarn();
   cfg.provider = prof.wire;
   cfg.baseUrl = url;
-  cfg.apiKey = res.key;
+  cfg.apiKey = res.key || undefined; // key is optional (a keyless local/LAN endpoint) → undefined, not ""
   cfg.providerProfile = prof.id;
-  if (!active) cfg.model = prof.defaultModel; // first-time connect → the profile's default model
+  // Model: a typed one (Custom) wins; otherwise a first-time connect adopts the profile default.
+  if (res.model) cfg.model = res.model;
+  else if (!active) cfg.model = prof.defaultModel;
   cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false }); // new provider → drop stale resolution/est marker
   console.log(`  provider → ${c.cyan(prof.name)}  ${c.dim(url)}`);
   saveSettings(cfg); // persist active provider + per-provider creds + model (global ~/.ob1/settings.json — shared across folders)
-  const note = prof.id === "freellmapi" ? " (auto = the proxy picks the best free model)" : "";
-  console.log(c.green(`  ✓ ${prof.name} connected — model: ${c.bold(cfg.model)}${note}. Saved to ~/.ob1/settings.json (shared across every folder).`));
+  const note = prof.id === "freellmapi" ? " (auto = the proxy picks the best free model)"
+    : prof.id === "custom" && !cfg.apiKey ? " (no key — sent without auth)" : "";
+  console.log(c.green(`  ✓ ${prof.name} connected — model: ${c.bold(cfg.model || "(none set)")}${note}. Saved to ~/.ob1/settings.json (shared across every folder).`));
   return true;
 }
 
@@ -676,13 +692,15 @@ async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolea
  *  Returns false if that setup was cancelled. The model is left at the profile's default after a switch
  *  — the caller's picker sets the real one next. */
 async function ensureProvider(prof: ProviderProfile): Promise<boolean> {
-  if (cfg.providerProfile === prof.id && cfg.apiKey) return true; // already active
+  if (cfg.providerProfile === prof.id && (cfg.apiKey || prof.keyOptional)) return true; // already active
   const creds = savedProviderCreds(cfg.settingsDir)[prof.id] ?? bakedProviderCreds(prof.id);
-  if (creds?.key) {
+  // Activate remembered creds when there's a key OR the profile allows none (a keyless Custom/LAN endpoint
+  // is remembered with an empty key, which still pins its URL). The key-optional path also needs a URL.
+  if (creds && (creds.key || (prof.keyOptional && creds.url))) {
     cacheWarn();
     cfg.provider = prof.wire;
     cfg.baseUrl = creds.url || prof.defaultLocalUrl;
-    cfg.apiKey = creds.key;
+    cfg.apiKey = creds.key || undefined;
     cfg.providerProfile = prof.id;
     cfg.model = prof.defaultModel; // sensible default for the new provider; the picker sets the real model next
     cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false });
@@ -756,6 +774,7 @@ async function pickModel(): Promise<void> {
   const subscribed = isSubscribed(plan);
   while (true) {
     const onFree = cfg.providerProfile === FREELLMAPI.id;
+    const onCustom = cfg.providerProfile === CUSTOM.id;
     const items: { label: string; hint?: string; value: string }[] = MODELS.map((m) => ({
       label: m.label + (m.notes === "default" ? " (default)" : "") + (subscribed ? "" : "  🔒"),
       hint: subscribed
@@ -764,13 +783,15 @@ async function pickModel(): Promise<void> {
       value: m.id ?? m.label,
     }));
     items.push({ label: "Free LLM API ▸", hint: "free · ~16 providers via the proxy router (auto)", value: "__free__" });
+    items.push({ label: "Custom endpoint ▸", hint: onCustom ? `connected · ${cfg.model || "no model"} · ${cfg.baseUrl}` : "your own OpenAI-compatible server — local/LAN (Ollama, llama.cpp, vLLM…); key optional", value: "__custom__" });
     const title = subscribed
       ? "Select a model  ↑↓ · Enter · Esc"
       : "Select a model  ↑↓ · Enter · Esc  ·  🔒 = subscribe to unlock";
-    const initial = (onFree || (!cfg.apiKey && !subscribed)) ? "__free__" : cfg.model;
+    const initial = onCustom ? "__custom__" : (onFree || (!cfg.apiKey && !subscribed)) ? "__free__" : cfg.model;
     const picked = await ui.pick(title, items, initial);
     if (picked == null) return;
     if (picked === "__free__") { await pickFreeModel(); if (ui.pickReason?.() === "back") continue; return; }
+    if (picked === "__custom__") { await setupProvider(CUSTOM); return; } // collects URL + model id (+ optional key)
     // A frontier model.
     if (!subscribed) {
       // Free (or signed-out) user — frontier models are gated. Take them to pricing instead of selecting.
@@ -1182,7 +1203,7 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     }
     case "fanout": {
-      if (!cfg.apiKey) { console.log(c.yellow("  /fanout needs a provider key")); break; }
+      if (!modelReachable()) { console.log(c.yellow("  /fanout needs a model provider (a key, or a configured endpoint via /models)")); break; }
       if (!arg) { console.log(c.red("  usage: /fanout <task>")); break; }
       // Optional dual-ledger controller (item #11): act → assess → re-plan-on-stall, bounded. Default
       // OFF; OB1_ORCH_LEDGER=1 routes /fanout through it instead of the single-shot fan-out.
@@ -1209,25 +1230,25 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     }
     case "council": {
-      if (!cfg.apiKey) { console.log(c.yellow("  /council needs a provider key")); break; }
+      if (!modelReachable()) { console.log(c.yellow("  /council needs a model provider (a key, or a configured endpoint via /models)")); break; }
       if (!arg) { console.log(c.red("  usage: /council <task>")); break; }
       await councilTurn(arg);
       break;
     }
     case "personas": {
-      if (!cfg.apiKey) { console.log(c.yellow("  /personas needs a provider key")); break; }
+      if (!modelReachable()) { console.log(c.yellow("  /personas needs a model provider (a key, or a configured endpoint via /models)")); break; }
       if (!arg) { console.log(c.red("  usage: /personas <task>")); break; }
       await personasTurn(arg);
       break;
     }
     case "route": {
-      if (!cfg.apiKey) { console.log(c.yellow("  /route needs a provider key")); break; }
+      if (!modelReachable()) { console.log(c.yellow("  /route needs a model provider (a key, or a configured endpoint via /models)")); break; }
       if (!arg) { console.log(c.red("  usage: /route <task>")); break; }
       await adaptiveTurn(arg);
       break;
     }
     case "eval": {
-      if (!cfg.apiKey) { console.log(c.yellow("  /eval needs a provider key")); break; }
+      if (!modelReachable()) { console.log(c.yellow("  /eval needs a model provider (a key, or a configured endpoint via /models)")); break; }
       await evalTurn(rest);
       break;
     }
@@ -1478,7 +1499,7 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     }
     case "codeact": {
-      if (!cfg.apiKey) { console.log(c.yellow("  /codeact needs a provider key")); break; }
+      if (!modelReachable()) { console.log(c.yellow("  /codeact needs a model provider (a key, or a configured endpoint via /models)")); break; }
       if (!arg) { console.log(c.red("  usage: /codeact <task>")); break; }
       if (cfg.sandbox === "off") console.log(c.yellow("  ⚠ sandbox is OFF — CodeAct will run model-written code unsandboxed. /sandbox workspace-write recommended."));
       console.log(c.dim("  CodeAct (code-as-action · sandbox · approval-gated · unproven ⚠ — measure on /eval)…"));
@@ -1510,7 +1531,7 @@ async function handleCommand(line: string): Promise<boolean> {
 }
 
 async function fusionTurn(task: string): Promise<void> {
-  if (!cfg.apiKey) { console.log(c.yellow("  fusion needs a provider key")); return; }
+  if (!modelReachable()) { console.log(c.yellow("  fusion needs a model provider (a key, or a configured endpoint via /models)")); return; }
   const models = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
   const n = process.env.OB1_FUSION_N ? envInt("OB1_FUSION_N", 3) : undefined;
   const check = process.env.OB1_FUSION_CHECK;
@@ -1537,7 +1558,7 @@ async function fusionTurn(task: string): Promise<void> {
 }
 
 async function councilTurn(task: string): Promise<void> {
-  if (!cfg.apiKey) { console.log(c.yellow("  council needs a provider key")); return; }
+  if (!modelReachable()) { console.log(c.yellow("  council needs a model provider (a key, or a configured endpoint via /models)")); return; }
   const models = process.env.OB1_COUNCIL_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
   const check = process.env.OB1_COUNCIL_CHECK;
   const arbiterModel = process.env.OB1_COUNCIL_ARBITER_MODEL;
@@ -1565,7 +1586,7 @@ async function councilTurn(task: string): Promise<void> {
 }
 
 async function personasTurn(task: string): Promise<void> {
-  if (!cfg.apiKey) { console.log(c.yellow("  personas needs a provider key")); return; }
+  if (!modelReachable()) { console.log(c.yellow("  personas needs a model provider (a key, or a configured endpoint via /models)")); return; }
   const rounds = envInt("OB1_PERSONAS_ROUNDS", 2);
   const max = envInt("OB1_PERSONAS_MAX", 6);
   console.log(c.dim(`  budget (declared up front): up to ~${1 + max * rounds + 1} model calls (former + ≤${max} personas × ${rounds} dialogue rounds + facilitator), or 1 if it collapses to Solo`));
@@ -1582,7 +1603,7 @@ async function personasTurn(task: string): Promise<void> {
 }
 
 async function evalTurn(requested: string[]): Promise<void> {
-  if (!cfg.apiKey) { console.log(c.yellow("  eval needs a provider key")); return; }
+  if (!modelReachable()) { console.log(c.yellow("  eval needs a model provider (a key, or a configured endpoint via /models)")); return; }
   const picked = requested.filter((m) => (SELECTABLE_MODES as readonly string[]).includes(m));
   let modes = picked.length ? picked : [...ALL_MODES];
   if (!modes.includes("solo")) modes = ["solo", ...modes]; // baseline is required for compute-matching
@@ -1596,7 +1617,7 @@ async function evalTurn(requested: string[]): Promise<void> {
 }
 
 async function adaptiveTurn(task: string, hint?: { mode: "fusion" | "council" | "personas"; why: string }): Promise<void> {
-  if (!cfg.apiKey) { console.log(c.yellow("  adaptive needs a provider key")); return; }
+  if (!modelReachable()) { console.log(c.yellow("  adaptive needs a model provider (a key, or a configured endpoint via /models)")); return; }
   const check = process.env.OB1_ROUTE_CHECK;
   // Escalation target: env override, else derive from the difficulty signal (risk/design → Council's
   // critique; hard/high-value → Fusion's best-of-N). Council/Fusion are the only escalation topologies.
@@ -1731,18 +1752,27 @@ async function runRepl(startup: string[]): Promise<void> {
       if (!answers.length) return "The user gave no answer. Proceed with your best judgment and state the assumption you made.";
       return total > 1 ? `The user answered:\n${answers.map((x) => `- ${x}`).join("\n")}` : `The user answered: ${answers[0]}`;
     },
-    // Provider setup, non-TTY: print the blurb + location presets, prompt for the URL and key, then
-    // run the live connection test before returning. Enter alone keeps the prefilled default.
+    // Provider setup, non-TTY: print the blurb + location presets, prompt for the URL (and a model id when
+    // the profile collects one), then the key — which is optional when the profile allows it (a keyless
+    // local/LAN endpoint). Runs the live connection test before returning. Enter alone keeps the prefilled
+    // default.
     providerSetup: async (opts) => {
       for (const l of opts.blurb) console.log(c.dim("  " + l));
       if (opts.presets.length) { console.log(c.dim("  locations:")); opts.presets.forEach((p, i) => console.log(c.dim(`     ${i + 1}) ${p.label} — ${p.hint} (${p.url})`))); }
-      stdout.write(c.cyan("  Proxy URL") + c.dim(` [${opts.initialUrl}] › `));
+      stdout.write(c.cyan("  Endpoint URL") + c.dim(` [${opts.initialUrl}] › `));
       const url = ((await nextLine()) ?? "").trim() || opts.initialUrl;
-      stdout.write(c.cyan("  API key") + (opts.initialKey ? c.dim(" [keep current — Enter]") : "") + c.dim(" › "));
+      let model: string | undefined;
+      if (opts.collectModel) {
+        stdout.write(c.cyan("  Model id") + (opts.initialModel ? c.dim(` [${opts.initialModel}]`) : opts.modelPlaceholder ? c.dim(` (${opts.modelPlaceholder})`) : "") + c.dim(" › "));
+        model = ((await nextLine()) ?? "").trim() || opts.initialModel || "";
+      }
+      stdout.write(c.cyan("  API key") + c.dim(opts.keyOptional ? " (optional — Enter to skip)" : opts.initialKey ? " [keep current — Enter]" : "") + c.dim(" › "));
       const key = ((await nextLine()) ?? "").trim() || opts.initialKey;
-      if (!url || !key) { console.log(c.yellow("  setup needs both a URL and a key — cancelled")); return null; }
+      if (!url) { console.log(c.yellow("  setup needs a URL — cancelled")); return null; }
+      if (!opts.keyOptional && !key) { console.log(c.yellow("  setup needs an API key — cancelled")); return null; }
+      if (opts.collectModel && !model) { console.log(c.yellow("  setup needs a model id — cancelled")); return null; }
       console.log(c.dim("  " + (await opts.onTest(url, key))));
-      return { url, key };
+      return { url, key, model };
     },
     // Single-field text prompt, non-TTY: print the question and read one line. (No masking under the
     // plain REPL — the TUI masks; this path is the non-interactive fallback.)
@@ -1975,7 +2005,7 @@ deferredMcp = new Map(mcp.tools.map((t) => [t.def.name, t]));
 if (deferredMcp.size) tools.set("load_mcp_tool", makeMcpLoaderTool(tools, deferredMcp));
 for (const line of mcp.summary) startup.push(c.dim("  " + line));
 if (deferredMcp.size) startup.push(c.dim(`  ${deferredMcp.size} MCP tool(s) deferred — loaded on demand via load_mcp_tool`));
-if (!cfg.apiKey) startup.push(c.yellow("  ⚠ not signed in — model disabled; memory + /commands still work. Run `ob1 login` to sign in to the managed server (free models), or /models to connect another provider, or export a key."));
+if (!modelReachable()) startup.push(c.yellow("  ⚠ not signed in — model disabled; memory + /commands still work. Run `ob1 login` to sign in to the managed server (free models), or /models to connect another provider, or export a key."));
 // Surface the sandbox state at startup so env-configured (OB1_SANDBOX) sessions see a LOUD warning
 // when the requested sandbox can't be enforced — not only when /sandbox is run interactively.
 if (cfg.sandbox !== "off") {

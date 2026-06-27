@@ -26,6 +26,14 @@ export interface ProviderProfile {
   defaultModel: string;
   /** Location presets offered as the first row of the setup form. */
   presets: { label: string; hint: string; url: string }[];
+  /** When true, the API key is OPTIONAL: a local/LAN OpenAI-compatible server (Ollama, llama.cpp, vLLM,
+   *  LM Studio, …) usually needs none. The setup form lets you Save with a blank key, no Authorization
+   *  header is sent on the wire, and the keyless profile is persisted + restored across restarts. */
+  keyOptional?: boolean;
+  /** When true, the setup form asks you to TYPE the model id instead of picking from a fetched catalog —
+   *  a local endpoint may not expose a queryable /models list, and you usually know the exact name. The
+   *  typed value becomes the active model. */
+  needsModel?: boolean;
 }
 
 export const FREELLMAPI: ProviderProfile = {
@@ -51,12 +59,41 @@ export const FREELLMAPI: ProviderProfile = {
   ],
 };
 
+// Custom endpoint — ANY OpenAI-compatible server you run yourself. The escape hatch for a local/LAN model
+// (Ollama, llama.cpp `server`, vLLM, LM Studio, text-generation-webui, …): you give OB-1 the endpoint URL
+// and the model id, and the key is OPTIONAL because most of these need no auth. Unlike FreeLLMAPI it does
+// NOT assume a queryable catalog — you TYPE the model name (needsModel), so it works against a server that
+// only exposes /chat/completions.
+export const CUSTOM: ProviderProfile = {
+  id: "custom",
+  name: "Custom endpoint",
+  tagline: "Any OpenAI-compatible server you run — local or LAN (Ollama, llama.cpp, vLLM, LM Studio…)",
+  blurb: [
+    "Point OB-1 at your OWN OpenAI-compatible endpoint — a model running on this machine or another",
+    "host on your network (e.g. a GPU box). Works with Ollama, llama.cpp's server, vLLM, LM Studio,",
+    "text-generation-webui, and anything else that speaks the OpenAI /chat/completions API.",
+    "",
+    "Enter the endpoint URL (…/v1) and the exact model id the server serves. The API key is OPTIONAL —",
+    "leave it blank for a server with no auth; fill it in only if yours requires a token.",
+  ],
+  wire: "openai",
+  docsUrl: "https://platform.openai.com/docs/api-reference/chat",
+  defaultLocalUrl: "http://localhost:11434/v1", // Ollama's default — the most common local server
+  defaultModel: "",                              // you type the model id (needsModel)
+  keyOptional: true,
+  needsModel: true,
+  presets: [
+    { label: "Local", hint: "the server runs on this machine (Ollama default :11434)", url: "http://localhost:11434/v1" },
+    { label: "LAN / Remote", hint: "the server runs on another host — paste http://<ip>:<port>/v1", url: "http://" },
+  ],
+};
+
 // The frontier (paid) models are NOT a user-configurable provider profile: they're served by the managed
 // OB-1 server on the user's subscription credits (see config.ts resolveProvider's managed-server path and
 // index.ts switchToManaged). The client never asks the user for an upstream gateway key — picking a
-// frontier model from /models just switches the active model on the managed server. So the only
-// user-facing provider profile is the self-hosted FreeLLMAPI proxy.
-export const PROFILES: ProviderProfile[] = [FREELLMAPI];
+// frontier model from /models just switches the active model on the managed server. The user-facing
+// provider profiles are the self-hosted FreeLLMAPI proxy and a bring-your-own Custom endpoint.
+export const PROFILES: ProviderProfile[] = [FREELLMAPI, CUSTOM];
 
 export function profileById(id?: string): ProviderProfile | undefined {
   return id ? PROFILES.find((p) => p.id === id) : undefined;
@@ -87,10 +124,11 @@ export async function fetchModels(baseUrl: string, apiKey: string, timeoutMs = 1
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const res = await fetch(`${baseUrl}/models`, {
-      headers: { authorization: `Bearer ${apiKey}`, accept: "application/json" },
-      signal: ac.signal,
-    });
+    // Send Authorization only when there IS a key — a keyless local/LAN server (Custom endpoint) must not
+    // be probed with a bogus `Bearer ` header, which some strict servers reject outright.
+    const headers: Record<string, string> = { accept: "application/json" };
+    if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+    const res = await fetch(`${baseUrl}/models`, { headers, signal: ac.signal });
     const body = await res.text();
     if (!res.ok) return { ok: false, status: res.status, models: [], error: body.slice(0, 300) || res.statusText };
     let json: any;

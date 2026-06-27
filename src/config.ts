@@ -28,10 +28,12 @@ function resolveProvider(saved: PersistedSettings): { provider: Provider; apiKey
   if (process.env.OB1_PROVIDER === "openai" && process.env.OPENAI_API_KEY) {
     return { provider: "openai", apiKey: process.env.OPENAI_API_KEY, baseUrl: "https://api.openai.com/v1", model: model ?? "gpt-4o" };
   }
-  // A provider profile (e.g. FreeLLMAPI) set up via /models — creds restored from persisted settings.
-  if (saved.providerProfile && saved.providerUrl && saved.providerKey) {
+  // A provider profile (e.g. FreeLLMAPI, or a bring-your-own Custom endpoint) set up via /models — creds
+  // restored from persisted settings. The KEY is optional (a keyless Custom/LAN endpoint persists an empty
+  // string), so a profile is restored on URL alone; apiKey stays undefined when no key was saved.
+  if (saved.providerProfile && saved.providerUrl) {
     const prof = profileById(saved.providerProfile);
-    return { provider: "openai", apiKey: saved.providerKey, baseUrl: saved.providerUrl, model: model ?? saved.model ?? prof?.defaultModel ?? "auto", providerProfile: saved.providerProfile };
+    return { provider: "openai", apiKey: saved.providerKey || undefined, baseUrl: saved.providerUrl, model: model ?? saved.model ?? prof?.defaultModel ?? "auto", providerProfile: saved.providerProfile };
   }
   if (process.env.ANTHROPIC_API_KEY) {
     return { provider: "anthropic", apiKey: process.env.ANTHROPIC_API_KEY, baseUrl: process.env.OB1_BASE_URL ?? "https://api.anthropic.com", model: model ?? "claude-sonnet-4-6" };
@@ -241,10 +243,13 @@ export function saveSettings(cfg: Config): void {
   if (legacy.providerProfile && legacy.providerUrl && legacy.providerKey && !creds[legacy.providerProfile]) {
     creds[legacy.providerProfile] = { url: legacy.providerUrl, key: legacy.providerKey };
   }
-  if (cfg.providerProfile && cfg.apiKey) {
+  if (cfg.providerProfile) {
     // This session's provider IS a configured profile → record it as active AND remember it in the map.
-    creds[cfg.providerProfile] = { url: cfg.baseUrl, key: cfg.apiKey };
-    data.providerProfile = cfg.providerProfile; data.providerUrl = cfg.baseUrl; data.providerKey = cfg.apiKey;
+    // The key may be absent (a keyless Custom/LAN endpoint): persist "" so the profile is restored on URL
+    // alone next launch, without ever writing a bogus token.
+    const key = cfg.apiKey ?? "";
+    creds[cfg.providerProfile] = { url: cfg.baseUrl, key };
+    data.providerProfile = cfg.providerProfile; data.providerUrl = cfg.baseUrl; data.providerKey = key;
   } else if (legacy.providerProfile) {
     // Env-override session (no profile): carry forward the active provider so it survives.
     data.providerProfile = legacy.providerProfile; data.providerUrl = legacy.providerUrl; data.providerKey = legacy.providerKey;
