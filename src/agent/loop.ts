@@ -283,6 +283,7 @@ export function systemPrompt(cfg: Config, store: MemoryStore, retrieved?: Fact[]
       ? "MODE: PLAN (read-only). Do NOT modify files or run commands — investigate and propose a plan. The user will switch to Act mode to execute."
       : "MODE: ACT. You may edit files and run commands; mutating actions are gated by user approval.",
     "Principles: read before you edit; make the smallest correct change; prefer edit_file (search/replace) over rewriting whole files. Prefer plain CLI tools via run_bash (e.g. `gh`, `git`, `rg`) when they are more token-efficient than reading many files. For a large file, read_file accepts offset/limit (a 1-based line range) — read only the slice you need instead of the whole file. When you learn a durable project fact or a code relationship, persist it with memory_add / relate. When the task hinges on a decision only the user can make (a missing requirement, or a choice between approaches), call ask_user with a few options instead of guessing.",
+    "Building a large file (a single-file app; a long HTML/JSON/code file): do NOT emit the whole thing in one response — a long generation often gets truncated or dropped mid-stream on free/local providers. Write a minimal RUNNABLE skeleton with write_file FIRST, then grow it in SMALL successive edit_file calls (one section/feature per call), verifying as you go (browser_check for UI). Keep each single tool output bounded; many small edits beat one giant write.",
     "Don't give up early. You have full access to this machine: when a goal needs a capability you don't have, get it" + (cfg.planMode ? " (in Act mode, by installing the package or tool via run_bash)" : " — install whatever package or tool via run_bash") + " instead of declaring it impossible. Only after genuinely exhausting your options, say what's blocking and offer alternatives.",
     "Long-lived commands: never run a server, watcher, or other process that does not exit (e.g. `npm run dev`, `bun serve`, a `localhost`) as a normal run_bash call — it would block the turn. Pass background:true; it returns immediately with a process id and keeps running. Then call the `list_bash` TOOL to read its buffered output (e.g. the served URL), and call the `kill_bash` TOOL to stop it when done. Do NOT type `list_bash` or `kill_bash(id)` inside run_bash; they are tools, not shell commands.",
     "run_bash working directory: each command starts FRESH in the workspace root — the cwd does NOT persist between calls, so a `cd` in one call is forgotten by the next. To act inside a folder you created (e.g. a scaffolded project), pass the `cwd` argument (relative to the workspace) or chain it in ONE command, e.g. `cd overbrilliant && npm install && npm run build`. This applies to background commands too — start a dev server in the project's own directory.",
@@ -511,7 +512,12 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         // right wire param via the endpoint (OpenRouter unified vs legacy reasoning_effort).
         effort: supportsEffort(cfg.model) ? cfg.effort : undefined,
         openrouter: isOpenRouterEndpoint(cfg),
-        system,
+        // On a stream-interrupt retry, append a transient hint so the model CHANGES strategy (smaller
+        // output / incremental file build) instead of re-emitting the same too-long response that just got
+        // cut off. Non-cached + retry-only, so it never disturbs the warm cached prefix on the happy path.
+        system: stepRetries > 0
+          ? [...system, { text: "Your previous response was cut off mid-stream — likely too long for this provider to finish in one go. This step, produce a SMALLER response: if you're writing a large file, create a minimal skeleton with write_file first (or split it across several smaller edit_file calls) rather than emitting the whole file at once.", cache: false }]
+          : system,
         messages: history,
         tools: toolDefs,
         onText: deps.onText ? (d) => { gapOnce(); deps.onText!(d); streamed = true; } : undefined,
