@@ -17,8 +17,9 @@ import { buildTools, ReadCache, normalizeToolOutput, type ToolOutput } from "../
 let fail = false;
 const check = (n: string, ok: boolean, extra = "") => { console.log(`${ok ? "✓" : "✗"} ${n}${extra ? ` — ${extra}` : ""}`); if (!ok) fail = true; };
 const text = (o: ToolOutput) => normalizeToolOutput(o).text;
-/** Run a tool and report whether it threw with a message matching `re`. */
-async function refuses(run: () => Promise<unknown>, re: RegExp): Promise<{ ok: boolean; msg: string }> {
+/** Run a tool and report whether it threw with a message matching `re`. (Tool.run is sync-or-async, so
+ *  the thunk returns unknown; awaiting a non-promise is a no-op.) */
+async function refuses(run: () => unknown, re: RegExp): Promise<{ ok: boolean; msg: string }> {
   try { const r = await run(); return { ok: false, msg: `did NOT throw (got ${String((r as any)?.text ?? r).slice(0, 50)})` }; }
   catch (e) { const m = (e as Error).message; return { ok: re.test(m), msg: m.slice(0, 70) }; }
 }
