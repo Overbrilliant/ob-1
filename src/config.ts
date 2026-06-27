@@ -171,9 +171,10 @@ function maxTokensFromEnv(): number | undefined {
 
 // The managed OB-1 backend holds the REAL provider keys (OpenRouter for models, SearXNG for search)
 // and proxies every request per signed-in user. THE SINGLE SOURCE OF TRUTH for the server URL is this
-// constant (everything goes through ob1ServerUrl()). We're in local dev, so it points at the local
-// server; set OB1_SERVER to override (e.g. the deployed origin in production).
-const DEFAULT_OB1_SERVER = "http://localhost:8787";
+// constant (everything goes through ob1ServerUrl()). Defaults to the managed PRODUCTION server so a
+// fresh install works out of the box; set OB1_SERVER to override (e.g. http://localhost:8787 for local
+// server development).
+const DEFAULT_OB1_SERVER = "https://ob1-api.overbrilliant.com";
 const DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"; // public; used only by the BYOK env path
 
 /** Base origin of the managed OB-1 server (no trailing slash). Override with OB1_SERVER. */
