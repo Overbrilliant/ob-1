@@ -95,7 +95,7 @@ export abstract class JsonRpcMcpClient implements McpClient {
     await this.request("initialize", {
       protocolVersion,
       capabilities: {},
-      clientInfo: { name: "ob1", version: "0.1.2" },
+      clientInfo: { name: "ob1", version: "0.1.3" },
     }, timeoutMs);
     this.notify("notifications/initialized", {});
   }
