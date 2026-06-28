@@ -432,6 +432,30 @@ function isKnownCheckCommand(cwd: string, command: string): boolean {
   return candidates.has(norm) || looksLikeTestCommand(norm);
 }
 
+/** A tool call the model emitted as TEXT instead of a real tool_use — so it executed NOTHING. Two
+ *  shapes a weak/garbled model produces (both seen in dogfooding):
+ *    • prose:  `write_file(path="x", content="…")`         (the whole message IS the call)
+ *    • JSON:   `{"path":"x","content":"…"}`  (optionally ```json-fenced) — the call serialized into content
+ *  We match only when the WHOLE message is one of these (anchored), so an explanatory answer that merely
+ *  mentions a tool name isn't flagged. Used by the degenerate-turn guard to steer the model back to real
+ *  tool calls rather than silently end a turn that did no work. */
+export function looksLikeUnsentToolCall(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  // (a) the entire message is a single prose call:  name(arg=…, …). Require real-argument syntax inside the
+  //     parens (a `=`/`:` kwarg or a quoted string) so an ordinary parenthetical like "done (first attempt)"
+  //     isn't mistaken for a tool call.
+  if (/^[a-z_][\w.]{2,}\s*\([\s\S]*[=:"'][\s\S]*\)\s*$/i.test(t)) return true;
+  // (b) the entire message (sans a ```json fence) is a JSON object/array carrying a tool's argument keys:
+  //     a write/edit (path + content/old_string/new_string/text) or a run_bash (command/cmd).
+  const body = t.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  if (!/^[[{][\s\S]*[\]}]$/.test(body)) return false;
+  const hasPath = /"(?:path|file_path)"\s*:/.test(body);
+  const hasWriteBody = /"(?:content|old_string|new_string|new_str|text)"\s*:/.test(body);
+  const hasCommand = /"(?:command|cmd)"\s*:/.test(body);
+  return (hasPath && hasWriteBody) || hasCommand;
+}
+
 export async function runTurn(userInput: string, history: Message[], deps: TurnDeps): Promise<TurnOutcome> {
   const { cfg, tools, store, approve, log } = deps;
   const call = deps._callModel ?? callModel;
@@ -605,18 +629,29 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       // (a real dogfooding case). Silently returning leaves the user staring at a turn that did nothing.
       // Nudge + retry once; if it recurs, say so plainly instead of pretending the turn succeeded.
       const finalText = resp.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim();
-      const proseToolCall = /^[a-z_]{3,}\s*\(.*\)\s*$/i.test(finalText)
-        || /\b(?:read_file|write_file|edit_file|run_bash|list_dir|web_search|web_fetch)\b\s*[({]/.test(finalText);
-      const degenerate = !mutated && stepsWithTools === 0 && (finalText.length === 0 || proseToolCall);
-      if (degenerate && !deps.signal?.aborted) {
+      // A tool call mis-emitted as TEXT (prose or a serialized JSON object) executed NOTHING. This can
+      // happen AFTER real work too — a weak model does a few steps, then serializes its fix into content
+      // and stalls (the task-09 dogfooding case), so it must fire regardless of stepsWithTools/mutated.
+      const unsentToolCall = looksLikeUnsentToolCall(finalText);
+      // The legacy weaker signal (a bare mention like `read_file(` mid-text) stays scoped to a turn that
+      // did nothing — broadening it would flag explanatory answers that name a tool after real work.
+      const legacyNoopProse = /\b(?:read_file|write_file|edit_file|run_bash|list_dir|web_search|web_fetch)\b\s*[({]/.test(finalText);
+      const noopTurn = !mutated && stepsWithTools === 0 && (finalText.length === 0 || unsentToolCall || legacyNoopProse);
+      const degenerate = (unsentToolCall || noopTurn) && !deps.signal?.aborted;
+      if (degenerate) {
         if (noopRetries < 1) {
           noopRetries++;
-          log(c.yellow("  ⚠ the model ended without taking any action — retrying once"));
-          history.push({ role: "user", content:
-            "You ended the turn without calling any tool or giving a complete answer. If this task needs changes, USE THE TOOLS now (read_file / edit_file / write_file / run_bash) to actually do the work — do NOT just describe a tool call in prose. If genuinely no action is needed, give a complete answer." });
+          log(c.yellow(unsentToolCall
+            ? "  ⚠ the model wrote a tool call as text instead of invoking it — retrying once"
+            : "  ⚠ the model ended without taking any action — retrying once"));
+          history.push({ role: "user", content: unsentToolCall
+            ? "Your previous message described or serialized a tool call as TEXT — prose like `write_file(path=\"…\")`, or a JSON object such as {\"path\":\"…\",\"content\":\"…\"} — instead of actually invoking it, so NOTHING happened. Re-issue it NOW as a REAL tool call (read_file / edit_file / write_file / run_bash); never print a tool call as text or JSON. If the task is genuinely complete, run the project's check and give a one-line answer."
+            : "You ended the turn without calling any tool or giving a complete answer. If this task needs changes, USE THE TOOLS now (read_file / edit_file / write_file / run_bash) to actually do the work — do NOT just describe a tool call in prose. If genuinely no action is needed, give a complete answer." });
           continue;
         }
-        log(c.yellow("  ⚠ the model produced no action and no answer — nothing was done this turn. Try again or rephrase the task."));
+        log(c.yellow(unsentToolCall
+          ? "  ⚠ the model kept emitting tool calls as text — they did not run, so the task may be unfinished. Try again or rephrase."
+          : "  ⚠ the model produced no action and no answer — nothing was done this turn. Try again or rephrase the task."));
       }
       // Auto-verify + self-correct: the model thinks it's done, but if it CHANGED files, run the project's
       // fast checks. On failure, feed the errors back and let it fix them — looping until green or the

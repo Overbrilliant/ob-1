@@ -4,7 +4,7 @@
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runTurn, type TurnDeps } from "../src/agent/loop.ts";
+import { runTurn, looksLikeUnsentToolCall, type TurnDeps } from "../src/agent/loop.ts";
 import { buildTools } from "../src/agent/tools.ts";
 import { loadConfig } from "../src/config.ts";
 import { MockBrain, asText, asToolUse, toolResultsIn } from "../src/eval/parity.ts";
@@ -99,6 +99,65 @@ function deps(cfg: any, brain: MockBrain, over: Partial<TurnDeps> = {}): TurnDep
   await runTurn("danger", history, deps(baseCfg, brain, { onMutate: () => {} }));
   const fed = toolResultsIn(brain.request(1));
   check("blocked_bash: catastrophic rm refused, surfaced as is_error", fed.length === 1 && !!fed[0].is_error && /blocked by safety policy/.test(fed[0].content));
+}
+
+// ── scenario 7: tool_call_as_json_text — a write serialized into content (no real tool_use) is steered ──
+// A weak model "writes" its tool call as a bare JSON object in the text instead of emitting a tool_use, so
+// nothing runs. The degenerate-turn guard must detect this, nudge once, and let the recovered real call run.
+{
+  const brain = new MockBrain([
+    asText('{"path":"out7.txt","content":"recovered"}'),                 // serialized call — executes nothing
+    asToolUse([{ name: "write_file", input: { path: "out7.txt", content: "recovered" } }]), // model recovers
+    asText("done"),
+  ]);
+  const history: Message[] = [];
+  await runTurn("make out7.txt", history, deps(baseCfg, brain, { onMutate: () => {} }));
+  check("json_text_call: the turn did NOT end on the serialized call (it was steered to retry)", brain.steps === 3);
+  check("json_text_call: a corrective nudge about text/JSON tool calls was injected",
+    !!brain.request(1)?.messages.some((m) => m.role === "user" && typeof m.content === "string" && /as TEXT|serialized|never print a tool call/i.test(m.content)));
+  check("json_text_call: the recovered real write actually wrote the file", existsSync(join(dir, "out7.txt")) && readFileSync(join(dir, "out7.txt"), "utf8") === "recovered");
+}
+
+// ── scenario 8: json_text_call_AFTER_real_work — fires even once stepsWithTools>0 (the task-09 shape) ──
+// The model reads a file (real tool_use), THEN serializes its fix as JSON text and stalls. The old guard
+// only fired on a pure no-op turn (stepsWithTools===0) and let this slip through unsolved.
+{
+  writeFileSync(join(dir, "src8.txt"), "input");
+  const brain = new MockBrain([
+    asToolUse([{ name: "read_file", input: { path: "src8.txt" } }]),     // real work first
+    asText('{"path":"fix8.txt","content":"fixed"}'),                     // then a serialized call — nothing runs
+    asToolUse([{ name: "write_file", input: { path: "fix8.txt", content: "fixed" } }]), // recovers
+    asText("done"),
+  ]);
+  const history: Message[] = [];
+  await runTurn("fix it", history, deps(baseCfg, brain, { onMutate: () => {} }));
+  check("json_text_after_work: steered to retry despite earlier real tool calls", brain.steps === 4);
+  check("json_text_after_work: the fix file was written by the recovered call", existsSync(join(dir, "fix8.txt")));
+}
+
+// ── scenario 9: no false positive — an explanatory final answer that NAMES a tool isn't flagged ──
+// A normal answer mentioning a tool (after real work) must NOT be treated as an unsent tool call.
+{
+  writeFileSync(join(dir, "r9.txt"), "data");
+  const brain = new MockBrain([
+    asToolUse([{ name: "read_file", input: { path: "r9.txt" } }]),
+    asText("I used read_file to inspect r9.txt and everything looks correct. No changes were needed."),
+  ]);
+  const history: Message[] = [];
+  await runTurn("check r9", history, deps(baseCfg, brain, { onMutate: () => {} }));
+  check("no_false_positive: a prose answer naming a tool ends cleanly (no extra retry step)", brain.steps === 2);
+}
+
+// ── scenario 9b: detector unit checks (looksLikeUnsentToolCall) ──────────────
+{
+  check("detector: bare JSON write call → true", looksLikeUnsentToolCall('{"path":"a.py","content":"x"}'));
+  check("detector: ```json-fenced call → true", looksLikeUnsentToolCall('```json\n{"path":"a.py","content":"x"}\n```'));
+  check("detector: prose call → true", looksLikeUnsentToolCall('write_file(path="a.py", content="x")'));
+  check("detector: serialized run_bash → true", looksLikeUnsentToolCall('{"command":"bun test"}'));
+  check("detector: normal prose answer → false", !looksLikeUnsentToolCall("All tests pass; I edited calc.py to fix the precedence bug."));
+  check("detector: answer mentioning a tool name → false", !looksLikeUnsentToolCall("I called read_file to inspect the file and it looks fine."));
+  check("detector: a JSON example without tool keys → false", !looksLikeUnsentToolCall('{"name":"ada","age":3}'));
+  check("detector: empty → false", !looksLikeUnsentToolCall("   "));
 }
 
 if (fail) { console.error("\n✗ parity-harness smoke FAILED"); process.exit(1); }

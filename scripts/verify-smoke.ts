@@ -309,7 +309,7 @@ const done = (t: string): ModelResponse => ({ stop_reason: "end_turn", content: 
   let n = 0;
   await runTurn("do the task", [], { ...baseDeps, log: (s) => logs.push(s), _callModel: async () => seq[n++] });
   check("dogfood C: a degenerate prose-tool-call turn is retried once", n === 2, `n=${n}`);
-  check("dogfood C: the retry nudge is surfaced", logs.some((s) => s.includes("ended without taking any action")));
+  check("dogfood C: the retry nudge is surfaced", logs.some((s) => /wrote a tool call as text|ended without taking any action/.test(s)));
 }
 
 {
