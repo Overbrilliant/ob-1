@@ -5,7 +5,7 @@
 // The agent loop is NOT React — so a TuiController bridges the two: app code pushes scrollback
 // lines / stream deltas / token usage into the controller, the controller notifies subscribers,
 // and <TuiApp> mirrors that state. Input flows back through controller.onSubmit.
-import { useEffect, useReducer, useState, Component, type ReactNode } from "react";
+import { useEffect, useReducer, useRef, useState, Component, type ReactNode } from "react";
 import { render, Box, Text, Static, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { estimateCost, modelSpec, modelReasoning } from "../providers/models.ts";
@@ -185,6 +185,7 @@ export class TuiController {
   reasoning = "";         // trailing partial reasoning line (live region) when showReasoning is on
   cancelTurn: (() => void) | null = null; // set by the drain loop while a turn runs; ESC calls it
   queue: string[] = [];   // prompts submitted while busy — drained in order when the turn frees up
+  history: string[] = []; // prompts actually dispatched this session (oldest→newest) — ↑ in the input recalls them
   suggestion = "";        // a proposed next prompt (update_tasks-style ghost): shown as the placeholder, Tab accepts
   genChars = 0;           // chars streamed this turn (a live ~token approximation for the loader)
   spinnerFrame = 0;       // advances on a timer while busy → the loader spins even during waits
@@ -377,6 +378,28 @@ export class TuiController {
   clearSuggestion = (): void => { if (this.suggestion) { this.suggestion = ""; this.emit(); } };
   enqueue = (s: string): void => { this.queue.push(s); this.emit(); };
   dequeue = (): string | undefined => { const s = this.queue.shift(); if (s !== undefined) this.emit(); return s; };
+
+  // ─── Prompt recall (↑/↓ in the input box) ──────────────────────────────────
+  // Record a dispatched prompt so ↑ can recall it. Slash-commands are excluded — they're commands, not
+  // prompts, and re-running one like /clear or /exit by accident would be destructive; consecutive
+  // duplicates collapse so re-running the same prompt doesn't bloat the list. Not rendered → no emit.
+  recordHistory = (s: string): void => {
+    const t = s.trim();
+    if (!t || t.startsWith("/")) return;
+    if (this.history[this.history.length - 1] === t) return;
+    this.history.push(t);
+  };
+  // The ↑/↓ recall list, newest→oldest: pending QUEUED prompts first (most-recently-queued first, so ↑
+  // first reaches the task you just lined up), then this session's dispatched history. No overlap — a
+  // prompt sits in the queue until it runs, then moves to history.
+  recallList = (): string[] => [...this.queue].reverse().concat([...this.history].reverse());
+  // Drop the first queued prompt equal to `s` — the recalled-then-re-sent case: remove the original so it
+  // runs once (with any edits) instead of twice. Returns whether anything was removed.
+  unqueue = (s: string): boolean => {
+    const i = this.queue.indexOf(s);
+    if (i < 0) return false;
+    this.queue.splice(i, 1); this.emit(); return true;
+  };
   exit = (): void => { if (this.busyTimer) { clearInterval(this.busyTimer); this.busyTimer = null; } this.disarmExit(); this.exited = true; this.emit(); };
   // ESC → abort the running turn + clear the queue. Flip `stopping` first so the footer shows "stopping…"
   // the instant the key is pressed — feedback that the abort registered even while a tool unwinds (a
@@ -786,11 +809,38 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
   const setAtEnd = (v: string) => { setValue(v); setInputKey((k) => k + 1); };
   const { exit } = useApp();
 
+  // ─── ↑/↓ prompt recall ───────────────────────────────────────────────────────
+  // ↑ walks back through pending QUEUED prompts (most-recent first) then this session's prompt history;
+  // ↓ walks forward, and stepping past the newest restores the draft you were typing. A recalled prompt
+  // lands in the input ready to edit + re-send (Enter). recallIndex −1 = the live draft; ≥0 indexes
+  // ctrl.recallList(). Refs (not state) so the useInput closures always read the latest without churn.
+  const recallIndex = useRef(-1);
+  const draft = useRef("");            // the in-progress text stashed when recall starts (restored by ↓ past newest)
+  const recallOriginal = useRef("");   // the recalled entry's UNEDITED text (to unqueue it on re-send / mark it below)
+  const recallFromQueue = useRef(false); // the current entry came from the live queue (vs history)
+  const resetRecall = () => { recallIndex.current = -1; recallFromQueue.current = false; draft.current = ""; recallOriginal.current = ""; };
+  const recallPrev = (): boolean => {  // ↑ : older
+    const list = ctrl.recallList();
+    if (list.length === 0) return false;
+    if (recallIndex.current === -1) draft.current = value;          // entering recall → stash the live draft
+    const i = Math.min(list.length - 1, recallIndex.current + 1);
+    recallIndex.current = i; recallOriginal.current = list[i]; recallFromQueue.current = i < ctrl.queue.length;
+    setAtEnd(list[i]); return true;
+  };
+  const recallNext = (): boolean => { // ↓ : newer (past the newest → restore the stashed draft)
+    if (recallIndex.current === -1) return false;
+    const i = recallIndex.current - 1;
+    if (i < 0) { const d = draft.current; resetRecall(); setAtEnd(d); return true; }
+    const list = ctrl.recallList();
+    recallIndex.current = i; recallOriginal.current = list[i] ?? ""; recallFromQueue.current = i < ctrl.queue.length;
+    setAtEnd(list[i] ?? ""); return true;
+  };
+
   useEffect(() => ctrl.subscribe(force), [ctrl]);
   useEffect(() => { if (ctrl.exited) exit(); });
   // Let the controller drop text into the input box (cursor at end) — used by /rewind to repopulate
   // the rewound prompt. setValue/setInputKey are stable, so registering once is safe.
-  useEffect(() => { ctrl.setInput = (text: string) => setAtEnd(text); return () => { ctrl.setInput = undefined; }; }, [ctrl]);
+  useEffect(() => { ctrl.setInput = (text: string) => { resetRecall(); setAtEnd(text); }; return () => { ctrl.setInput = undefined; }; }, [ctrl]);
 
   // Ctrl+O toggles showing the model's reasoning/thinking. ink-text-input only ignores Ctrl+C, so it
   // would otherwise append the "o" to the input — strip that spurious char back off (this handler runs
@@ -814,12 +864,17 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
     }
   });
 
-  // ESC stops the running turn (aborts the in-flight model call + clears the queue). Inactive while a
-  // picker, approval, or clarification owns ESC (those use it to cancel themselves) — ask_user runs
-  // mid-turn, so without the !ctrl.ask guard a single ESC would dismiss the question AND kill the turn.
+  // ESC. With text in the input, the FIRST press wipes the draft (and closes the slash menu, which is
+  // just typed text) — leaving a non-empty prompt never kills the turn. With the input EMPTY, ESC is a
+  // hard stop: requestCancel→cancelTurn aborts the in-flight model call, clears the queue, AND kills any
+  // running bash (a no-op when idle). So while typing it takes two presses to stop — the first clears
+  // your draft, the second stops — which guards against nuking a turn when you only meant to clear text.
+  // Inactive while a picker/approval/clarification/setup/proc frame or a focused footer button owns ESC.
   useInput((_input, key) => {
-    if (key.escape) ctrl.requestCancel();
-  }, { isActive: ctrl.busy && !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.prompt && !ctrl.procFocus });
+    if (!key.escape) return;
+    if (value) { resetRecall(); setValue(""); setMenuIndex(0); return; } // wipe the draft
+    ctrl.requestCancel();                                                // empty → stop the turn + tools
+  }, { isActive: !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.prompt && !ctrl.procFocus && !ctrl.upsellFocus && !ctrl.errorFocus });
 
   // Process manager (⌃P). Active only while open; ↑↓ navigate, x kills the highlighted process,
   // ←/Esc (or ⌃P again) close. Takes over the input frame so x never lands in the text field.
@@ -903,12 +958,18 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
     if (key.escape) ctrl.promptCancel();
   }, { isActive: !!ctrl.prompt });
 
-  // "Get Intelligent Models" footer button. From the input box, ↓ moves focus onto the button — inactive
-  // while a menu/modal owns the frame (they use ↓ themselves), while the button already has focus, and
-  // while the input has text (so ↓ never steals a keystroke from someone editing a multi-line-ish prompt).
+  // ↑/↓ in the input box recall prompts: ↑ walks back through the live queue (most-recently-queued first)
+  // then this session's history; ↓ walks forward, restoring the draft past the newest (see recallPrev/
+  // recallNext). When there's nothing left to recall, the arrows fall back to the footer buttons — ↑ to
+  // the most-recent error action, ↓ to the "Get Intelligent Models" upsell (both only from an empty
+  // prompt). Inactive while a menu/modal or a focused footer button owns the arrows.
   useInput((_input, key) => {
-    if (key.downArrow) ctrl.focusUpsell();
-  }, { isActive: ctrl.upsellEligible() && !ctrl.upsellFocus && !ctrl.errorFocus && value === "" && !menuOpen && !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.procFocus });
+    if (key.upArrow) {
+      if (!recallPrev() && value === "" && ctrl.lastErrorAction) ctrl.focusErrorAction();
+    } else if (key.downArrow) {
+      if (!recallNext() && value === "" && ctrl.upsellEligible()) ctrl.focusUpsell();
+    }
+  }, { isActive: !menuOpen && !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.prompt && !ctrl.procFocus && !ctrl.upsellFocus && !ctrl.errorFocus });
 
   // While the upsell button is focused: Enter opens the pricing page in the browser; ↑ / Esc return to
   // the input. The <TextInput> is unfocused (focus={!ctrl.upsellFocus}) so typing doesn't leak into it.
@@ -917,11 +978,8 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
     else if (key.upArrow || key.escape) ctrl.blurUpsell();
   }, { isActive: ctrl.upsellFocus });
 
-  // ↑ from an empty prompt surfaces the most recent error's action (e.g. "Upgrade your plan") as a
-  // focusable button. Inactive while a menu/modal/upsell owns the frame or the prompt has text.
-  useInput((_input, key) => {
-    if (key.upArrow) ctrl.focusErrorAction();
-  }, { isActive: !!ctrl.lastErrorAction && !ctrl.errorFocus && !ctrl.upsellFocus && value === "" && !menuOpen && !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.procFocus });
+  // (↑ to focus the most-recent error action is folded into the recall handler above — it fires only when
+  // there's nothing left to recall, so prompt history takes precedence over the error button.)
 
   // While the error action is focused: Enter opens it in the browser; ↓ / Esc return to the input. The
   // <TextInput> is unfocused (focus also gates on !errorFocus) so the keystroke can't leak into it.
@@ -1014,14 +1072,22 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
           <Text dimColor>{"  ⌃P to manage / kill"}</Text>
         </Box>
       ) : null}
-      {/* Queued prompts (submitted while busy) — run automatically, in order. */}
-      {ctrl.queue.length > 0 && !ctrl.setup ? (
-        <Box flexDirection="column" paddingX={1}>
-          {ctrl.queue.map((q, i) => (
-            <Text key={i} dimColor>{`  ⋯ queued #${i + 1}: ${q.length > 64 ? q.slice(0, 64) + "…" : q}`}</Text>
-          ))}
-        </Box>
-      ) : null}
+      {/* Queued prompts (submitted while busy) — run automatically, in order. The one currently pulled
+          back into the input via ↑ (recallFromQueue) is highlighted "✎ editing" so it's clear it'll be
+          REPLACED (not duplicated) when you press Enter — and left as-is if you Esc instead. */}
+      {ctrl.queue.length > 0 && !ctrl.setup ? (() => {
+        const editing = recallFromQueue.current ? recallOriginal.current : null;
+        let marked = false;
+        return (
+          <Box flexDirection="column" paddingX={1}>
+            {ctrl.queue.map((q, i) => {
+              const isEditing = !marked && q === editing; if (isEditing) marked = true;
+              const text = q.length > 64 ? q.slice(0, 64) + "…" : q;
+              return <Text key={i} color={isEditing ? "cyan" : undefined} dimColor={!isEditing}>{`  ⋯ queued #${i + 1}: ${text}${isEditing ? "   ✎ editing above" : ""}`}</Text>;
+            })}
+          </Box>
+        );
+      })() : null}
       {/* Slash-command palette (above the input), so "/" alone reveals every command. */}
       {menuOpen ? (
         <Box flexDirection="column" paddingX={1}>
@@ -1193,6 +1259,10 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
                 value={value}
                 onChange={(v) => { setValue(v); setMenuIndex(0); }}
                 onSubmit={(line) => {
+                  // Re-sending a recalled QUEUED prompt: drop the original from the queue so it runs once
+                  // (with any edits) instead of twice, then leave recall mode. Only on an ACTUAL submit —
+                  // not the arg-completion path below, which keeps the recalled command to type its arg.
+                  const dropRecalledQueued = () => { if (recallFromQueue.current) ctrl.unqueue(recallOriginal.current); resetRecall(); };
                   // While the slash menu is open, Enter acts on the HIGHLIGHTED command (the footer
                   // promises "Enter run") — not on the raw partial text. An arg-taking command first
                   // completes to "/cmd " so the argument can be typed; everything else runs, which is
@@ -1202,11 +1272,11 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
                     const trimmed = line.trim();
                     const cmd = (matches.find(([n]) => n === trimmed) ?? matches[sel])[0];
                     if (NEEDS_ARG.has(cmd) && trimmed !== cmd) { setAtEnd(cmd + " "); setMenuIndex(0); return; } // setAtEnd: cursor at end so the arg types correctly
-                    setValue(""); setMenuIndex(0); void ctrl.onSubmit?.(cmd); return;
+                    dropRecalledQueued(); setValue(""); setMenuIndex(0); void ctrl.onSubmit?.(cmd); return;
                   }
-                  setValue(""); void ctrl.onSubmit?.(line);
+                  dropRecalledQueued(); setValue(""); void ctrl.onSubmit?.(line);
                 }}
-                placeholder={ctrl.busy ? "queue another task — runs after the current one…" : ctrl.suggestion ? `${ctrl.suggestion}   ⇥ tab` : "type a task, or / for commands"}
+                placeholder={ctrl.busy ? (ctrl.queue.length ? "queue another task — ↑ to edit a queued one…" : "queue another task — runs after the current one…") : ctrl.suggestion ? `${ctrl.suggestion}   ⇥ tab` : (ctrl.history.length || ctrl.queue.length ? "type a task · / commands · ↑ history" : "type a task, or / for commands")}
               />
             </Box>
           )}

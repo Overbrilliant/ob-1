@@ -362,6 +362,75 @@ await tick();
 check("busy loader shows the 'Esc to stop' hint", strip(cf() ?? "").includes("Esc to stop"));
 cctrl.setBusy(false);
 
+// ── ESC in the input box: with TEXT it wipes the draft (never stops the turn); EMPTY it's a hard stop
+//    (requestCancel→cancelTurn aborts the turn + clears the queue + kills bash). Driven via real keys. ──
+{
+  const e = new TuiController({ model: "m", mode: "solo", plan: false, inTok: 0, outTok: 0, cacheTok: 0 });
+  let stopped = false; e.cancelTurn = () => { stopped = true; };
+  e.setBusy(true);
+  const { stdin, lastFrame: lf } = render(<TuiApp ctrl={e} />);
+  await tick();
+  stdin.write("hello draft");
+  await tick();
+  check("typed draft shows in the input", strip(lf() ?? "").includes("hello draft"));
+  stdin.write("\x1b");                       // Esc with text → wipe the draft only
+  await tick();
+  check("Esc with text wipes the draft", !strip(lf() ?? "").includes("hello draft"));
+  check("Esc with text does NOT stop the turn", !stopped);
+  stdin.write("\x1b");                       // Esc on the now-empty input → hard stop
+  await tick();
+  check("Esc on an empty input hard-stops the turn", stopped);
+  e.setBusy(false);
+}
+
+// ── ↑ recall: a QUEUED task comes back into the input (marked "editing"); Enter re-sends it and removes
+//    the original from the queue (runs once, with edits, not twice). ──
+{
+  const q = new TuiController({ model: "m", mode: "solo", plan: false, inTok: 0, outTok: 0, cacheTok: 0 });
+  let sent: string | null = null;
+  q.onSubmit = (line) => { sent = line; };
+  q.setBusy(true);
+  q.enqueue("queued bravo");
+  const { stdin, lastFrame: lf } = render(<TuiApp ctrl={q} />);
+  await tick();
+  check("queued task shown before recall", strip(lf() ?? "").includes("queued #1: queued bravo"));
+  stdin.write("\x1b[A");                     // ↑ → pull the queued task back into the input
+  await tick();
+  check("↑ marks the pulled queued task as editing", strip(lf() ?? "").includes("✎ editing above"));
+  stdin.write("\r");                         // Enter → re-send it
+  await tick();
+  check("Enter re-sends the recalled queued task", sent === "queued bravo");
+  check("re-sending a recalled queued task unqueues the original (no double-run)", q.queue.length === 0);
+  q.setBusy(false);
+}
+
+// ── ↑/↓ recall walks this session's prompt history (newest first); ↓ steps back toward newer; Enter
+//    re-sends a recalled prompt and leaves history intact. ──
+{
+  const h = new TuiController({ model: "m", mode: "solo", plan: false, inTok: 0, outTok: 0, cacheTok: 0 });
+  let sent2: string | null = null;
+  h.onSubmit = (line) => { sent2 = line; };
+  h.recordHistory("first prompt");
+  h.recordHistory("second prompt");
+  h.recordHistory("/clear");                 // slash-commands are NOT recorded (skipped inside recordHistory)
+  check("slash-commands are excluded from recall history", h.history.length === 2);
+  const { stdin, lastFrame: lf } = render(<TuiApp ctrl={h} />);
+  await tick();
+  stdin.write("\x1b[A");                     // ↑ → newest first
+  await tick();
+  check("↑ recalls the most recent history prompt first", strip(lf() ?? "").includes("second prompt"));
+  stdin.write("\x1b[A");                     // ↑ → older
+  await tick();
+  check("↑ again steps to the older history prompt", strip(lf() ?? "").includes("first prompt") && !strip(lf() ?? "").includes("second prompt"));
+  stdin.write("\x1b[B");                     // ↓ → back toward newer
+  await tick();
+  check("↓ steps back toward newer history", strip(lf() ?? "").includes("second prompt"));
+  stdin.write("\r");                         // Enter → re-send the recalled prompt
+  await tick();
+  check("Enter re-sends a recalled history prompt", sent2 === "second prompt");
+  check("re-sending a history prompt leaves history intact", h.history.length === 2);
+}
+
 // ── Picker dismiss reason: ← (back) vs Esc (exit) — drives /settings ← → menu, Esc → leave. Both
 //    resolve null; they differ via pickerDismiss so plain consumers (/models, /skill) are unaffected. ──
 {
