@@ -59,7 +59,7 @@ export interface TurnDeps {
   /** Auto-verify hook: when the model finishes a turn that CHANGED files, run the project's fast checks
    *  (typecheck/compile). If it returns ran && !ok, the loop feeds the failures back and the model
    *  self-corrects. Always wired in Act mode; undefined in read-only Plan mode (no command execution). */
-  verify?: () => Promise<{ ran: boolean; ok: boolean; report: string } | null>;
+  verify?: () => Promise<{ ran: boolean; ok: boolean; report: string; timedOut?: boolean } | null>;
   /** Max self-correction rounds before giving up and leaving the changes for the user (default 3). */
   autofixMax?: number;
   /** Declarative policy rules (from .ob1/policy.json) evaluated before the approval gate: a "deny" rule
@@ -332,24 +332,112 @@ function modelIdentity(cfg: Config): string {
   return `${base} The concrete model isn't known until a response returns. If asked which model you are, say you're provider-routed and the exact model varies per request — don't guess a specific identity.`;
 }
 
+// One-line, length-capped rendering of a free-text argument (collapses whitespace/newlines so a multi-line
+// command or query stays on a single transcript line).
+function oneline(v: unknown, max = 60): string {
+  const t = String(v ?? "").replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max - 1) + "…" : t;
+}
+const path = (p: unknown): string => String(p ?? "").trim() || "(missing path)";
+
+// Fallback for tools we don't case explicitly (e.g. MCP tools): render a shallow object as compact
+// `key=value · key=value` rather than a raw JSON blob — easier to scan in the transcript.
 function preview(input: any): string {
-  const s = JSON.stringify(input);
-  return s.length > 80 ? s.slice(0, 77) + "…" : s;
+  if (input == null || typeof input !== "object" || Array.isArray(input)) return oneline(JSON.stringify(input), 80);
+  const parts = Object.entries(input).map(([k, v]) => {
+    const val = v != null && typeof v === "object" ? (Array.isArray(v) ? `[${v.length}]` : "{…}") : oneline(v, 32);
+    return `${k}=${val}`;
+  });
+  return oneline(parts.join(" · "), 80);
 }
 
+// manage_skill: turn the action verb into a present-tense gerund for the NL label.
+function skillVerb(action: unknown): string {
+  switch (String(action ?? "").toLowerCase()) {
+    case "install": return "Installing";
+    case "remove": case "uninstall": return "Removing";
+    case "enable": return "Enabling";
+    case "disable": return "Disabling";
+    case "update": case "upgrade": return "Updating";
+    default: return "Managing";
+  }
+}
+
+/** A short, NATURAL-LANGUAGE label for a tool call, shown in the transcript (`→ …`) and the approval
+ *  prompt — written as the action in progress ("Reading …", "Searching the web for …") so it reads like
+ *  a plain status line rather than a function call. The identifying argument is included (path / query /
+ *  command), capped to one line. Unknown/MCP tools fall through to a humanized "Calling …" form. */
 export function describe(name: string, input: any): string {
-  if (name === "write_file") return `write_file ${input?.path ?? "(missing path)"}`;
-  if (name === "edit_file") return `edit_file ${input?.path ?? "(missing path)"}`;
-  if (name === "run_bash") return `run_bash${input.background ? " (background)" : ""}: ${input.command}`;
-  if (name === "kill_bash") return `kill_bash #${input.id}`;
-  if (name === "list_bash") return "list_bash";
-  if (name === "escalate") return `escalate → ${input.mode}`;
-  if (name === "spawn_subagents") return `spawn_subagents (${Array.isArray(input?.subtasks) ? input.subtasks.length : 0})`;
-  if (name === "spawn_write_subagents") return `spawn_write_subagents (${Array.isArray(input?.subtasks) ? input.subtasks.length : 0})`;
-  if (name === "update_tasks") { const ts = Array.isArray(input?.tasks) ? input.tasks : []; const done = ts.filter((t: any) => /^(completed|done|complete)$/i.test(String(t?.status ?? ""))).length; return ts.length ? `update_tasks (${done}/${ts.length} done)` : "update_tasks (clear)"; }
-  if (name === "manage_skill") return `manage_skill ${input?.action ?? "?"}: ${input?.name ?? "?"}`;
-  if (name === "use_skill") return `use_skill: ${input?.name ?? "?"}`;
-  return `${name} ${preview(input)}`;
+  const i = input ?? {};
+  switch (name) {
+    // ── Files ──
+    case "read_file": {
+      const range = i.offset != null || i.limit != null
+        ? ` (from line ${Number(i.offset ?? 0) + 1}${i.limit != null ? `, ${i.limit} lines` : ""})`
+        : "";
+      return `Reading ${path(i.path)}${range}`;
+    }
+    case "write_file": return `Writing ${path(i.path)}`;
+    case "edit_file": return `Editing ${path(i.path)}`;
+    case "architect_edit": return `Editing ${path(i.file)} (architect)`;
+    case "list_dir": return `Listing ${oneline(i.path, 60) || "the current directory"}`;
+    case "diagnostics": return `Checking diagnostics for ${path(i.path)}`;
+
+    // ── Shell ──
+    case "run_bash": return `Running${i.background ? " in the background" : ""}: ${oneline(i.command, 72)}`;
+    case "list_bash": return "Listing background processes";
+    case "kill_bash": return `Stopping process #${i.id}`;
+    case "restart_bash": return `Restarting process #${i.id}`;
+
+    // ── Verify · browser · ports ──
+    case "verify": return `Running checks (${oneline(i.checks ?? "auto", 40)})`;
+    case "browser_check": {
+      const steps = Array.isArray(i.steps) ? i.steps.length : 0;
+      return `Checking ${oneline(i.url, 50)} in the browser${steps ? ` (${steps} step${steps === 1 ? "" : "s"})` : ""}`;
+    }
+    case "expose_port": return `Exposing port ${i.port}`;
+
+    // ── Web ──
+    case "web_fetch": return `Fetching ${oneline(i.url, 64)}`;
+    case "web_search": return `Searching the web for "${oneline(i.query)}"`;
+
+    // ── Memory · knowledge ──
+    case "memory_add": return `Saving to memory: ${oneline(i.fact)}`;
+    case "memory_search": return `Searching memory for "${oneline(i.query)}"`;
+    case "relate": return `Linking ${oneline(i.src, 22)} →${oneline(i.rel, 16)}→ ${oneline(i.dst, 22)}`;
+    case "repo_map": return "Mapping the repository";
+    case "read_topic": return `Reading topic "${oneline(i.name, 40)}"`;
+
+    // ── Skills · tasks · user ──
+    case "use_skill": return `Using skill "${i.name ?? "?"}"`;
+    case "manage_skill": return `${skillVerb(i.action)} skill "${i.name ?? "?"}"`;
+    case "update_tasks": {
+      const ts = Array.isArray(i.tasks) ? i.tasks : [];
+      const done = ts.filter((t: any) => /^(completed|done|complete)$/i.test(String(t?.status ?? ""))).length;
+      return ts.length ? `Updating tasks (${done}/${ts.length} done)` : "Clearing the task list";
+    }
+    case "ask_user": return `Asking you: ${oneline(i.question)}`;
+
+    // ── Data · secrets ──
+    case "execute_sql": return `Running SQL${i.db ? ` on ${oneline(i.db, 20)}` : ""}: ${oneline(i.sql, 56)}`;
+    case "request_secret": return `Requesting secret ${oneline(i.name, 40)}`;
+    case "check_secret": return `Checking for secret ${oneline(i.name, 40)}`;
+
+    // ── PRs · orchestration ──
+    case "create_pr": return `Opening PR: ${oneline(i.title)}`;
+    case "pr_checks": return i.pr ? `Checking PR #${i.pr}` : "Checking PR status";
+    case "escalate": return `Escalating to ${i.mode} mode`;
+    case "spawn_subagents": { const n = Array.isArray(i.subtasks) ? i.subtasks.length : 0; return `Spawning ${n} subagent${n === 1 ? "" : "s"}`; }
+    case "spawn_write_subagents": { const n = Array.isArray(i.subtasks) ? i.subtasks.length : 0; return `Spawning ${n} write subagent${n === 1 ? "" : "s"}`; }
+
+    default: {
+      // Unknown / MCP tool: humanize the name (mcp__figma__create_text → "figma · create text") and append
+      // a compact arg preview so the line still reads as plain language.
+      const pretty = name.startsWith("mcp__") ? name.slice(5).replace(/__/g, " · ").replace(/_/g, " ") : name;
+      const args = i && typeof i === "object" && Object.keys(i).length ? ` (${preview(input)})` : "";
+      return `Calling ${pretty}${args}`;
+    }
+  }
 }
 
 /** A colored diff preview of a pending file mutation, shown before the approval gate. null if none. */
@@ -657,11 +745,19 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       // fast checks. On failure, feed the errors back and let it fix them — looping until green or the
       // round budget is spent. This is what turns "I edited the file" into "I edited the file and it works".
       if (deps.verify && mutated && !deps.signal?.aborted) {
-        log(c.gray("  ⚙ verifying changes…"));
+        log(c.gray("  ⚙ verifying changes… (compile check; Esc to skip)"));
         const v = await deps.verify();
         quality?.recordAutoVerification(v);
         quality?.save();
-        if (v?.ran && !v.ok) {
+        // ESC during the check: the user asked to stop — don't self-correct or nudge, just finish. (The
+        // check was killed via the signal, so v would otherwise look like a failure and re-trigger a fix.)
+        if (deps.signal?.aborted) {
+          log(c.yellow("  ⚠ verification skipped (Esc) — changes left unverified"));
+        } else if (v?.timedOut) {
+          // A check blew its timeout — a hang, not a proved failure. Re-running it (the self-correct loop)
+          // would just re-hang, which is exactly the "stuck on verifying" symptom. Surface it and finish.
+          log(c.yellow("  ⚠ verification timed out — skipping (run the project's checks manually)"));
+        } else if (v?.ran && !v.ok) {
           if (fixRounds < autofixMax) {
             fixRounds++;
             log(c.yellow(`  ↻ checks failed — self-correcting (${fixRounds}/${autofixMax})`));

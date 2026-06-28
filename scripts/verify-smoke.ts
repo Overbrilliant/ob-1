@@ -158,6 +158,22 @@ const done = (t: string): ModelResponse => ({ stop_reason: "end_turn", content: 
 }
 
 {
+  // TIMEOUT is a hang, not a proved failure: a check that times out must NOT enter the self-correct loop
+  // (re-running it just re-hangs — the "stuck on verifying" symptom). It runs ONCE, surfaces a timeout
+  // notice, and finishes — no fix message pushed into history.
+  let verifyCalls = 0;
+  const logs: string[] = [];
+  const verify = async () => { verifyCalls++; return { ran: true, ok: false, timedOut: true, report: "✗ typecheck TIMED OUT (tsc --noEmit): [check timed out after 120s — killed]" }; };
+  const seq2 = [edit(), done("done")];
+  let m2 = 0;
+  const history: any[] = [];
+  await runTurn("change it", history, { ...baseDeps, verify, log: (s) => logs.push(s), _callModel: async () => seq2[m2++] });
+  check("self-fix: a timed-out check runs once and does NOT self-correct", verifyCalls === 1, `calls=${verifyCalls}`);
+  check("self-fix: a timeout is surfaced as a skip, not a failure", logs.some((s) => s.includes("verification timed out")), logs.join(" | "));
+  check("self-fix: a timeout never pushes a 'fix the failures' message", !history.some((m) => typeof m.content === "string" && m.content.includes("verification of your changes FAILED")));
+}
+
+{
   // If the agent explicitly ran a recognized project check after editing, don't falsely nudge "not verified"
   // just because the automatic fast-check scope is empty (common in JS repos with only a test script).
   const d = mkdtemp("explicit-check");

@@ -14,6 +14,12 @@ export const c = {
   cyan: wrap("36"),
   brightCyan: wrap("96"),
   gray: wrap("90"),
+  // Diff highlights: a solid background bar (not just a foreground tint) so add/del lines POP. Bright-white
+  // text (97) on a DARK background, chosen for contrast: white on the basic-bright green (code 42) is only
+  // ~2:1 and fails WCAG AA, so additions use xterm-256 colour 22 (#005f00, ~8:1 contrast — passes AA/AAA).
+  // 256-colour backgrounds are supported by essentially all modern terminals.
+  addHi: wrap("48;5;22;97"), // additions: dark-green highlight (#005f00), bright-white text
+  delHi: wrap("41;97"),      // deletions: red highlight, bright-white text
 };
 
 /** Per-mode accent, mirroring the plan's colour language. */
@@ -56,7 +62,9 @@ export function renderDiff(before: string, after: string, path = "", cap = 60): 
   if (!lines.some((l) => l.t !== " ")) return "";
   const shown = lines.slice(0, cap);
   const body = shown
-    .map((l) => (l.t === "+" ? c.green("  + " + l.s) : l.t === "-" ? c.red("  - " + l.s) : c.dim("    " + l.s)))
+    // Keep the left gutter plain, then a green/red highlighted bar from the +/- marker through the line
+    // content (the marker stays so add vs del reads without relying on colour alone).
+    .map((l) => (l.t === "+" ? "  " + c.addHi("+ " + l.s) : l.t === "-" ? "  " + c.delHi("- " + l.s) : c.dim("    " + l.s)))
     .join("\n");
   const more = lines.length > cap ? c.dim(`\n    … ${lines.length - cap} more line(s)`) : "";
   return c.dim(`  ┌─ diff: ${path} ─`) + "\n" + body + more;

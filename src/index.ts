@@ -323,12 +323,19 @@ async function applySolution(task: string, solution: string): Promise<void> {
 let activeAbort: AbortController | null = null; // the current turn's cancel handle (ESC); null when idle
 let turnMutated = false; // did a mutating tool (write/edit/bash) run THIS turn? → ESC warns edits may be partial
 
+// The SILENT post-turn gate runs only fast compile checks (typecheck / `cargo check` / `go build` /
+// ruff / mypy), which finish in seconds on a sane project. A much tighter cap than shellExec's 300s
+// default keeps a pathological check (a watch-mode `tsc -w`, a cold `cargo`/`go` blocked on a network
+// fetch, an npm script that spawns a server) from freezing the turn at "⚙ verifying changes…" for
+// minutes. Anything genuinely slower is the agent's call via the `verify` tool, which keeps the long cap.
+const AUTO_VERIFY_TIMEOUT_MS = 120_000;
 /** The auto-verify hook for the self-fix loop: run the project's FAST checks (typecheck/compile) and
- *  report pass/fail. Honors the current ESC signal so a long check can be cancelled. Never throws. */
-async function autoVerify(): Promise<{ ran: boolean; ok: boolean; report: string } | null> {
+ *  report pass/fail. Honors the current ESC signal so a long check can be cancelled. Bounded by
+ *  AUTO_VERIFY_TIMEOUT_MS so a hanging check times out (timedOut) instead of dangling. Never throws. */
+async function autoVerify(): Promise<{ ran: boolean; ok: boolean; report: string; timedOut: boolean } | null> {
   try {
-    const r = await runVerification(cfg.cwd, (cmd) => shellExec({ cwd: cfg.cwd, sandbox: cfg.sandbox, command: cmd, signal: activeAbort?.signal }), "auto");
-    return { ran: r.ran, ok: r.ok, report: r.report };
+    const r = await runVerification(cfg.cwd, (cmd) => shellExec({ cwd: cfg.cwd, sandbox: cfg.sandbox, command: cmd, timeoutMs: AUTO_VERIFY_TIMEOUT_MS, signal: activeAbort?.signal }), "auto");
+    return { ran: r.ran, ok: r.ok, report: r.report, timedOut: r.timedOut };
   } catch { return null; }
 }
 

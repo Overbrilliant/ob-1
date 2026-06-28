@@ -6,7 +6,7 @@ import { runVerification, type Check, type CheckResult } from "../src/agent/veri
 let fail = false;
 const check = (n: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} ${n}`); if (!ok) fail = true; };
 
-const R = (name: string, kind: any, ok: boolean): CheckResult => ({ name, kind, ok, output: ok ? "" : "boom", command: name });
+const R = (name: string, kind: any, ok: boolean): CheckResult => ({ name, kind, ok, output: ok ? "" : "boom", command: name, timedOut: false });
 
 // ── level → kinds ─────────────────────────────────────────────────────────────
 check("levels are ordered targeted→package→workspace→merge_ready", GREEN_LEVELS.join(",") === "targeted_tests,package,workspace,merge_ready");

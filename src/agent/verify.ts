@@ -107,14 +107,18 @@ export function parseScope(arg: unknown): Scope {
   return s.split(/[,\s]+/).filter(Boolean);
 }
 
-export interface CheckResult { name: string; kind: CheckKind; ok: boolean; output: string; command: string; }
-export interface VerifyResult { ran: boolean; ok: boolean; results: CheckResult[]; report: string; }
+export interface CheckResult { name: string; kind: CheckKind; ok: boolean; output: string; command: string; timedOut: boolean; }
+// `timedOut` is true when ANY check was killed by its timeout (code 124) rather than failing on its own
+// merits. The caller distinguishes "we couldn't verify in time" from "verification proved a failure" — a
+// timeout must NOT feed the self-correct loop (re-running a hanging check just re-hangs). See loop.ts.
+export interface VerifyResult { ran: boolean; ok: boolean; results: CheckResult[]; report: string; timedOut: boolean; }
 
 function formatReport(results: CheckResult[]): string {
   return results.map((r) => {
     if (r.ok) return `✓ ${r.name} passed (${r.command})`;
     const tail = r.output.replace(/\s+$/, "").split("\n").slice(-30).join("\n");
-    return `✗ ${r.name} FAILED (${r.command}):\n${tail || "(no output)"}`;
+    const label = r.timedOut ? "TIMED OUT" : "FAILED";
+    return `✗ ${r.name} ${label} (${r.command}):\n${tail || "(no output)"}`;
   }).join("\n\n");
 }
 
@@ -126,14 +130,15 @@ export async function runVerification(cwd: string, exec: Exec, scope: Scope = "a
   const all = detectChecks(cwd);
   const picked = selectChecks(all, scope);
   if (!picked.length) {
-    return { ran: false, ok: true, results: [], report: all.length ? "no checks matched that scope (available: " + all.map((c) => c.name).join(", ") + ")" : "no checks detected for this project" };
+    return { ran: false, ok: true, results: [], timedOut: false, report: all.length ? "no checks matched that scope (available: " + all.map((c) => c.name).join(", ") + ")" : "no checks detected for this project" };
   }
   const results: CheckResult[] = [];
   for (const c of picked) {
     const { code, output } = await exec(c.command);
-    results.push({ name: c.name, kind: c.kind, ok: code === 0, output, command: c.command });
+    // shellExec returns 124 when it kills a check that blew its timeout — a hang, not a real failure.
+    results.push({ name: c.name, kind: c.kind, ok: code === 0, output, command: c.command, timedOut: code === 124 });
   }
-  return { ran: true, ok: results.every((r) => r.ok), results, report: formatReport(results) };
+  return { ran: true, ok: results.every((r) => r.ok), results, timedOut: results.some((r) => r.timedOut), report: formatReport(results) };
 }
 
 /** Real executor: run a check command (sandbox-wrapped), capturing combined stdout+stderr. Killable via
