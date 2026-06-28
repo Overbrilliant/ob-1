@@ -663,6 +663,29 @@ export function clipToRow(s: string, width: number): string {
   return s.length > w ? "…" + s.slice(-(w - 1)) : s;
 }
 
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+/** How many TERMINAL rows a committed scroll line occupies at `cols`, accounting for soft-wrapping. The
+ *  width is the VISIBLE width (ANSI stripped). Used to size the live viewport in real rows, not logical
+ *  lines — a long agent line wraps to several rows, and miscounting it overflows the dynamic region. */
+export function lineRows(it: ScrollItem, cols: number): number {
+  const w = renderScroll(it).replace(ANSI_RE, "").length;
+  return Math.max(1, Math.ceil(w / Math.max(1, cols)));
+}
+/** The trailing items whose total WRAPPED height fits within `maxRows` terminal rows (newest-biased; always
+ *  keeps at least the last line). Keeps the live turn viewport from ever rendering taller than the space
+ *  reserved for it — an overflowing dynamic region makes Ink's <Static> erase walk up into committed
+ *  scrollback and wipe it (reported as: agent output disappears while the prompt bars remain). */
+export function fitTail(items: ScrollItem[], maxRows: number, cols: number): ScrollItem[] {
+  if (maxRows <= 0 || items.length === 0) return [];
+  let used = 0, start = items.length;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const h = lineRows(items[i], cols);
+    if (used + h > maxRows && start < items.length) break; // have ≥1 line and the next won't fit → stop
+    used += h; start = i;
+  }
+  return items.slice(start);
+}
+
 const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; // braille spinner frames for the busy loader
 /** A short, climbing token count for the loader (e.g. "342" then "1.2k"). Live estimate ≈ chars/4. */
 function tokStr(n: number): string { return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n); }
@@ -1002,11 +1025,30 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
     it.user
       ? <Text key={it.id} backgroundColor="#3a3a3a" color="#ffffff">{it.text.length < cols ? it.text + " ".repeat(cols - it.text.length) : it.text}</Text>
       : <Text key={it.id} dimColor={it.dim}>{renderScroll(it)}</Text>;
-  // Reserve room for the partial line + input box (3) + status + any proc list, with margin, so the
-  // viewport + everything below it never exceeds the terminal height (an overflowing dynamic region
-  // pushes the input box off-screen / clobbers the scrollback).
-  const viewH = Math.max(2, rows - (panelOpen ? 18 : 12) - ctrl.procList().length - (ctrl.agentsRunning() > 0 ? Math.min(ctrl.agentList().length + 1, 10) : 0) - (ctrl.todoList().length ? Math.min(ctrl.todoList().length + 1, 13) : 0));
-  const view = ctrl.busy ? ctrl.turnBuf.slice(-viewH) : [];
+  // Size the live turn viewport so the WHOLE dynamic region (viewport + every panel/partial/banner + the
+  // input box + status line) never exceeds the terminal height. If it does, Ink's <Static> erase walks up
+  // into committed scrollback and wipes it — the "agent output disappears, prompt bars remain" bug. So
+  // tally the real height of everything BELOW <Static> except the viewport (`chrome`), then give the
+  // viewport the rest and clamp it to that many wrapped rows with fitTail. Match each conditional to the
+  // JSX below; over-reserving only shrinks the viewport slightly, but under-reserving corrupts history.
+  const sidePanelsHidden = ctrl.procFocus || !!ctrl.picker || !!ctrl.ask || !!ctrl.setup || !!ctrl.pending;
+  const todoN = ctrl.todoList().length, agentN = ctrl.agentList().length, procN = ctrl.procList().length;
+  const modal = !!(ctrl.ask || ctrl.picker || ctrl.setup || ctrl.prompt || ctrl.procFocus); // a tall bordered box owns the bottom
+  const chrome =
+    (ctrl.reasoning ? 1 : 0) + (ctrl.streaming ? 1 : 0) +                                       // live partials
+    (todoN > 0 && !sidePanelsHidden ? 1 + Math.min(todoN, 12) + (todoN > 12 ? 1 : 0) : 0) +     // task list
+    (ctrl.agentsRunning() > 0 && !sidePanelsHidden ? 1 + Math.min(agentN, 8) : 0) +             // subagents
+    (procN > 0 && !sidePanelsHidden ? procN + 1 : 0) +                                          // proc list + hint
+    (ctrl.queue.length > 0 && !ctrl.setup ? ctrl.queue.length : 0) +                            // queued prompts
+    (menuOpen ? Math.min(matches.length, 8) + 1 : 0) +                                          // slash menu + hint
+    (ctrl.lastErrorAction && !panelOpen && !menuOpen ? 1 : 0) +                                 // error action banner
+    (ctrl.upsellEligible() && !panelOpen && !menuOpen ? 1 : 0) +                                // upsell banner
+    (ctrl.exitArmed ? 1 : 0) +                                                                  // ⌃C hint
+    (modal ? 18 : 3) +                                                                          // bordered modal vs input box
+    1 +                                                                                         // status line
+    2;                                                                                          // safety margin (wraps/off-by-one)
+  const viewH = Math.max(1, rows - chrome);
+  const view = ctrl.busy ? fitTail(ctrl.turnBuf, viewH, cols) : [];
   return (
     <Box flexDirection="column">
       {/* Fresh array reference each render: Ink's <Static> memoizes its item slice on the items

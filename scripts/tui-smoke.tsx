@@ -2,7 +2,7 @@
 // Verifies status bar, live token/cost meter, scrollback, mode/phase reflection, streaming, approval.
 // Usage: bun run scripts/tui-smoke.tsx
 import { render } from "ink-testing-library";
-import { TuiController, TuiApp, ErrorBoundary, renderTable, isTableSeparator, renderScroll, contextBar, clipToRow } from "../src/cli/tui.tsx";
+import { TuiController, TuiApp, ErrorBoundary, renderTable, isTableSeparator, renderScroll, contextBar, clipToRow, fitTail, lineRows } from "../src/cli/tui.tsx";
 import { ProcRegistry } from "../src/agent/procs.ts";
 import { AgentRegistry } from "../src/agent/agent-registry.ts";
 import { TodoRegistry } from "../src/agent/todo-registry.ts";
@@ -712,6 +712,43 @@ cctrl.setBusy(false);
   check("clipToRow: long text is clamped to the width", clipped.length === 40);
   check("clipToRow: clamp keeps the TAIL with a leading ellipsis", clipped.startsWith("…") && clipped.endsWith("x"));
   check("clipToRow: a tiny width is floored (never throws / negative)", clipToRow(long, 1).length === 8);
+}
+
+// fitTail / lineRows: the live turn viewport must be bounded by real TERMINAL ROWS (wrapping included),
+// not logical lines — otherwise a long agent response (or queued prompts / slash menu pushing it down)
+// overflows the dynamic region and Ink's <Static> erase wipes committed scrollback. Regression for the
+// "agent output disappears, prompt bars remain" report.
+{
+  const mk = (text: string, i: number) => ({ id: i, text });
+  check("lineRows: a short line is 1 row", lineRows(mk("hello", 0), 80) === 1);
+  check("lineRows: an empty line is 1 row", lineRows(mk("", 0), 80) === 1);
+  check("lineRows: a wide line wraps (ceil width/cols)", lineRows(mk("x".repeat(170), 0), 80) === 3);
+
+  const items = ["a", "b", "c", "d", "e"].map(mk);
+  check("fitTail: takes the trailing lines that fit", fitTail(items, 3, 80).map((i) => i.text).join("") === "cde");
+  check("fitTail: returns all when they fit", fitTail(items, 99, 80).length === 5);
+  check("fitTail: maxRows<=0 → none", fitTail(items, 0, 80).length === 0);
+  check("fitTail: always keeps the newest line even if it alone overflows", fitTail([mk("x".repeat(300), 0)], 1, 80).length === 1);
+
+  // a wide middle line counts as 2 rows, so only 2 logical lines fit in 3 terminal rows
+  const wide = [mk("a", 0), mk("x".repeat(160), 1), mk("c", 2)];
+  const ft = fitTail(wide, 3, 80);
+  check("fitTail: counts WRAPPED rows, not logical lines", ft.length === 2 && ft[0].text.length === 160 && ft[1].text === "c");
+}
+
+// Integration: a long busy turn (+ queued prompts taking dynamic-region rows) must render a BOUNDED live
+// viewport — the newest lines show, the oldest are held back in turnBuf (flushed to <Static> at turn end).
+{
+  const vc = new TuiController({ model: "m", mode: "solo", plan: false, inTok: 0, outTok: 0, cacheTok: 0 });
+  vc.setBusy(true);
+  vc.enqueue("queued one"); vc.enqueue("queued two"); // these consume dynamic-region rows (chrome)
+  for (let i = 0; i < 120; i++) vc.pushLine(`turnline-${i}`); // busy → into turnBuf, not <Static>
+  const { lastFrame: vf } = render(<TuiApp ctrl={vc} />);
+  await tick();
+  const vfr = strip(vf() ?? "");
+  check("viewport renders the NEWEST turn line", vfr.includes("turnline-119"));
+  check("viewport is BOUNDED (oldest turn line held back, not rendered)", !vfr.includes("turnline-0"));
+  vc.setBusy(false);
 }
 
 // router-resolved footer: an `auto` request that resolved to a concrete model shows "auto → <label>",
