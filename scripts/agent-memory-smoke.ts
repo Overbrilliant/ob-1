@@ -50,6 +50,8 @@ try {
   const human = refreshAgentsMd(dir, { projectFacts: ["should not write"] });
   check("human-owned AGENTS.md without markers is not changed", !human.updated && !readFileSync(join(dir, "AGENTS.md"), "utf8").includes("should not write"));
 
+  // Fix D (dogfood): with NO AGENTS.md present, remembering an episode must NOT scaffold one into the
+  // workspace — it persists learned memory to the json store and renders into AGENTS.md only if one exists.
   rmSync(join(dir, "AGENTS.md"), { force: true });
   const history: Message[] = [
     { role: "assistant", content: [{ type: "tool_use", id: "bash-1", name: "run_bash", input: { command: "bun test" } }] },
@@ -63,10 +65,16 @@ try {
   const { episode } = rememberEpisode(dir, "verify episode memory", "solo", history);
   check("episode markdown is written", existsSync(join(dir, ".ob1", "episodes", `${episode.id}.md`)));
   check("episode list reads newest episode", listEpisodes(dir, 1)[0]?.id === episode.id);
+  check("remembering an episode does NOT scaffold AGENTS.md (no unrequested file)", !existsSync(join(dir, "AGENTS.md")));
 
   const memory = loadAgentsMemory(dir);
-  check("successful check command updates project memory", memory.validatedChecks?.some((x) => x.includes("`bun test` passed")) === true);
-  check("AGENTS.md is refreshed from episode memory", readFileSync(join(dir, "AGENTS.md"), "utf8").includes("Last episode"));
+  check("project memory persists even with no AGENTS.md on disk", memory.validatedChecks?.some((x) => x.includes("`bun test` passed")) === true);
+
+  // An EXPLICIT refresh still creates the file (so /agents keeps working), and then episode memory renders in.
+  refreshAgentsMd(dir, {});
+  check("explicit refreshAgentsMd creates AGENTS.md when absent", existsSync(join(dir, "AGENTS.md")));
+  rememberEpisode(dir, "rendered episode", "solo", history);
+  check("AGENTS.md present → episode memory renders into it (Last episode)", readFileSync(join(dir, "AGENTS.md"), "utf8").includes("Last episode"));
 
   const candidates = listPromotionCandidates(dir);
   check("promotion candidates are created from durable signals", candidates.some((c) => c.kind === "validated-check") && candidates.some((c) => c.kind === "known-issue"));

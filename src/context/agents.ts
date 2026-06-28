@@ -163,9 +163,13 @@ function legacyHumanTail(text: string): string {
   return firstCustom == null ? defaultHumanTail() : text.slice(firstCustom).trim();
 }
 
-export function refreshAgentsMd(cwd: string, memory: AgentsMemory = {}): { path: string; created: boolean; updated: boolean } {
+export function refreshAgentsMd(cwd: string, memory: AgentsMemory = {}, opts: { createIfMissing?: boolean } = {}): { path: string; created: boolean; updated: boolean } {
   const path = join(cwd, "AGENTS.md");
   if (!existsSync(path)) {
+    // Don't scaffold AGENTS.md into a workspace that doesn't have one unless the caller explicitly opts in
+    // (a user action like /agents). The silent per-turn memory persist passes createIfMissing:false so it
+    // updates an EXISTING file but never drops an unrequested, untracked file into the user's repo.
+    if (opts.createIfMissing === false) return { path, created: false, updated: false };
     writeFileSync(path, generateAgentsMd(cwd, memory));
     return { path, created: true, updated: true };
   }

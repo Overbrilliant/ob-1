@@ -188,7 +188,7 @@ function autoUpdateMemory(cwd: string, episode: EpisodeRecord): AgentsMemory {
   memory.validatedChecks = [...checks.values()].slice(-8);
   memory.lastEpisode = { id: episode.id, title: episode.task.slice(0, 90), ts: episode.ts.slice(0, 10) };
   saveAgentsMemory(cwd, memory);
-  refreshAgentsMd(cwd, memory);
+  refreshAgentsMd(cwd, memory, { createIfMissing: false }); // persist into an EXISTING AGENTS.md only — never scaffold one unasked
   return memory;
 }
 

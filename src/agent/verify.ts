@@ -3,7 +3,7 @@
 // ecosystem marker files; the COMMANDS are the project's own (package.json scripts, cargo, go, etc.), so
 // we run what the user already trusts rather than inventing tool invocations. Pure detection + an
 // injectable executor keep this deterministically testable (no spawning in the unit tests).
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { wrapCommand } from "../safety/sandbox.ts";
 import type { SandboxMode } from "../config.ts";
@@ -20,6 +20,7 @@ export interface Check {
 }
 
 function readMaybe(path: string): string { try { return readFileSync(path, "utf8"); } catch { return ""; } }
+function listDir(cwd: string): string[] { try { return readdirSync(cwd); } catch { return []; } }
 
 /** Which JS package manager the project uses (by lockfile), so scripts run the way the user expects. */
 function pkgManager(cwd: string): "bun" | "pnpm" | "yarn" | "npm" {
@@ -75,6 +76,15 @@ export function detectChecks(cwd: string): Check[] {
     checks.push({ name: "pytest", kind: "test", command: "pytest -q", auto: false });
     return checks;
   }
+
+  // ── No ecosystem manifest matched: recognize BARE test files run with a language's built-in runner.
+  // Small scripts/repos often carry tests with no package.json/pyproject — without this the `verify` tool
+  // and explicit-check detection stay blind to them (reporting "no checks" right after the tests passed).
+  const files = listDir(cwd);
+  const any = (re: RegExp) => files.some((f) => re.test(f));
+  if (any(/\.test\.(?:ts|tsx|mts|cts)$/)) checks.push({ name: "test", kind: "test", command: "bun test", auto: false });
+  else if (any(/\.(?:test|spec)\.(?:js|mjs|cjs)$/)) checks.push({ name: "test", kind: "test", command: "node --test", auto: false });
+  if (any(/^test_.*\.py$/) || any(/_test\.py$/)) checks.push({ name: "pytest", kind: "test", command: "pytest -q", auto: false });
 
   return checks;
 }

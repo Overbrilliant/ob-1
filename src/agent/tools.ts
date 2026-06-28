@@ -79,6 +79,16 @@ export function toolCallChangesWorkspace(name: string, input: any): boolean {
   return intent === "write" || intent === "destructive" || intent === "unknown";
 }
 
+/** Stricter than toolCallChangesWorkspace: does this call DEFINITELY write files (so a prior passing check
+ *  is now stale)? Excludes ambiguous ("unknown") bash — e.g. running the program to print its output after
+ *  the tests passed must NOT downgrade a verified turn back to "unverified". */
+export function toolCallWritesFiles(name: string, input: any): boolean {
+  if (name === "write_file" || name === "edit_file" || name === "architect_edit") return true;
+  if (name !== "run_bash" || input?.background) return false;
+  const intent = classifyIntent(String(input?.command ?? ""));
+  return intent === "write" || intent === "destructive";
+}
+
 /** A read-only view of a tool for autonomous investigators. Input-sensitive readers like execute_sql
  *  are wrapped so SELECT works while INSERT/DDL/destructive SQL is refused at execution time. */
 export function readOnlyToolView(tool: Tool): Tool | null {

@@ -3,7 +3,7 @@
 // commands for mode switching and the /memory inspector (the "very visible" memory, R8).
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, saveSettings, savedProviderCreds, bakedProviderCreds, hasPersistedSettings, persistedSettings, settingsHealth, ob1ServerUrl, loadAuthToken, persistSubscription, isOpenRouterEndpoint, type Mode, type SandboxMode, type PermissionMode, type Effort, type QualityMode } from "./config.ts";
 import { formatSettingsIssues } from "./config-validate.ts";
@@ -18,7 +18,7 @@ import { makeEmbedder } from "./memory/embed.ts";
 import { buildRepoMap, renderRepoMap, invalidateRepoMap } from "./context/repomap.ts";
 import { CheckpointStore, type Checkpoint } from "./agent/checkpoint.ts";
 import { initTreeSitter, treeSitterStatus } from "./context/treesitter.ts";
-import { ensureAgentsMd, generateAgentsMd, loadAgentsMd, refreshAgentsMd } from "./context/agents.ts";
+import { generateAgentsMd, loadAgentsMd, refreshAgentsMd } from "./context/agents.ts";
 import { listEpisodes, listPromotionCandidates, loadAgentsMemory, promoteCandidates, rememberEpisode } from "./context/agent-memory.ts";
 import { ensureOb1GitExclude } from "./context/git-exclude.ts";
 import { listSkills, readSkill, deleteSkill } from "./skills/registry.ts";
@@ -1878,6 +1878,7 @@ async function runTui(startup: string[]): Promise<void> {
       for (let t = ctrl!.dequeue(); t !== undefined; t = ctrl!.dequeue()) {
         ctrl!.gap(); // even spacing: a blank line before each user message
         ctrl!.pushUser(t); // submitted prompt → grey bar, white text (distinct from model output)
+        ctrl!.recordHistory(t); // remember the dispatched prompt for ↑ recall (slash-commands skipped inside)
         suggestAbort?.abort(); ctrl!.clearSuggestion(); // a new turn supersedes any pending next-step suggestion
         ctrl!.setBusy(true);
         turnMutated = false; // reset the per-turn mutation flag (drives the ESC partial-edit warning)
@@ -1995,8 +1996,13 @@ await initTreeSitter().catch(() => false);
 { const ts = treeSitterStatus(); if (ts.ready) startup.push(c.dim(`  repo map: tree-sitter (${ts.grammars.length} grammars)`)); }
 if (store.vectorBackend() === "sqlite-vec") startup.push(c.dim("  memory: sqlite-vec KNN index"));
 if (store.recovered) startup.push(c.yellow(`  ⚠ memory.db was corrupt — moved it to ${store.recovered} and started a fresh store.`));
-const agentsFile = ensureAgentsMd(cfg.cwd, loadAgentsMemory(cfg.cwd));
-if (agentsFile.created) startup.push(c.dim("  generated AGENTS.md (project index — edit it freely)"));
+// Don't scaffold AGENTS.md into a workspace that doesn't have one — that would drop an unrequested,
+// untracked file into the user's repo. Keep an EXISTING one's managed sections current; when there's none,
+// the system prompt falls back to an in-memory project index (see systemPrompt). Create on demand via /agents.
+if (existsSync(join(cfg.cwd, "AGENTS.md"))) {
+  const r = refreshAgentsMd(cfg.cwd, loadAgentsMemory(cfg.cwd));
+  if (r.updated) startup.push(c.dim("  refreshed AGENTS.md (managed sections)"));
+}
 // Skill curator: age learned skills by inactivity (active→stale→archived; reactivate on use). Cheap,
 // file-based, touches only agent-created skills. Surface a note only when something actually changed.
 try {

@@ -63,6 +63,25 @@ const mkdtemp = (tag: string) => mkdtempSync(join(tmpdir(), `ob1-verify-${tag}-`
   rmSync(empty, { recursive: true, force: true });
 }
 
+// ── detectChecks: BARE test files (no manifest) run with the language's built-in runner ──
+{
+  const ts = mkdtemp("bare-ts"); writeFileSync(join(ts, "cart.test.ts"), "");
+  check("bare *.test.ts (no manifest) → bun test", detectChecks(ts).some((c) => c.kind === "test" && c.command === "bun test"));
+  rmSync(ts, { recursive: true, force: true });
+
+  const js = mkdtemp("bare-js"); writeFileSync(join(js, "debounce.test.js"), "");
+  check("bare *.test.js (no manifest) → node --test", detectChecks(js).some((c) => c.kind === "test" && c.command === "node --test"));
+  rmSync(js, { recursive: true, force: true });
+
+  const py = mkdtemp("bare-py"); writeFileSync(join(py, "test_stats.py"), "");
+  check("bare test_*.py (no manifest) → pytest", detectChecks(py).some((c) => c.kind === "test" && c.command === "pytest -q"));
+  rmSync(py, { recursive: true, force: true });
+
+  const py2 = mkdtemp("bare-py2"); writeFileSync(join(py2, "acceptance_test.py"), "");
+  check("bare *_test.py (no manifest) → pytest", detectChecks(py2).some((c) => c.kind === "test" && c.command === "pytest -q"));
+  rmSync(py2, { recursive: true, force: true });
+}
+
 // ── selectChecks / parseScope ──
 {
   const all = [
@@ -219,6 +238,87 @@ const done = (t: string): ModelResponse => ({ stop_reason: "end_turn", content: 
   });
   check("self-fix: expose_port does not invalidate a passed browser_check", !logs.some((s) => s.includes("changes are NOT verified")) && logs.some((s) => s.includes("explicit check passed")), logs.join(" | "));
   check("self-fix: non-workspace mutations still leave one final verifier consult", verifyCalls === 1, `calls=${verifyCalls}`);
+}
+
+{
+  // Fix A (dogfood): a BARE-test-file project (no manifest) where the agent runs its tests DIRECTLY
+  // (`python3 test_app.py`) after editing must count as verification — not the false "NOT verified" nudge.
+  const d = mkdtemp("bare-direct"); writeFileSync(join(d, "test_app.py"), "");
+  const cfgBare = { ...cfg, cwd: d };
+  const logs: string[] = [];
+  const editTool: [string, Tool] = ["edit_file", { def: { name: "edit_file", description: "", input_schema: { type: "object" } }, mutating: true, run: async () => "edited" }];
+  const bashTool: [string, Tool] = ["run_bash", { def: { name: "run_bash", description: "", input_schema: { type: "object" } }, mutating: false, run: async () => "exit 0\nok: all tests passed\n" }];
+  const seq: ModelResponse[] = [
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "e", name: "edit_file", input: { path: "app.py" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "t", name: "run_bash", input: { command: "python3 test_app.py" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    done("fixed"),
+  ];
+  let n = 0;
+  await runTurn("fix and test", [], {
+    ...baseDeps, cfg: cfgBare, tools: new Map<string, Tool>([editTool, bashTool]), log: (s) => logs.push(s),
+    verify: async () => ({ ran: false, ok: true, results: [], report: "no checks matched that scope (available: pytest)" }),
+    _callModel: async () => seq[n++],
+  });
+  check("dogfood A: a direct `python3 test_app.py` run counts as explicit verification", logs.some((s) => s.includes("explicit check passed")), logs.join(" | "));
+  check("dogfood A: no false 'NOT verified' nudge after the tests passed", !logs.some((s) => s.includes("changes are NOT verified")), logs.join(" | "));
+  rmSync(d, { recursive: true, force: true });
+}
+
+{
+  // Fix A residual (dogfood re-run): a BENIGN command run AFTER a passing test (e.g. `python3 prog.py` to
+  // show output — "unknown" intent) must NOT reset the explicit-check-passed state back to "unverified".
+  const d = mkdtemp("post-check-bash"); writeFileSync(join(d, "test_app.py"), "");
+  const logs: string[] = [];
+  const editTool: [string, Tool] = ["edit_file", { def: { name: "edit_file", description: "", input_schema: { type: "object" } }, mutating: true, run: async () => "edited" }];
+  const bashTool: [string, Tool] = ["run_bash", { def: { name: "run_bash", description: "", input_schema: { type: "object" } }, mutating: false, run: async () => "exit 0\nok\n" }];
+  const seq: ModelResponse[] = [
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "e", name: "edit_file", input: { path: "app.py" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "t", name: "run_bash", input: { command: "python3 test_app.py" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    { stop_reason: "tool_use", content: [{ type: "tool_use", id: "r", name: "run_bash", input: { command: "python3 app.py sample.md" } }], usage: { input_tokens: 1, output_tokens: 1 } },
+    done("done"),
+  ];
+  let n = 0;
+  await runTurn("build, test, then show output", [], {
+    ...baseDeps, cfg: { ...cfg, cwd: d }, tools: new Map<string, Tool>([editTool, bashTool]), log: (s) => logs.push(s),
+    verify: async () => ({ ran: false, ok: true, results: [], report: "no checks matched that scope" }),
+    _callModel: async () => seq[n++],
+  });
+  check("dogfood A2: a benign command after a passing test stays verified (not 'unverified')", logs.some((s) => s.includes("explicit check passed")) && !logs.some((s) => s.includes("NOT verified")), logs.join(" | "));
+  rmSync(d, { recursive: true, force: true });
+}
+
+{
+  // Fix B (dogfood): a stuck model re-issuing the IDENTICAL read-only call must be loop-broken — the tool
+  // runs at most MAX_IDENTICAL_CALLS (3) times, not once per repeat (the real case fired the same search 25×).
+  let searchRuns = 0;
+  const searchTool: [string, Tool] = ["web_search", { def: { name: "web_search", description: "", input_schema: { type: "object" } }, mutating: false, run: async () => { searchRuns++; return "results"; } }];
+  const sameCall = (): ModelResponse => ({ stop_reason: "tool_use", content: [{ type: "tool_use", id: "s" + Math.round(Math.random() * 1e9), name: "web_search", input: { query: "x" } }], usage: { input_tokens: 1, output_tokens: 1 } });
+  const seq = [sameCall(), sameCall(), sameCall(), sameCall(), sameCall(), sameCall(), done("giving up")];
+  let n = 0;
+  const logs: string[] = [];
+  await runTurn("search", [], { ...baseDeps, tools: new Map<string, Tool>([searchTool]), log: (s) => logs.push(s), _callModel: async () => seq[n++] });
+  check("dogfood B: identical non-mutating call capped at MAX_IDENTICAL_CALLS (3), not 6", searchRuns === 3, `runs=${searchRuns}`);
+  check("dogfood B: the loop-breaker surfaces a skip notice", logs.some((s) => s.includes("identical call repeated")));
+}
+
+{
+  // Fix C (dogfood): a degenerate turn (no tool call, just a tool name in PROSE) is retried once with a
+  // nudge instead of silently ending having done nothing. A real answer on the retry finishes cleanly.
+  const logs: string[] = [];
+  const seq = [done('read_file(path="cart.ts")'), done("Here is the real, complete answer.")];
+  let n = 0;
+  await runTurn("do the task", [], { ...baseDeps, log: (s) => logs.push(s), _callModel: async () => seq[n++] });
+  check("dogfood C: a degenerate prose-tool-call turn is retried once", n === 2, `n=${n}`);
+  check("dogfood C: the retry nudge is surfaced", logs.some((s) => s.includes("ended without taking any action")));
+}
+
+{
+  // Fix C negative: a NORMAL no-tool answer must NOT be flagged degenerate / retried.
+  let n = 0;
+  const logs: string[] = [];
+  await runTurn("what is 2+2?", [], { ...baseDeps, log: (s) => logs.push(s), _callModel: async () => { n++; return done("2 + 2 equals 4."); } });
+  check("dogfood C: a real one-shot answer is not retried", n === 1, `n=${n}`);
+  check("dogfood C: no false no-op warning on a real answer", !logs.some((s) => s.includes("without taking any action")));
 }
 
 // ── step-retry: a mid-stream model failure (the proxy's router falling back to another model) must

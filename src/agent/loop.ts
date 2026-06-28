@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { callModel, isRetryable, type Message, type ContentBlock, type ToolDef, type Usage, type SystemBlock } from "../providers/gateway.ts";
 import { modelSpec, isRouterModel, supportsEffort } from "../providers/models.ts";
-import { isDestructiveCall, normalizeToolOutput, toolCallChangesWorkspace, toolCallMutates, toolResultContent, type Tool, type ReadCache } from "./tools.ts";
+import { isDestructiveCall, normalizeToolOutput, toolCallChangesWorkspace, toolCallWritesFiles, toolCallMutates, toolResultContent, type Tool, type ReadCache } from "./tools.ts";
 import { classifyIntent } from "../safety/bash-validation.ts";
 import { recoveryHint } from "./recovery.ts";
 import { evaluatePolicy, type PolicyRule } from "../safety/policy.ts";
@@ -13,7 +13,7 @@ import type { ApprovalStore } from "./approval-tokens.ts";
 import { runHooks, type HookConfig, type HookExec } from "./hooks.ts";
 import { isOpenRouterEndpoint, type Config } from "../config.ts";
 import type { MemoryStore, Fact } from "../memory/store.ts";
-import { loadAgentsMd } from "../context/agents.ts";
+import { loadAgentsMd, generateAgentsMd } from "../context/agents.ts";
 import { listTopics } from "../context/topics.ts";
 import { repoMapSummary, invalidateRepoMap } from "../context/repomap.ts";
 import { listSkills } from "../skills/registry.ts";
@@ -256,6 +256,10 @@ function resolveMaxSteps(): number {
 }
 const MAX_STEPS = resolveMaxSteps();
 const UNCAPPED = MAX_STEPS === Infinity || MAX_STEPS === RUNAWAY_STEPS;  // whether the cap is a real limit or just a safety net
+// Loop-breaker: after this many identical executions of a NON-mutating tool (same name+input), stop
+// re-running it — a stuck model re-issuing the same web_search/read_file never progresses and burns tokens
+// (a real dogfooding case fired the identical web_search 25×). Override via OB1_MAX_IDENTICAL_CALLS.
+const MAX_IDENTICAL_CALLS = Math.max(2, Number(process.env.OB1_MAX_IDENTICAL_CALLS) || 3);
 
 /** A small, lean system prompt, split for prompt caching into a STABLE block (cached: session-constant
  *  instructions, skills, the repo map) and a VOLATILE tail (uncached: per-turn semantic memory, the
@@ -267,7 +271,9 @@ export function systemPrompt(cfg: Config, store: MemoryStore, retrieved?: Fact[]
   const memLabel = retrieved && retrieved.length ? "Relevant project memory (semantic top-k)" : "Known project memory";
   const facts = chosen.map((f) => `- ${f.fact}`).join("\n");
   const rels = store.listRelationships().slice(-8).map((e) => `- ${e.src} --${e.rel}--> ${e.dst}`).join("\n");
-  const agents = loadAgentsMd(cfg.cwd);
+  // Prefer an on-disk AGENTS.md (human edits + learned memory blocks); fall back to an in-memory project
+  // index when the workspace has none — we no longer scaffold the file unasked (see index.ts startup).
+  const agents = loadAgentsMd(cfg.cwd) ?? generateAgentsMd(cfg.cwd);
   const skills = listSkills(cfg.cwd);
   const skillList = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
   const topicList = listTopics(cfg.cwd).map((t) => `- ${t.name}`).join("\n");
@@ -396,6 +402,23 @@ function isSuccessfulForegroundCommand(output: string): boolean {
   return output === "exit 0" || output.startsWith("exit 0\n");
 }
 
+// A command that RUNS a test suite, recognized DIRECTLY — so the agent running its own tests counts as
+// verification even in a project with no manifest detectChecks keys off (a bare `python3 test_x.py`,
+// `node --test`, `bun test`, `pytest`, …). Pairs with detectChecks' bare-test-file fallback. Input is the
+// already-normalized command (single-spaced, redirections stripped).
+function looksLikeTestCommand(norm: string): boolean {
+  if (!norm) return false;
+  return (
+    /\b(?:bun|deno) test\b/.test(norm) ||
+    /\bnode\b[^|;&]*--test\b/.test(norm) ||
+    /\b(?:npx |pnpm dlx |yarn dlx |bunx )?(?:jest|vitest|mocha|ava)\b/.test(norm) ||
+    /\bpytest\b/.test(norm) ||
+    /\bpython3?\b[^|;&]*\b-m\s+(?:pytest|unittest)\b/.test(norm) ||
+    /\bpython3?\b[^|;&]*\b(?:test_[\w-]+|[\w-]+_test)\.py\b/.test(norm) ||
+    /\b(?:go|cargo) test\b/.test(norm)
+  );
+}
+
 function isKnownCheckCommand(cwd: string, command: string): boolean {
   const norm = normalizeShellCommand(command);
   if (!norm) return false;
@@ -406,7 +429,7 @@ function isKnownCheckCommand(cwd: string, command: string): boolean {
       candidates.add(testCmd);
     }
   }
-  return candidates.has(norm);
+  return candidates.has(norm) || looksLikeTestCommand(norm);
 }
 
 export async function runTurn(userInput: string, history: Message[], deps: TurnDeps): Promise<TurnOutcome> {
@@ -428,6 +451,9 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   let explicitCheckPassedSinceMutation = false; // the agent already ran a detected check after editing
   let fixRounds = 0;             // self-correction rounds spent this turn
   let unverifiedNudges = 0;      // one-time nudge when a file change matched NO automated check
+  const callCounts = new Map<string, number>(); // exact (tool+input) signatures → executions, for the loop-breaker
+  let stepsWithTools = 0;        // steps that emitted ≥1 tool call — for degenerate-no-op detection
+  let noopRetries = 0;           // one-time retry when a turn ends having taken no action + given no answer
   const autofixMax = deps.autofixMax ?? 3;
   // Consecutive mid-stream model failures (e.g. the FreeLLMAPI router falling back to another model
   // after we'd already streamed output — which the gateway can't safely retry). Resets on any success;
@@ -574,6 +600,24 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
     // otherwise return here WITHOUT answering them — leaving dangling tool_use in `history` that 400s the
     // very next turn (and stays broken until /clear). If tool_use blocks exist, we must answer them.
     if (toolUses.length === 0) {
+      // Degenerate no-op guard: a weak/garbled model can end a turn having taken NO action and given no real
+      // answer — e.g. it "describes" a tool call in prose (`read_file(path="x")`) instead of emitting one
+      // (a real dogfooding case). Silently returning leaves the user staring at a turn that did nothing.
+      // Nudge + retry once; if it recurs, say so plainly instead of pretending the turn succeeded.
+      const finalText = resp.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim();
+      const proseToolCall = /^[a-z_]{3,}\s*\(.*\)\s*$/i.test(finalText)
+        || /\b(?:read_file|write_file|edit_file|run_bash|list_dir|web_search|web_fetch)\b\s*[({]/.test(finalText);
+      const degenerate = !mutated && stepsWithTools === 0 && (finalText.length === 0 || proseToolCall);
+      if (degenerate && !deps.signal?.aborted) {
+        if (noopRetries < 1) {
+          noopRetries++;
+          log(c.yellow("  ⚠ the model ended without taking any action — retrying once"));
+          history.push({ role: "user", content:
+            "You ended the turn without calling any tool or giving a complete answer. If this task needs changes, USE THE TOOLS now (read_file / edit_file / write_file / run_bash) to actually do the work — do NOT just describe a tool call in prose. If genuinely no action is needed, give a complete answer." });
+          continue;
+        }
+        log(c.yellow("  ⚠ the model produced no action and no answer — nothing was done this turn. Try again or rephrase the task."));
+      }
       // Auto-verify + self-correct: the model thinks it's done, but if it CHANGED files, run the project's
       // fast checks. On failure, feed the errors back and let it fix them — looping until green or the
       // round budget is spent. This is what turns "I edited the file" into "I edited the file and it works".
@@ -610,7 +654,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         } else if (v && !v.ran) {
           // No automated check exists for this project and the one-time nudge is already spent. Log a clear
           // OUTCOME so a finished turn never dangles at "⚙ verifying changes…" (which reads as a freeze).
-          log(c.yellow("  ⚠ not verified — this project has no automated checks; verify UI behaviour with browser_check"));
+          log(c.yellow("  ⚠ not verified — no automated checks detected (run the project's tests, or browser_check for UI work)"));
         } else if (!v) {
           log(c.yellow("  ⚠ verification could not run — changes left unverified"));
         }
@@ -619,10 +663,10 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         const u = resp.usage;
         log(c.gray(`  [tokens in:${u.input_tokens} out:${u.output_tokens}${u.cache_read_input_tokens ? ` cache-read:${u.cache_read_input_tokens}` : ""}${u.estimated ? " (est)" : ""}]`));
       }
-      const finalText = resp.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim();
       quality?.finish("completed", finalText);
       return {};
     }
+    stepsWithTools++; // this step emitted ≥1 tool call — the turn did real work (not a degenerate no-op)
 
     // LLM router: Solo called `escalate` → judge that this turn needs a heavier mode. Stop here and hand
     // the whole task back to the dispatcher (which re-runs it in that mode). We still answer EVERY tool_use
@@ -690,6 +734,22 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         results.push({ type: "tool_result", tool_use_id: tu.id, content: `unknown tool: ${tu.name}`, is_error: true });
         continue;
       }
+      // Loop-breaker for a stuck model re-issuing the SAME read-only call (e.g. the identical web_search 25×
+      // seen in dogfooding): after MAX_IDENTICAL_CALLS executions of an identical NON-mutating call, stop
+      // running it and tell the model the result won't change — forcing a different move. Mutating tools are
+      // exempt (re-applying an edit is rarer and the diff preview already gives feedback).
+      if (!tool.mutating) {
+        const sig = `${tu.name}:${JSON.stringify(tu.input ?? {})}`;
+        const prior = callCounts.get(sig) ?? 0;
+        if (prior >= MAX_IDENTICAL_CALLS) {
+          log(c.yellow(`  ⊘ ${tu.name} skipped — identical call repeated ${prior}× (the result won't change)`));
+          quality?.recordTool(tu.name, tu.input, false, "Skipped: identical call repeated", false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content:
+            `You have already run this exact ${tu.name} call ${prior} times with identical arguments; the result will not change. Stop repeating it — use the result you already have and take a DIFFERENT action (read or edit the relevant file directly, or finish).`, is_error: true });
+          continue;
+        }
+        callCounts.set(sig, prior + 1);
+      }
       // Plan-mode gate. Some statically mutating tools have read-only calls (run_bash ls/grep/git log,
       // execute_sql SELECT/PRAGMA), and investigation is the point of Plan mode.
       const mutatingCall = toolCallMutates(tool, tu.name, tu.input);
@@ -740,7 +800,13 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       }
       const workspaceChange = toolCallChangesWorkspace(tu.name, tu.input)
         && !(tu.name === "run_bash" && isKnownCheckCommand(cfg.cwd, String((tu.input as any)?.command ?? "")));
-      if (workspaceChange) { mutated = true; explicitCheckPassedSinceMutation = false; deps.onMutate?.(); invalidateRepoMap(); } // workspace change → ESC-warning + auto-verify + refresh repo map next turn
+      if (workspaceChange) {
+        mutated = true; deps.onMutate?.(); invalidateRepoMap(); // workspace change → ESC-warning + auto-verify + refresh repo map next turn
+        // …but only a DEFINITE file write invalidates a prior passing explicit check. An ambiguous bash
+        // command after the tests passed (e.g. running the program to show its output) must NOT silently
+        // downgrade the turn back to "unverified" — a dogfooding regression caught on the greenfield task.
+        if (toolCallWritesFiles(tu.name, tu.input)) explicitCheckPassedSinceMutation = false;
+      }
       // PreToolUse hooks: a user-defined command runs BEFORE the tool and can block it (exit 2 /
       // {"decision":"block"}) or inject context. No-op when no hooks are configured.
       const hooks = deps.hooks; const hookExec = deps.hookExec;
