@@ -3,7 +3,7 @@
 // commands for mode switching and the /memory inspector (the "very visible" memory, R8).
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, saveSettings, savedProviderCreds, bakedProviderCreds, hasPersistedSettings, persistedSettings, settingsHealth, ob1ServerUrl, loadAuthToken, persistSubscription, isOpenRouterEndpoint, type Mode, type SandboxMode, type PermissionMode, type Effort, type QualityMode } from "./config.ts";
 import { formatSettingsIssues } from "./config-validate.ts";
@@ -23,7 +23,9 @@ import { listEpisodes, listPromotionCandidates, loadAgentsMemory, promoteCandida
 import { ensureOb1GitExclude } from "./context/git-exclude.ts";
 import { listSkills, readSkill, deleteSkill } from "./skills/registry.ts";
 import { maybeLearnSkill } from "./skills/learn.ts";
-import { approxTokens, compactNow, summaryPrompt } from "./agent/context.ts";
+import { approxTokens, totalChars, budgetChars, compactNow, summaryPrompt } from "./agent/context.ts";
+import { newSessionId, saveSession, listSessions, loadSession, deriveTitle, relTime, type SessionFile } from "./agent/session.ts";
+import { expandMentions } from "./context/mentions.ts";
 import { runCurator, readUsage } from "./skills/usage.ts";
 import { buildTools, ReadCache, type Tool, type AskUserFn, type AskUserRequest } from "./agent/tools.ts";
 import { SecretStore } from "./agent/secrets.ts";
@@ -51,7 +53,7 @@ import { latestQualityLedger, formatQualityLedger } from "./agent/task-quality.t
 import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
 import type { Message, Usage } from "./providers/types.ts";
 import { callModel } from "./providers/gateway.ts";
-import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning } from "./providers/models.ts";
+import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning, contextWindowFor } from "./providers/models.ts";
 import { FREELLMAPI, CUSTOM, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
@@ -229,6 +231,71 @@ let history: Message[] = [];
 const sessionId = `${Date.now().toString(36)}-${process.pid}`;
 const checkpoints = new CheckpointStore(cfg, sessionId);
 
+// Saved-conversation id for /resume (separate from the checkpoint sessionId). Rotates on /clear so the
+// previous conversation stays resumable, exactly like Claude Code. activeGoal drives the /goal loop.
+let convoId = newSessionId();
+let convoCreated = Date.now();
+let activeGoal: string | null = null;
+
+/** Best-effort persist of the current conversation so /resume can reopen it. Never throws into a turn. */
+function persistSession(): void {
+  if (!history.length) return;
+  try {
+    saveSession(cfg.dataDir, {
+      id: convoId, title: deriveTitle(history), created: convoCreated, updated: Date.now(),
+      cwd: cfg.cwd, model: cfg.resolvedModel ?? cfg.model,
+      turns: history.filter((m) => m.role === "user").length, history,
+    });
+  } catch { /* persistence must never break a turn */ }
+}
+
+function resumeSession(id: string): void {
+  const s = loadSession(cfg.dataDir, id);
+  if (!s) { console.log(c.red(`  couldn't load session ${id}`)); return; }
+  history = s.history; convoId = s.id; convoCreated = s.created;
+  ctrl?.setContext(approxTokens(history));
+  console.log(c.green(`  ✓ resumed "${s.title}" — ${history.length} messages (~${approxTokens(history)} tokens)`));
+  console.log(c.dim("  continue where you left off, or /clear to start fresh"));
+}
+
+/** Render the conversation as plain markdown for /export. */
+function renderTranscript(h: Message[]): string {
+  const lines: string[] = [`# OB-1 conversation — ${new Date().toISOString()}`, `model: ${cfg.model}  ·  ${h.length} messages`, ""];
+  for (const m of h) {
+    const body = typeof m.content === "string"
+      ? m.content
+      : (m.content as any[]).map((b: any) => {
+          if (b?.type === "text") return b.text;
+          if (b?.type === "tool_use") return `\`[tool: ${b.name}(${JSON.stringify(b.input ?? {}).slice(0, 200)})]\``;
+          if (b?.type === "tool_result") return `\`[tool result: ${(typeof b.content === "string" ? b.content : JSON.stringify(b.content)).slice(0, 500)}]\``;
+          return "";
+        }).filter(Boolean).join("\n");
+    lines.push(`## ${m.role}`, body, "");
+  }
+  return lines.join("\n");
+}
+
+/** /goal loop: keep running turns toward `goal` until the model emits GOAL_MET or the cap is hit. ESC stops. */
+async function runGoalLoop(goal: string): Promise<void> {
+  await ensureProxyHealthy();
+  const maxIters = Number(process.env.OB1_GOAL_MAX_ITERS) > 0 ? Number(process.env.OB1_GOAL_MAX_ITERS) : 10;
+  for (let i = 0; i < maxIters && activeGoal === goal; i++) {
+    const prompt = i === 0
+      ? `${goal}\n\n[Goal mode] Work toward this goal. When it is FULLY achieved, end your reply with the exact token GOAL_MET on its own line. If work remains, end with GOAL_CONTINUE.`
+      : `Continue toward the goal: ${goal}\n[Goal mode] End with GOAL_MET when fully done, otherwise GOAL_CONTINUE.`;
+    const startLen = history.length;
+    const outcome = await runTurn(prompt, history, turnDeps());
+    rememberTurn(prompt, startLen, "goal");
+    persistSession();
+    if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
+    void outcome; // a heavy mode may have run inside; still counts as one iteration
+    const txt = lastAssistantText();
+    if (/\bGOAL_MET\b/.test(txt)) { console.log(c.green(`  ✓ goal achieved after ${i + 1} iteration(s)`)); activeGoal = null; return; }
+    console.log(c.dim(`  ↻ goal iteration ${i + 1}/${maxIters} — not yet met, continuing…`));
+  }
+  if (activeGoal === goal) console.log(c.yellow(`  goal loop hit the ${maxIters}-iteration cap without GOAL_MET — /goal "${goal}" to keep going, or /goal stop`));
+}
+
 // ─── UI bridge ───────────────────────────────────────────────────────────────
 // Output routes through `ui` so the SAME agent loop drives either the readline REPL
 // (piped / non-TTY) or the Ink TUI (interactive, with a live token/cost meter).
@@ -386,7 +453,9 @@ function promptStr(): string {
 const HELP = `
 ${c.bold("Commands")}
   ${c.cyan("/help")}                 show this help
-  ${c.cyan("/clear")}                reset the conversation context
+  ${c.cyan("/clear")}                reset the conversation context ${c.dim("(previous kept in /resume)")}
+  ${c.cyan("/resume")} ${c.dim("[n]")}           reopen a previous conversation ${c.dim("(↑↓ · Enter)")} — saved per workspace
+  ${c.cyan("/export")} ${c.dim("[file]")}        write the conversation to a markdown file
   ${c.cyan("/exit")} ${c.dim("|")} ${c.cyan("/quit")}          exit the session
 
   ${c.bold("Model & mode")}
@@ -408,6 +477,9 @@ ${c.bold("Commands")}
 
   ${c.bold("Context & workspace")}
   ${c.cyan("/compact")} ${c.dim("[focus]")}       summarize earlier turns to free context ${c.dim("(auto-runs near the model's window; /compact focus on X to steer it)")}
+  ${c.cyan("/context")}              token usage vs the model's window + where auto-compaction triggers
+  ${c.cyan("/diff")}                 show uncommitted git changes
+  ${c.cyan("/init")} ${c.dim("[force]")}         generate ${c.dim("AGENTS.md")} (project guide) from the codebase
   ${c.cyan("/repomap")} ${c.dim("[on|off]")}     repo map in context ${c.dim("(↑↓ · Enter)")} — auto codebase structure, refreshed as files change ${c.dim("(on by default)")}
   ${c.cyan("/rewind")} ${c.dim("[n]")}           restore code &/or conversation to an earlier prompt ${c.dim("(auto-checkpoint before each prompt · shadow git, your repo untouched)")}
   ${c.cyan("/map")}                  ranked repository map (symbols by centrality)
@@ -424,6 +496,7 @@ ${c.bold("Commands")}
   ${c.cyan("/usage")}                monthly credit pool + token/cost analytics
 
   ${c.bold("Orchestration modes")}
+  ${c.cyan("/goal")} ${c.dim("<condition>")}     keep working until a condition is met ${c.dim("(bounded loop · ESC or /goal stop)")}
   ${c.cyan("/autoroute")} ${c.dim("[on|off]")}   Solo auto-routing ${c.dim("(↑↓ · Enter)")} — Solo itself decides (via the escalate tool) when a turn needs a heavier mode ${c.dim("(off by default)")}
   ${c.cyan("/subagents")} ${c.dim("[on|off]")}   parallel subagents ${c.dim("(↑↓ · Enter)")} — Solo may fan out independent read-only sub-tasks; watch them in the footer ${c.dim("(on by default)")}
   ${c.cyan("/route")} <task>         one-shot adaptive: Solo first, escalate only if the task warrants it AND the check fails
@@ -444,6 +517,10 @@ ${c.bold("Account")} ${c.dim("(shell)")}
   ${c.bold("ob1 onboard")}           guided setup: sign in + connect a model provider (Free LLM API)
   ${c.bold("ob1 login")}             sign in to the managed OB-1 server (free models; web search on the paid plan)
   ${c.bold("ob1 logout")}            remove the local token
+
+${c.bold("Inline")} ${c.dim("(type at the prompt)")}
+  ${c.cyan("!")}${c.dim("<command>")}            run a shell command directly ${c.dim("(your command, not the model's)")}
+  ${c.cyan("@")}${c.dim("<path>")}               attach a file/dir to your message ${c.dim("(pulled into context)")}
 
 ${c.bold("Keys")} ${c.dim("(TUI)")}
   ${c.cyan("⌃O")}                    toggle showing the model's reasoning
@@ -1167,7 +1244,7 @@ async function handleCommand(line: string): Promise<boolean> {
   switch (cmd) {
     case "help": console.log(HELP); break;
     case "exit": case "quit": return true;
-    case "clear": history = []; todos.clear(); ctrl?.setContext(0); console.log(c.dim("  context cleared")); break;
+    case "clear": persistSession(); history = []; todos.clear(); activeGoal = null; convoId = newSessionId(); convoCreated = Date.now(); ctrl?.setContext(0); console.log(c.dim("  context cleared (previous conversation kept in /resume)")); break;
     case "compact": {
       // Manual on-demand version of the loop's auto-compaction: summarize older turns into one note,
       // keeping the recent window. Optional free-text focus steers the summary (/compact focus on X).
@@ -1191,6 +1268,97 @@ async function handleCommand(line: string): Promise<boolean> {
         ctrl?.setContext(after);
         console.log(c.green(`  ✓ compacted${arg ? c.dim(` (focus: ${arg})`) : ""} — ~${before} → ~${after} tokens`));
       } else console.log(c.dim("  nothing to compact yet — not enough older history beyond the recent window"));
+      break;
+    }
+    case "resume": {
+      const sessions = listSessions(cfg.dataDir, cfg.cwd);
+      if (!sessions.length) { console.log(c.dim("  no saved sessions for this workspace yet")); break; }
+      if (arg) {
+        const target = /^\d+$/.test(arg) ? sessions[Number(arg) - 1] : sessions.find((s) => s.id === arg || s.id.startsWith(arg));
+        if (!target) { console.log(c.red(`  no session matching "${arg}" — /resume to list`)); break; }
+        resumeSession(target.id);
+        break;
+      }
+      if (ui.pick) {
+        const items = sessions.slice(0, 20).map((s) => ({ label: s.title, hint: `${relTime(s.updated)} · ${s.turns} turn(s)`, value: s.id }));
+        const picked = await ui.pick("Resume a session  ↑↓ · Enter · Esc", items);
+        if (picked) resumeSession(picked);
+        break;
+      }
+      console.log(c.bold("  saved sessions (newest first):"));
+      sessions.slice(0, 20).forEach((s, i) => console.log(`    ${c.cyan(String(i + 1).padStart(2))}  ${s.title}  ${c.dim(`· ${relTime(s.updated)} · ${s.turns} turn(s)`)}`));
+      console.log(c.dim("  resume one with /resume <n>"));
+      break;
+    }
+    case "context": {
+      const tok = approxTokens(history);
+      const model = cfg.resolvedModel ?? cfg.model;
+      const win = contextWindowFor(model);
+      const pct = win ? Math.min(100, Math.round((tok / win) * 100)) : 0;
+      let textCh = 0, toolCh = 0, otherCh = 0; // system prompt is built per-turn, not stored in history
+      for (const m of history) {
+        if (typeof m.content === "string") { textCh += m.content.length; continue; }
+        for (const b of m.content as any[]) {
+          const len = typeof b?.content === "string" ? b.content.length : JSON.stringify(b ?? "").length;
+          if (b?.type === "tool_result") toolCh += len;
+          else if (b?.type === "text") textCh += (b.text?.length ?? 0);
+          else otherCh += len;
+        }
+      }
+      const barLen = 32, filled = Math.round((pct / 100) * barLen);
+      const bar = c.cyan("█".repeat(filled)) + c.dim("░".repeat(barLen - filled));
+      const budget = budgetChars(model);
+      console.log(`\n  ${c.bold("Context")}  ${c.dim(describeModel(model))}`);
+      console.log(`  ${bar}  ${pct}%  ${c.dim(`(~${tok} / ${(win / 1000).toFixed(0)}k tokens)`)}`);
+      console.log(c.dim(`  messages ~${Math.round(textCh / 4)} tok · tool results ~${Math.round(toolCh / 4)} tok · other ~${Math.round(otherCh / 4)} tok · ${history.length} msgs`));
+      console.log(c.dim(`  auto-compaction: evict ~${Math.round((budget * 0.60) / 4 / 1000)}k tok · summarize ~${Math.round((budget * 0.85) / 4 / 1000)}k tok`));
+      if (tok > (budget * 0.85) / 4) console.log(c.yellow("  ⚠ over the summary threshold — /compact to free space now"));
+      console.log("");
+      break;
+    }
+    case "diff": {
+      const r = await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git -c color.ui=always --no-pager diff --stat; echo; git -c color.ui=always --no-pager diff", signal: activeAbort?.signal });
+      const out = r.output.trim();
+      if (!out) { console.log(c.dim("  no uncommitted changes")); break; }
+      if (/not a git repository|fatal:/i.test(out)) { console.log(c.dim("  not a git repository (or git unavailable)")); break; }
+      const lines = out.split("\n"), cap = 400;
+      console.log("\n" + lines.slice(0, cap).join("\n"));
+      if (lines.length > cap) console.log(c.dim(`  … ${lines.length - cap} more lines (run \`git diff\` for the full output)`));
+      console.log("");
+      break;
+    }
+    case "init": {
+      const path = join(cfg.cwd, "AGENTS.md");
+      const exists = existsSync(path);
+      if (exists && rest[0] !== "force") { console.log(c.yellow("  AGENTS.md already exists — /init force to regenerate, or /agents to view")); break; }
+      try {
+        const md = generateAgentsMd(cfg.cwd, loadAgentsMemory(cfg.cwd));
+        writeFileSync(path, md);
+        console.log(c.green(`  ✓ ${exists ? "regenerated" : "created"} AGENTS.md (${md.length} chars)`) + c.dim(" — OB-1's project guide, auto-injected each session. Edit it to add conventions/architecture notes."));
+      } catch (e) { console.log(c.red(`  /init failed: ${(e as Error).message}`)); }
+      break;
+    }
+    case "goal": {
+      const sub = (rest[0] ?? "").toLowerCase();
+      if (sub === "clear" || sub === "stop" || sub === "off") { activeGoal = null; console.log(c.dim("  goal cleared")); break; }
+      if (!arg) { console.log(activeGoal ? `  active goal: ${c.cyan(activeGoal)}` : c.dim("  no active goal — /goal <condition> to set one (OB-1 works until it's met)")); break; }
+      if (!modelReachable()) { console.log(c.yellow("  /goal needs a model provider (a key, or a configured endpoint via /models)")); break; }
+      const cap = Number(process.env.OB1_GOAL_MAX_ITERS) > 0 ? Number(process.env.OB1_GOAL_MAX_ITERS) : 10;
+      activeGoal = arg;
+      console.log(c.green(`  ✓ goal set: ${arg}`));
+      console.log(c.dim(`  working until met (max ${cap} iterations) · ESC to stop · /goal stop to cancel`));
+      await runGoalLoop(arg);
+      break;
+    }
+    case "export": {
+      if (!history.length) { console.log(c.dim("  nothing to export yet")); break; }
+      try {
+        const dir = join(cfg.dataDir, "exports");
+        if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+        const file = arg ? (arg.startsWith("/") ? arg : join(cfg.cwd, arg)) : join(dir, `conversation-${convoId}.md`);
+        writeFileSync(file, renderTranscript(history));
+        console.log(c.green(`  ✓ exported ${history.length} messages → ${file}`));
+      } catch (e) { console.log(c.red(`  /export failed: ${(e as Error).message}`)); }
       break;
     }
     case "trust": {
@@ -1701,8 +1869,27 @@ async function ensureProxyHealthy(): Promise<void> {
 async function processLine(line: string): Promise<boolean> {
   const t = line.trim();
   if (!t) return false;
+  // `!cmd` — run a shell command directly (the user's own command, not the model's). Honors the sandbox
+  // setting; never goes through the model and never lands in history.
+  if (t.startsWith("!")) {
+    const cmd = t.slice(1).trim();
+    if (!cmd) { console.log(c.dim("  usage: !<shell command>")); return false; }
+    try {
+      const r = await shellExec({ cwd: cfg.cwd, sandbox: cfg.sandbox, command: cmd, signal: activeAbort?.signal });
+      if (r.output.trim()) console.log(r.output.replace(/\n+$/, ""));
+      if (r.code !== 0) console.log(c.dim(`  [exit ${r.code}]`));
+    } catch (e) { console.log(c.red(`  ! failed: ${(e as Error).message}`)); }
+    return false;
+  }
   if (t.startsWith("/")) return handleCommand(t);
   await ensureProxyHealthy(); // revive a crashed OB-1-managed Free LLM API proxy before the turn
+  // @path mentions — pull referenced files/dirs into the turn so the model sees them without a read_file
+  // round-trip. The original typed line (`t`) is kept for checkpoints/recall/skill-learning; only the text
+  // SENT to the model carries the attached contents.
+  const mention = expandMentions(t, cfg.cwd);
+  const turnText = mention.text;
+  if (mention.attached.length) console.log(c.dim(`  📎 attached ${mention.attached.length} @mention(s): ${mention.attached.map((s) => "@" + s).join(", ")}`));
+  if (mention.missing.length) console.log(c.dim(`  (no file for ${mention.missing.map((s) => "@" + s).join(", ")} — left as plain text)`));
   // Checkpoint the worktree + conversation position BEFORE running the prompt, so /rewind can return
   // here. Best-effort and only for real prompts (slash commands returned above). [[visible-progress-no-silent-work]]
   if (cfg.checkpoint) { try { checkpoints.snapshot(t, history.length); } catch { /* never block a turn on checkpointing */ } }
@@ -1714,9 +1901,9 @@ async function processLine(line: string): Promise<boolean> {
     modeJustSet = false;
   }
   const startLen = history.length;
-  if (cfg.mode === "fusion") { await fusionTurn(t); rememberTurn(t, startLen, "fusion"); return false; }
-  if (cfg.mode === "council") { await councilTurn(t); rememberTurn(t, startLen, "council"); return false; }
-  if (cfg.mode === "personas") { await personasTurn(t); rememberTurn(t, startLen, "personas"); return false; }
+  if (cfg.mode === "fusion") { await fusionTurn(turnText); rememberTurn(t, startLen, "fusion"); persistSession(); return false; }
+  if (cfg.mode === "council") { await councilTurn(turnText); rememberTurn(t, startLen, "council"); persistSession(); return false; }
+  if (cfg.mode === "personas") { await personasTurn(turnText); rememberTurn(t, startLen, "personas"); persistSession(); return false; }
   // (no `adaptive` branch — it's retired as a mode; auto-routing is the cfg.autoRoute toggle below)
   // Auto-route OFF: a pure-regex *nudge* (no extra model call) suggesting a heavier mode — purely advisory.
   if (!cfg.autoRoute) {
@@ -1726,15 +1913,16 @@ async function processLine(line: string): Promise<boolean> {
   // Auto-route ON: Solo gets the `escalate` tool (offered via turnDeps.canEscalate) and decides DURING its
   // normal response whether the task needs a heavier mode. No upfront probe call — an easy turn is one Solo
   // call; only a genuinely hard turn pays for the heavier mode. If it escalated, forward the whole task.
-  const outcome = await runTurn(t, history, turnDeps());
+  const outcome = await runTurn(turnText, history, turnDeps());
   if (outcome?.escalate) {
     const { mode, reason } = outcome.escalate;
     console.log(c.dim(`  ↗ Solo routed this to ${modeColor(mode)(mode)} — ${reason}`));
-    if (mode === "fusion") await fusionTurn(t);
-    else if (mode === "council") await councilTurn(t);
-    else await personasTurn(t);
+    if (mode === "fusion") await fusionTurn(turnText);
+    else if (mode === "council") await councilTurn(turnText);
+    else await personasTurn(turnText);
   }
   rememberTurn(t, startLen, outcome?.escalate ? `solo→${outcome.escalate.mode}` : "solo");
+  persistSession(); // write the conversation so /resume can reopen it
   // Auto skill learning (opt-in, OFF by default): distil this turn into reusable procedural memory.
   // One cheap brain call, only on a substantive non-escalated Solo turn. Never blocks/breaks the turn.
   if (cfg.skillLearn && memBrain && !outcome?.escalate) {
