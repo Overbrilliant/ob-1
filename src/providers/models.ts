@@ -45,6 +45,10 @@ export const MODELS: ModelSpec[] = [
 /** Default output ceiling for an unknown model — generous, so we don't truncate large artifacts. */
 export const DEFAULT_MAX_OUTPUT = 16_384;
 
+/** Conservative context-window fallback (input tokens) for an unknown/custom/local model — chosen as a
+ *  safe floor so adaptive compaction doesn't assume a window the endpoint may not actually have. */
+export const DEFAULT_CONTEXT_WINDOW = 128_000;
+
 export function modelSpec(id: string): ModelSpec | undefined {
   return MODELS.find((m) => m.match.test(id));
 }
@@ -59,6 +63,12 @@ export function isRouterModel(id: string): boolean {
  *  OpenAI-compatible path omits max_tokens entirely and lets the model govern. */
 export function maxOutputFor(id: string): number {
   return modelSpec(id)?.maxOutput ?? DEFAULT_MAX_OUTPUT;
+}
+
+/** The model's input context window in tokens. Best-effort by family; falls back to a conservative
+ *  window for unknown/custom/router ids. Used to scale context compaction to the active model. */
+export function contextWindowFor(id: string): number {
+  return modelSpec(id)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
 }
 
 /** A model's reasoning capability, or undefined when it has none / is unknown. */

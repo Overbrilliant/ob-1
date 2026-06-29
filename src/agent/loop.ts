@@ -17,7 +17,7 @@ import { loadAgentsMd, generateAgentsMd } from "../context/agents.ts";
 import { listTopics } from "../context/topics.ts";
 import { repoMapSummary, invalidateRepoMap } from "../context/repomap.ts";
 import { listSkills } from "../skills/registry.ts";
-import { editContext, compactIfNeeded } from "./context.ts";
+import { editContext, compactIfNeeded, summaryPrompt } from "./context.ts";
 import { detectChecks } from "./verify.ts";
 import { QualityRun, renderTaskQualityContract } from "./task-quality.ts";
 import { c, renderDiff, renderFriendly, explainError } from "../cli/ui.ts";
@@ -604,7 +604,10 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
 
   for (let step = 0; step < MAX_STEPS; step++) {
     if (deps.signal?.aborted) return {}; // ESC between steps — the drain loop prints "⊘ stopped" once
-    const edit = editContext(history);
+    // Scale compaction to the ACTIVE model's context window (resolved-model first, like the TUI footer):
+    // a 1M-token model should not compact at a 128k model's thresholds. Env vars still override (context.ts).
+    const ctxModel = cfg.resolvedModel ?? cfg.model;
+    const edit = editContext(history, { model: ctxModel });
     // Eviction removes older tool-result bodies from history — invalidate the read-dedup cache so a
     // pointer can never reference content that was just evicted (keeps dedup provably quality-neutral).
     if (edit.cleared) deps.readCache?.clear();
@@ -616,10 +619,11 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
     let compacted = false;
     try {
       compacted = await compactIfNeeded(history, {
+        model: ctxModel,
         summarize: async (older) => {
           const r = await callModel({
             provider: cfg.provider, apiKey: cfg.apiKey!, baseUrl: cfg.baseUrl, model: cfg.model, maxTokens: cfg.maxTokens,
-            system: "Summarize the earlier conversation into a compact note: preserve decisions made, file paths touched, and open tasks. Be terse — bullet points, no preamble.",
+            system: summaryPrompt(),
             messages: [{ role: "user", content: older.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n").slice(0, 120_000) }],
           });
           return r.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim() || "(summary unavailable)";

@@ -793,6 +793,7 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/trust", "trust this workspace (allow autopilot here)"],
   ["/allow", "standing approval (e.g. /allow git · /allow write src/ · list · clear)"],
   // ── context & workspace ──
+  ["/compact", "summarize earlier turns to free context (/compact focus on X)"],
   ["/repomap", "repo-map in context on/off (↑↓ · Enter)"],
   ["/rewind", "restore code/conversation to an earlier prompt (↑↓ · Enter)"],
   ["/map", "repository map"],

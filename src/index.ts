@@ -23,7 +23,7 @@ import { listEpisodes, listPromotionCandidates, loadAgentsMemory, promoteCandida
 import { ensureOb1GitExclude } from "./context/git-exclude.ts";
 import { listSkills, readSkill, deleteSkill } from "./skills/registry.ts";
 import { maybeLearnSkill } from "./skills/learn.ts";
-import { approxTokens } from "./agent/context.ts";
+import { approxTokens, compactNow, summaryPrompt } from "./agent/context.ts";
 import { runCurator, readUsage } from "./skills/usage.ts";
 import { buildTools, ReadCache, type Tool, type AskUserFn, type AskUserRequest } from "./agent/tools.ts";
 import { SecretStore } from "./agent/secrets.ts";
@@ -407,6 +407,7 @@ ${c.bold("Commands")}
   ${c.cyan("/allow")} ${c.dim("<what>")}         standing approval so the gate stops re-prompting ${c.dim("(e.g. /allow git · /allow write src/ · /allow list · /allow clear)")}
 
   ${c.bold("Context & workspace")}
+  ${c.cyan("/compact")} ${c.dim("[focus]")}       summarize earlier turns to free context ${c.dim("(auto-runs near the model's window; /compact focus on X to steer it)")}
   ${c.cyan("/repomap")} ${c.dim("[on|off]")}     repo map in context ${c.dim("(↑↓ · Enter)")} — auto codebase structure, refreshed as files change ${c.dim("(on by default)")}
   ${c.cyan("/rewind")} ${c.dim("[n]")}           restore code &/or conversation to an earlier prompt ${c.dim("(auto-checkpoint before each prompt · shadow git, your repo untouched)")}
   ${c.cyan("/map")}                  ranked repository map (symbols by centrality)
@@ -1167,6 +1168,31 @@ async function handleCommand(line: string): Promise<boolean> {
     case "help": console.log(HELP); break;
     case "exit": case "quit": return true;
     case "clear": history = []; todos.clear(); ctrl?.setContext(0); console.log(c.dim("  context cleared")); break;
+    case "compact": {
+      // Manual on-demand version of the loop's auto-compaction: summarize older turns into one note,
+      // keeping the recent window. Optional free-text focus steers the summary (/compact focus on X).
+      if (!modelReachable()) { console.log(c.yellow("  /compact needs a model provider (a key, or a configured endpoint via /models)")); break; }
+      if (history.length < 4) { console.log(c.dim("  nothing to compact yet — the conversation is still short")); break; }
+      const before = approxTokens(history);
+      console.log(c.dim(`  compacting ${history.length} messages (~${before} tokens) into a summary…`));
+      let ok = false;
+      try {
+        ok = await compactNow(history, async (older) => {
+          const r = await callModel({
+            provider: cfg.provider, apiKey: cfg.apiKey!, baseUrl: cfg.baseUrl, model: cfg.model, maxTokens: cfg.maxTokens,
+            system: summaryPrompt(arg),
+            messages: [{ role: "user", content: older.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n").slice(0, 120_000) }],
+          });
+          return r.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim() || "(summary unavailable)";
+        });
+      } catch (e) { console.log(c.red(`  compaction failed: ${(e as Error).message} — history left intact`)); break; }
+      if (ok) {
+        const after = approxTokens(history);
+        ctrl?.setContext(after);
+        console.log(c.green(`  ✓ compacted${arg ? c.dim(` (focus: ${arg})`) : ""} — ~${before} → ~${after} tokens`));
+      } else console.log(c.dim("  nothing to compact yet — not enough older history beyond the recent window"));
+      break;
+    }
     case "trust": {
       saveTrust(cfg.settingsDir, recordTrust(cfg.cwd, loadTrust(cfg.settingsDir)));
       console.log(c.green(`  ✓ trusted this workspace (${cfg.cwd}) — autopilot is now allowed here.`));
