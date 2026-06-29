@@ -6,7 +6,7 @@
 // lines / stream deltas / token usage into the controller, the controller notifies subscribers,
 // and <TuiApp> mirrors that state. Input flows back through controller.onSubmit.
 import { useEffect, useReducer, useRef, useState, Component, type ReactNode } from "react";
-import { render, Box, Text, Static, useApp, useInput } from "ink";
+import { render, Box, Text, Static, useApp, useInput, usePaste } from "ink";
 import TextInput from "ink-text-input";
 import { estimateCost, modelSpec, modelReasoning } from "../providers/models.ts";
 import { costForUsage } from "../usage/log.ts";
@@ -821,6 +821,13 @@ const SLASH_COMMANDS: [string, string][] = [
 // menu and pressing Enter actually does the thing, instead of just writing the name into the input.
 const NEEDS_ARG = new Set(["/fanout", "/council", "/personas", "/route"]);
 
+// Pasting a big block into ink-text-input is brutally slow — every char re-renders the whole growing
+// value (and any embedded \r submits a line early). Ink 7's usePaste delivers the paste as ONE string on
+// a separate channel (never forwarded to ink-text-input), so we stash the real text and drop a short
+// "[pasted …]" token into the visible value, expanding it back at submit time. We collapse a paste when
+// it's over this many chars OR spans multiple lines (a newline in the single-line field renders broken).
+const PASTE_COLLAPSE_CHARS = 300;
+
 export function TuiApp({ ctrl }: { ctrl: TuiController }) {
   const [, force] = useReducer((x: number) => x + 1, 0);
   const [value, setValue] = useState("");
@@ -831,6 +838,36 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
   const [inputKey, setInputKey] = useState(0);
   const setAtEnd = (v: string) => { setValue(v); setInputKey((k) => k + 1); };
   const { exit } = useApp();
+
+  // ─── large-paste collapsing ──────────────────────────────────────────────────
+  // token "[pasted #N · …]" → the real pasted text. expandPastes() swaps tokens back for the real text
+  // at submit time; we clear the map whenever the input is reset (submit / Esc / ⌃C) so it can't grow.
+  const pastes = useRef<Map<string, string>>(new Map());
+  const pasteSeq = useRef(0);
+  const expandPastes = (line: string): string => {
+    if (pastes.current.size === 0) return line;
+    let out = line;
+    for (const [token, text] of pastes.current) if (out.includes(token)) out = out.split(token).join(text);
+    return out;
+  };
+  const clearPastes = () => { if (pastes.current.size) pastes.current.clear(); };
+  // Ink 7 routes bracketed-paste content here (NOT to ink-text-input's useInput), so we own how it lands.
+  // Small single-line pastes type in normally; anything big or multi-line collapses to a token. Gated to
+  // when the MAIN input owns the frame — usePaste steals pastes from ALL text fields globally, so while a
+  // picker/setup/ask field is up we stay inactive and let that field (e.g. an API key) receive its paste.
+  const mainInputActive = !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.prompt && !ctrl.procFocus && !ctrl.upsellFocus && !ctrl.errorFocus;
+  usePaste((raw) => {
+    const text = raw.replace(/\r\n?/g, "\n");          // normalize CR/CRLF so line counts + submit are clean
+    const multiline = text.includes("\n");
+    if (text.length <= PASTE_COLLAPSE_CHARS && !multiline) { setAtEnd(value + text); return; }
+    const n = ++pasteSeq.current;
+    const lines = text.split("\n").length;
+    const label = multiline ? `${lines} lines` : `${text.length} chars`;
+    const token = `[pasted #${n} · ${label}]`;
+    pastes.current.set(token, text);
+    setAtEnd(value + token);
+    setMenuIndex(0);
+  }, { isActive: mainInputActive });
 
   // ─── ↑/↓ prompt recall ───────────────────────────────────────────────────────
   // ↑ walks back through pending QUEUED prompts (most-recent first) then this session's prompt history;
@@ -882,7 +919,7 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
       //  • otherwise (empty prompt OR inside ANY picker/approval/setup/process frame) it's a two-stage
       //    exit — the first press arms + shows a hint, a second within the window leaves.
       // This handler is always-active, so ⌃C now works everywhere, including settings/model pickers.
-      if (value) { setValue(""); setMenuIndex(0); ctrl.disarmExit(); }
+      if (value) { setValue(""); setMenuIndex(0); clearPastes(); ctrl.disarmExit(); }
       else ctrl.armOrExit();
     }
   });
@@ -895,7 +932,7 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
   // Inactive while a picker/approval/clarification/setup/proc frame or a focused footer button owns ESC.
   useInput((_input, key) => {
     if (!key.escape) return;
-    if (value) { resetRecall(); setValue(""); setMenuIndex(0); return; } // wipe the draft
+    if (value) { resetRecall(); setValue(""); setMenuIndex(0); clearPastes(); return; } // wipe the draft
     ctrl.requestCancel();                                                // empty → stop the turn + tools
   }, { isActive: !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.prompt && !ctrl.procFocus && !ctrl.upsellFocus && !ctrl.errorFocus });
 
@@ -1316,7 +1353,7 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
                     if (NEEDS_ARG.has(cmd) && trimmed !== cmd) { setAtEnd(cmd + " "); setMenuIndex(0); return; } // setAtEnd: cursor at end so the arg types correctly
                     dropRecalledQueued(); setValue(""); setMenuIndex(0); void ctrl.onSubmit?.(cmd); return;
                   }
-                  dropRecalledQueued(); setValue(""); void ctrl.onSubmit?.(line);
+                  dropRecalledQueued(); setValue(""); const sub = expandPastes(line); clearPastes(); void ctrl.onSubmit?.(sub);
                 }}
                 placeholder={ctrl.busy ? (ctrl.queue.length ? "queue another task — ↑ to edit a queued one…" : "queue another task — runs after the current one…") : ctrl.suggestion ? `${ctrl.suggestion}   ⇥ tab` : (ctrl.history.length || ctrl.queue.length ? "type a task · / commands · ↑ history" : "type a task, or / for commands")}
               />
