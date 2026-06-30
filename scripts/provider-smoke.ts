@@ -1,6 +1,6 @@
 // Deterministic test (no API key). Verifies OpenAI message translation AND model-governed token caps:
 //   - OpenAI-compatible OMITS max_tokens when unset (the model governs length)
-//   - Anthropic always sets max_tokens (API-required), from the model registry
+//   - the Anthropic request formatter still sets max_tokens for its API shape
 // Usage: bun run scripts/provider-smoke.ts
 import { toOpenAIMessages, openAIBody, extractDelta, callOpenAI } from "../src/providers/openai.ts";
 import { streamSSE } from "../src/providers/http.ts";
@@ -48,30 +48,30 @@ const uncapped = openAIBody(base);
 check("openai OMITS max_tokens when unset (model governs)", !("max_tokens" in uncapped));
 check("openai includes max_tokens only when explicitly set", openAIBody({ ...base, maxTokens: 5000 }).max_tokens === 5000);
 
-const anth = anthropicBody({ ...base, provider: "anthropic", model: "claude-sonnet-4-6" });
+const anth = anthropicBody({ ...base, model: "claude-sonnet-4-6" });
 check("anthropic ALWAYS sets max_tokens (API requires it)", typeof anth.max_tokens === "number" && (anth.max_tokens as number) > 4096);
-check("anthropic uses explicit cap when given", anthropicBody({ ...base, provider: "anthropic", model: "claude-sonnet-4-6", maxTokens: 1234 }).max_tokens === 1234);
+check("anthropic uses explicit cap when given", anthropicBody({ ...base, model: "claude-sonnet-4-6", maxTokens: 1234 }).max_tokens === 1234);
 
 // --- prompt caching: cache_control breakpoints on the stable prefix (system + last tool) ---
-const cached = anthropicBody({ ...base, provider: "anthropic", model: "claude-sonnet-4-6",
+const cached = anthropicBody({ ...base, model: "claude-sonnet-4-6",
   tools: [{ name: "a", description: "", input_schema: {} }, { name: "b", description: "", input_schema: {} }] });
 check("anthropic: system carries a cache_control breakpoint", Array.isArray(cached.system) && (cached.system as any)[0].cache_control?.type === "ephemeral");
 check("anthropic: LAST tool cached, earlier tools not", Array.isArray(cached.tools) && (cached.tools as any).at(-1).cache_control?.type === "ephemeral" && (cached.tools as any)[0].cache_control === undefined);
 
 // --- prompt caching: split system (stable cached + volatile uncached) ---
-const split = anthropicBody({ ...base, provider: "anthropic", model: "claude-sonnet-4-6",
+const split = anthropicBody({ ...base, model: "claude-sonnet-4-6",
   system: [{ text: "STABLE INSTRUCTIONS", cache: true }, { text: "volatile date + memory" }] });
 check("anthropic: stable system block is cached, volatile tail is NOT", (() => {
   const s = split.system as any[];
   return s.length === 2 && s[0].text === "STABLE INSTRUCTIONS" && s[0].cache_control?.type === "ephemeral" && s[1].cache_control === undefined;
 })());
 check("anthropic: empty system blocks are dropped (no stray breakpoint)", (() => {
-  const s = anthropicBody({ ...base, provider: "anthropic", model: "claude-sonnet-4-6", system: [{ text: "x", cache: true }, { text: "   " }] }).system as any[];
+  const s = anthropicBody({ ...base, model: "claude-sonnet-4-6", system: [{ text: "x", cache: true }, { text: "   " }] }).system as any[];
   return s.length === 1;
 })());
 
 // --- prompt caching: conversation breakpoint on the LAST message (makes each step a cache hit) ---
-const convo = anthropicBody({ ...base, provider: "anthropic", model: "claude-sonnet-4-6", messages: [
+const convo = anthropicBody({ ...base, model: "claude-sonnet-4-6", messages: [
   { role: "user", content: "first" },
   { role: "assistant", content: [{ type: "text", text: "ok" }, { type: "tool_use", id: "t1", name: "read_file", input: {} }] },
   { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "file body" }] },
@@ -87,7 +87,7 @@ check("anthropic: earlier messages are NOT given a breakpoint", (() => {
 })());
 check("anthropic: withConversationCache does not mutate the caller's history", (() => {
   const hist: Message[] = [{ role: "user", content: "hello" }];
-  anthropicBody({ ...base, provider: "anthropic", model: "claude-sonnet-4-6", messages: hist });
+  anthropicBody({ ...base, model: "claude-sonnet-4-6", messages: hist });
   return typeof hist[0].content === "string"; // original untouched (string, not promoted to blocks)
 })());
 
@@ -286,10 +286,10 @@ check("anthropic non-vision: no base64 image source survives (degraded to text)"
 
 // End-to-end through anthropicBody: a vision model keeps the image; the conversation cache breakpoint
 // lands on the last block and never corrupts the image source.
-const anBodyVis = anthropicBody({ ...base, provider: "anthropic", model: "anthropic/claude-opus-4.8", messages: imgHistory });
+const anBodyVis = anthropicBody({ ...base, model: "anthropic/claude-opus-4.8", messages: imgHistory });
 check("anthropic vision (full body): the image base64 survives into the request body",
   JSON.stringify(anBodyVis.messages).includes(PNG_B64));
-const anBodyNo = anthropicBody({ ...base, provider: "anthropic", model: "claude-text-only-fake", messages: imgHistory });
+const anBodyNo = anthropicBody({ ...base, model: "claude-text-only-fake", messages: imgHistory });
 check("anthropic non-vision (full body): an unknown model strips the image to text (safe)",
   !JSON.stringify(anBodyNo.messages).includes(PNG_B64));
 

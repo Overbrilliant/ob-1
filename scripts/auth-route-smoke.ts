@@ -39,6 +39,15 @@ try {
   check("web_search defaults to the server /v1/search + Bearer", cfg.searxngUrl === `${ob1ServerUrl()}/v1/search` && cfg.searxngBearer === true);
   check("web_search key is the token", cfg.searxngKey === "file-token");
 
+  // ── direct model-provider env keys are ignored; Custom API must be configured via /models ──
+  process.env.OPENROUTER_API_KEY = "or-test";
+  process.env.OPENAI_API_KEY = "oa-test";
+  process.env.ANTHROPIC_API_KEY = "anthropic-test";
+  process.env.OB1_BASE_URL = "https://direct.example/v1";
+  const cfgDirectIgnored = loadConfig();
+  check("direct model-provider env keys do not bypass the managed route", cfgDirectIgnored.baseUrl === `${ob1ServerUrl()}/v1` && cfgDirectIgnored.apiKey === "file-token" && cfgDirectIgnored.providerProfile === undefined, `${cfgDirectIgnored.baseUrl}/${cfgDirectIgnored.apiKey}/${cfgDirectIgnored.providerProfile}`);
+  delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL;
+
   // ── direct SearXNG override uses X-API-Key (not Bearer) ──
   process.env.OB1_SEARXNG_URL = "https://searx.example/search";
   process.env.OB1_SEARXNG_KEY = "direct-key";

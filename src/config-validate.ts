@@ -8,7 +8,7 @@
 import type { PersistedSettings } from "./config.ts";
 
 const ENUMS: Record<string, readonly string[]> = {
-  provider: ["anthropic", "openai"],
+  provider: ["openai"],
   mode: ["solo", "fusion", "council", "personas", "adaptive"],
   permissionMode: ["ask", "autopilot"],
   sandbox: ["off", "read-only", "workspace-write"],
@@ -16,8 +16,10 @@ const ENUMS: Record<string, readonly string[]> = {
   qualityMode: ["off", "normal", "strict"],
 };
 const BOOLS = ["planMode", "autoRoute", "subagents", "repoMap", "memEvolve", "memReflect", "memAutolink", "skillLearn", "checkpoint"] as const;
-const STRINGS = ["model", "providerProfile", "providerUrl", "providerKey"] as const;
+const STRINGS = ["model", "providerUrl", "providerKey"] as const;
+const PROVIDER_PROFILES = ["freellmapi", "custom"] as const;
 const KNOWN = new Set<string>([...Object.keys(ENUMS), ...BOOLS, ...STRINGS, "providerCreds"]);
+KNOWN.add("providerProfile");
 
 export interface SettingsIssue { field: string; message: string }
 export interface ValidationReport {
@@ -51,10 +53,17 @@ export function validateSettings(raw: unknown): ValidationReport {
     } else if ((STRINGS as readonly string[]).includes(key)) {
       if (typeof val === "string") value[key] = val;
       else errors.push({ field: key, message: `invalid ${key}: ${JSON.stringify(val)} — expected a string` });
+    } else if (key === "providerProfile") {
+      if (typeof val === "string" && (PROVIDER_PROFILES as readonly string[]).includes(val)) value[key] = val;
+      else errors.push({ field: key, message: `invalid providerProfile: ${JSON.stringify(val)} — expected one of ${PROVIDER_PROFILES.join(" | ")}` });
     } else if (key === "providerCreds") {
       if (isPlainObject(val)) {
         const creds: Record<string, { url: string; key: string }> = {};
         for (const [pid, entry] of Object.entries(val)) {
+          if (!(PROVIDER_PROFILES as readonly string[]).includes(pid)) {
+            warnings.push({ field: `providerCreds.${pid}`, message: `unknown provider profile "${pid}" (ignored)` });
+            continue;
+          }
           if (isPlainObject(entry) && typeof entry.url === "string" && typeof entry.key === "string") creds[pid] = { url: entry.url, key: entry.key };
           else errors.push({ field: `providerCreds.${pid}`, message: "each entry must be { url: string, key: string }" });
         }

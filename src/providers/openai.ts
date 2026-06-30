@@ -175,7 +175,7 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
 
   // Authorization is sent only when there IS a key. A keyless local/LAN endpoint (the Custom-endpoint
   // profile — Ollama, llama.cpp, …) needs no auth, and sending `Bearer undefined`/`Bearer ` can trip a
-  // strict server. Every other path (managed server, FreeLLMAPI, OpenAI/OpenRouter BYOK) carries a key.
+  // strict server. Managed server and keyed FreeLLMAPI/Custom endpoints carry a key.
   const headers: Record<string, string> = { "content-type": "application/json", accept: "text/event-stream", "X-Title": "OB-1" };
   if (opts.apiKey) headers.authorization = `Bearer ${opts.apiKey}`;
 

@@ -1,4 +1,4 @@
-// LIVE end-to-end check for spawn_subagents (needs a provider key — OPENROUTER_API_KEY).
+// LIVE end-to-end check for spawn_subagents (needs a configured model route).
 // Two parts:
 //   1. runSubagents directly with the REAL model on 3 independent read-only tasks → verifies they run
 //      in parallel, return findings, and the registry tracks each one's progress live.
@@ -14,7 +14,7 @@ import { AgentRegistry } from "../src/agent/agent-registry.ts";
 import type { WorkerEvent } from "../src/multimind/runtime.ts";
 
 const cfg = loadConfig();
-if (!cfg.apiKey) { console.error("no provider key (set OPENROUTER_API_KEY) — skipping live test"); process.exit(0); }
+if (!cfg.apiKey && !cfg.providerProfile) { console.error("no configured model route — sign in, or use /models for FreeLLMAPI or Custom API; skipping live test"); process.exit(0); }
 console.log(`provider=${cfg.provider} model=${cfg.model}\n`);
 
 const store = new MemoryStore(":memory:");

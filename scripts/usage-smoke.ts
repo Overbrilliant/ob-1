@@ -19,7 +19,7 @@ const M = "anthropic/claude-opus-4-8"; // a model the registry prices (else cost
 
 // 1. append creates the dir + file and round-trips through loadUsage.
 const mk = (over: Partial<UsageEntry>): UsageEntry => ({
-  ts: "2026-06-22T10:00:00.000Z", model: M, provider: "anthropic", mode: "solo",
+  ts: "2026-06-22T10:00:00.000Z", model: M, provider: "openai", mode: "solo",
   in: 1000, out: 200, cacheRead: 0, cacheWrite: 0,
   costUsd: costForUsage(M, 1000, 200, 0, 0), ...over,
 });

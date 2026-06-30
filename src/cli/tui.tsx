@@ -27,7 +27,7 @@ export interface Status {
   estTok?: boolean;       // the meter includes locally-estimated tokens (proxy returned no usage)
   effort?: "low" | "medium" | "high"; // reasoning effort for the active model (shown by the ⌃O hint)
   // Subscription: on a paid managed plan we show MONTHLY credit usage as a bar (like the context meter)
-  // and hide the per-session $ amount (subscribers pay a flat plan, not per call). Unset on free/BYOK.
+  // and hide the per-session $ amount (subscribers pay a flat plan, not per call). Unset on free/custom.
   subscribed?: boolean;
   monthUsed?: number;     // managed credits used this billing month
   monthCap?: number;      // monthly credit cap
@@ -349,7 +349,7 @@ export class TuiController {
   /** Set the current context occupancy (the LAST request's full input size) for the footer context bar. */
   setContext = (ctxTok: number): void => { this.status.ctxTok = ctxTok; this.emit(); };
   /** Update the footer's subscription state: a paid plan shows monthly credit usage as a bar (and hides
-   *  the $ cost); free/BYOK clears it (subscribed=false) and the $ cost stays. */
+   *  the $ cost); free/custom clears it (subscribed=false) and the $ cost stays. */
   setSubscription = (subscribed: boolean, monthUsed?: number, monthCap?: number): void => {
     this.status.subscribed = subscribed; this.status.monthUsed = monthUsed; this.status.monthCap = monthCap; this.emit();
   };
@@ -699,7 +699,7 @@ function StatusBar({ s, reasoning, procs, agents, busy, stopping, genChars = 0, 
   const specModel = s.resolvedModel || s.model;
   const modelLabel = s.resolvedModel ? `${s.model} → ${modelSpec(s.resolvedModel)?.label ?? s.resolvedModel}` : s.model;
   // Subscribers (paid managed plan) see MONTHLY credit usage as a bar instead of a per-session $ amount —
-  // they pay a flat plan, so the dollar figure is meaningless to them. Free/BYOK keep the $ cost.
+  // they pay a flat plan, so the dollar figure is meaningless to them. Free/custom keeps the $ cost.
   const subscribed = !!s.subscribed && (s.monthCap ?? 0) > 0;
   // inTok is the UNCACHED input; cached tokens still bill (~0.25× input) so fold them in at the cache
   // rate — otherwise the live cost understates a cache-heavy session.

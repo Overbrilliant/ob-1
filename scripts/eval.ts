@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Standalone compute-matched eval (Phase 7). Needs a provider key. Usage:
+// Standalone compute-matched eval (Phase 7). Needs a configured model route. Usage:
 //   bun run scripts/eval.ts [solo fusion council personas]   (default: all)
 //   OB1_EVAL_TRIALS=3 bun run scripts/eval.ts                (more trials → real Solo@k estimate)
 import { loadConfig } from "../src/config.ts";
@@ -12,7 +12,7 @@ import { runEval, computeMatched, computeCapability } from "../src/eval/harness.
 import { renderReport, renderCapability } from "../src/eval/report.ts";
 
 const cfg = loadConfig();
-if (!cfg.apiKey) { console.error("eval needs a provider key (OPENROUTER_API_KEY / ANTHROPIC_API_KEY / OPENAI_API_KEY)"); process.exit(1); }
+if (!cfg.apiKey && !cfg.providerProfile) { console.error("eval needs a configured model route: sign in for the managed server, or use /models for FreeLLMAPI or Custom API"); process.exit(1); }
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 const picked = requested.filter((m) => (SELECTABLE_MODES as readonly string[]).includes(m));

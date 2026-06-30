@@ -9,12 +9,12 @@ const check = (n: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} $
 const good = validateSettings({
   provider: "openai", model: "qwen/qwen3.6-plus", mode: "solo", permissionMode: "autopilot",
   sandbox: "workspace-write", effort: "high", qualityMode: "strict", planMode: false, repoMap: true, checkpoint: true,
-  providerProfile: "openrouter", providerUrl: "https://x/v1", providerKey: "k",
-  providerCreds: { openrouter: { url: "https://x/v1", key: "k" } },
+  providerProfile: "custom", providerUrl: "https://x/v1", providerKey: "k",
+  providerCreds: { custom: { url: "https://x/v1", key: "k" } },
 });
 check("valid settings → ok, no errors", good.ok && good.errors.length === 0);
 check("valid settings preserved verbatim", good.value.mode === "solo" && good.value.sandbox === "workspace-write" && good.value.effort === "high" && good.value.qualityMode === "strict");
-check("valid providerCreds preserved", good.value.providerCreds?.openrouter?.key === "k");
+check("valid providerCreds preserved", good.value.providerCreds?.custom?.key === "k");
 
 // ── invalid enum / type values are DROPPED with an error (default applies) ─────
 const bad = validateSettings({ mode: "yolo", sandbox: 42, permissionMode: "ask", planMode: "yes", effort: "extreme", qualityMode: "max", model: "m" });
@@ -33,7 +33,13 @@ check("unknown key is NOT carried into the value", !("bogusKey" in unknown.value
 
 // ── malformed providerCreds entry ─────────────────────────────────────────────
 const creds = validateSettings({ providerCreds: { ok: { url: "u", key: "k" }, broken: { url: 1 } } });
-check("good cred entry kept, broken entry errors", creds.value.providerCreds?.ok?.url === "u" && creds.errors.some((e) => e.field === "providerCreds.broken"));
+check("unknown cred entries ignored, broken allowed-profile entry errors", !creds.value.providerCreds?.ok && creds.warnings.some((w) => w.field === "providerCreds.ok") && creds.errors.length === 0);
+const badProfileCreds = validateSettings({ providerCreds: { custom: { url: 1 } } });
+check("malformed allowed providerCreds entry errors", badProfileCreds.errors.some((e) => e.field === "providerCreds.custom"));
+const badProfile = validateSettings({ providerProfile: "openrouter", providerUrl: "https://openrouter.ai/api/v1", providerKey: "k" });
+check("unsupported providerProfile is dropped", badProfile.errors.some((e) => e.field === "providerProfile") && badProfile.value.providerProfile === undefined);
+const badProvider = validateSettings({ provider: "anthropic", model: "claude-direct-id" });
+check("unsupported direct provider is dropped", badProvider.errors.some((e) => e.field === "provider") && badProvider.value.provider === undefined);
 
 // ── non-object root ───────────────────────────────────────────────────────────
 check("array root → error, empty value", validateSettings([1, 2]).ok === false && Object.keys(validateSettings([1, 2]).value).length === 0);

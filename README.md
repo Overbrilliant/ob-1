@@ -146,14 +146,13 @@ Start with `solo`. Switch modes only when the task benefits from extra work.
 | `fusion` | Several candidate solutions, checked and merged into one result. |
 | `council` | Author and reviewer rounds before the final answer. |
 | `personas` | A small expert panel for product, design, architecture, or strategy tradeoffs. |
-| `adaptive` | Solo first, then escalation only when the configured check fails. |
 
 ```text
 /mode solo
 /mode fusion
 /mode council
 /mode personas
-/mode adaptive
+/autoroute on    let Solo route hard turns to a heavier mode
 ```
 
 ## Commands
@@ -175,7 +174,7 @@ ob1 --version       print the version
 ```text
 /help                 show help
 /plan | /act          switch between planning and execution
-/auto on|off          toggle auto-approval
+/permission ask|autopilot  toggle per-action approvals
 /sandbox <mode>       switch shell sandbox mode
 /memory               inspect memory
 /memory add <text>    remember a fact
@@ -244,7 +243,7 @@ src/
   mcp/                 MCP clients and server manager
   memory/              fact store, embeddings, ranking, reflection, export
   multimind/           Fusion, Council, Personas, Adaptive routing, worker orchestration
-  providers/           Anthropic and OpenAI-compatible provider gateway
+  providers/           OpenAI-compatible model gateway
   safety/              shell policy, validation, and OS sandbox integration
   skills/              on-demand markdown skill registry
 scripts/               smoke tests, install/build helpers, live probes

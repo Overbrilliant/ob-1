@@ -1,8 +1,7 @@
-// Provider gateway — single entry point the agent loop calls; dispatches to the right
-// provider AND owns the upstream-error retry policy. This is the seam Fusion/Council use to
-// route to many models (R5/R7).
+// Provider gateway — single entry point the agent loop calls. Runtime model traffic is restricted to
+// OpenAI-compatible routes: managed OB-1 server, FreeLLMAPI, or Custom API. This module also owns the
+// upstream-error retry policy.
 import type { CallOpts, ModelResponse } from "./types.ts";
-import { callAnthropic } from "./anthropic.ts";
 import { callOpenAI } from "./openai.ts";
 
 export * from "./types.ts";
@@ -35,7 +34,10 @@ export async function callModel(
   opts: CallOpts,
   _dispatch?: (o: CallOpts) => Promise<ModelResponse>, // injectable for tests; defaults to the real providers
 ): Promise<ModelResponse> {
-  const dispatch = _dispatch ?? ((o: CallOpts) => (o.provider === "openai" ? callOpenAI(o) : callAnthropic(o)));
+  const dispatch = _dispatch ?? ((o: CallOpts) => {
+    if (String(o.provider) !== "openai") throw new Error(`unsupported model provider route: ${String(o.provider)}`);
+    return callOpenAI(o);
+  });
   const max = maxAttempts();
   let produced = false;
   const tap = (fn?: (d: string) => void) => (fn ? (d: string) => { produced = true; fn(d); } : undefined);
