@@ -14,33 +14,24 @@ export type QualityMode = "off" | "normal" | "strict";
  *  one behind an approval prompt. (Default resolved in loadConfig: autopilot unless a saved value is "ask".) */
 export type PermissionMode = "ask" | "autopilot";
 
-/** Pick provider. Precedence: explicit env (OpenRouter / OpenAI) > a provider profile configured via
- *  the /models setup flow (creds persisted in the global ~/.ob1/settings.json) > the Anthropic default.
- *  OpenRouter, OpenAI and the profiles all use the OpenAI-compatible API. */
+/** Pick provider. Supported model routes are deliberately narrow:
+ *  1. a provider profile configured via /models (FreeLLMAPI or Custom API),
+ *  2. the managed OB-1 server subscription route, where the server injects OpenRouter.
+ *
+ *  Direct model-provider env keys are ignored here; Custom API must be configured as a profile so it is
+ *  visible, persisted, and switchable from the same /models surface as FreeLLMAPI. */
 function resolveProvider(saved: PersistedSettings): { provider: Provider; apiKey: string | undefined; baseUrl: string; model: string; providerProfile?: string } {
-  const model = process.env.OB1_MODEL;
-  if (process.env.OPENROUTER_API_KEY) {
-    return { provider: "openai", apiKey: process.env.OPENROUTER_API_KEY, baseUrl: process.env.OB1_BASE_URL ?? "https://openrouter.ai/api/v1", model: model ?? "qwen/qwen3.6-plus" };
-  }
-  if (process.env.OPENAI_API_KEY && process.env.OB1_BASE_URL) {
-    return { provider: "openai", apiKey: process.env.OPENAI_API_KEY, baseUrl: process.env.OB1_BASE_URL, model: model ?? "gpt-4o" };
-  }
-  if (process.env.OB1_PROVIDER === "openai" && process.env.OPENAI_API_KEY) {
-    return { provider: "openai", apiKey: process.env.OPENAI_API_KEY, baseUrl: "https://api.openai.com/v1", model: model ?? "gpt-4o" };
-  }
+  const model = process.env.OB1_MODEL?.trim() || undefined;
   // A provider profile (e.g. FreeLLMAPI, or a bring-your-own Custom endpoint) set up via /models — creds
   // restored from persisted settings. The KEY is optional (a keyless Custom/LAN endpoint persists an empty
   // string), so a profile is restored on URL alone; apiKey stays undefined when no key was saved.
-  if (saved.providerProfile && saved.providerUrl) {
-    const prof = profileById(saved.providerProfile);
+  const prof = profileById(saved.providerProfile);
+  if (prof && saved.providerUrl) {
     return { provider: "openai", apiKey: saved.providerKey || undefined, baseUrl: saved.providerUrl, model: model ?? saved.model ?? prof?.defaultModel ?? "auto", providerProfile: saved.providerProfile };
-  }
-  if (process.env.ANTHROPIC_API_KEY) {
-    return { provider: "anthropic", apiKey: process.env.ANTHROPIC_API_KEY, baseUrl: process.env.OB1_BASE_URL ?? "https://api.anthropic.com", model: model ?? "claude-sonnet-4-6" };
   }
   // Nothing configured → route through the managed OB-1 server with the signed-in user's token (the
   // server injects the real OpenRouter key). No token yet → apiKey undefined: the app disables the
-  // model and prompts `ob1 login`. Power users can still set OPENROUTER_API_KEY to go direct (above).
+  // model and prompts `ob1 login` or /models for FreeLLMAPI / Custom API.
   return { provider: "openai", apiKey: loadAuthToken(), baseUrl: `${ob1ServerUrl()}/v1`, model: model ?? "qwen/qwen3.6-plus" };
 }
 
@@ -69,8 +60,8 @@ export interface Config {
    *  from, so settings are identical everywhere. Defaults to ~/.ob1; override with OB1_SETTINGS_DIR. */
   settingsDir: string;
   dbPath: string;
-  /** Output-token cap. undefined ⇒ governed by the model (OpenAI-compatible omits it; Anthropic
-   *  uses the model registry). Set OB1_MAX_TOKENS only to force a specific cap. */
+  /** Output-token cap. undefined ⇒ governed by the model on the OpenAI-compatible route. Set
+   *  OB1_MAX_TOKENS only to force a specific cap. */
   maxTokens?: number;
   mode: Mode;
   /** true = read-only Plan mode; false = Act mode (R6 — Cline plan/act). */
@@ -146,14 +137,14 @@ export interface PersistedSettings {
   checkpoint?: boolean;
   effort?: Effort;
   // A provider configured via the /models setup flow. Creds live here (the file is gitignored) so the
-  // provider survives restarts without re-entry; an explicit env key always takes precedence on load.
+  // provider survives restarts without re-entry. Direct provider env keys are not model routes.
   // The single tuple names the ACTIVE provider (what resolveProvider restores on next launch).
-  providerProfile?: string;     // e.g. "freellmapi" | "openrouter"
+  providerProfile?: string;     // e.g. "freellmapi" | "custom"
   providerUrl?: string;         // the active provider base URL (…/v1)
   providerKey?: string;         // the active provider bearer token
   // Per-provider credential memory, keyed by profile id. Remembers EVERY configured provider's URL+key
-  // so switching between the free proxy and a paid provider (OpenRouter) from /models never needs
-  // re-entry. The active provider above is one of these entries.
+  // so switching between FreeLLMAPI and Custom API from /models never needs re-entry. The active
+  // provider above is one of these entries.
   providerCreds?: Record<string, { url: string; key: string }>;
 }
 
@@ -163,7 +154,7 @@ const SANDBOXES: SandboxMode[] = ["off", "read-only", "workspace-write"];
 const QUALITY_MODES: QualityMode[] = ["off", "normal", "strict"];
 
 /** Parse OB1_MAX_TOKENS to a positive integer, or undefined (let the provider pick its own cap). A
- *  malformed value must NOT become NaN — that 400s the Anthropic API on every request. */
+ *  malformed value must NOT become NaN and leak into provider request bodies. */
 function maxTokensFromEnv(): number | undefined {
   const n = Number(process.env.OB1_MAX_TOKENS);
   return Number.isFinite(n) && n > 0 ? n : undefined;
@@ -175,7 +166,6 @@ function maxTokensFromEnv(): number | undefined {
 // fresh install works out of the box; set OB1_SERVER to override (e.g. http://localhost:8787 for local
 // server development).
 const DEFAULT_OB1_SERVER = "https://ob1-api.overbrilliant.com";
-const DEFAULT_OPENROUTER_URL = "https://openrouter.ai/api/v1"; // public; used only by the BYOK env path
 
 /** Base origin of the managed OB-1 server (no trailing slash). Override with OB1_SERVER. */
 export function ob1ServerUrl(): string {
@@ -226,22 +216,42 @@ function writeSettingsFile(dir: string, data: PersistedSettings): void {
   try { chmodSync(path, 0o600); } catch { /* perms are best-effort */ }
 }
 
+function envSet(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(process.env, name);
+}
+
 /** Persist the user-changeable settings. Best-effort — never throws (a failed write must not break a turn). */
 export function saveSettings(cfg: Config): void {
+  const prev = loadPersisted(cfg.settingsDir);
+  const supportedProvider = cfg.provider === "openai";
   const data: PersistedSettings = {
-    provider: cfg.provider, model: cfg.model, mode: cfg.mode, planMode: cfg.planMode,
-    autoRoute: cfg.autoRoute, subagents: cfg.subagents, repoMap: cfg.repoMap, memEvolve: cfg.memEvolve, memReflect: cfg.memReflect, memAutolink: cfg.memAutolink, skillLearn: cfg.skillLearn, qualityMode: cfg.qualityMode, permissionMode: cfg.permissionMode, sandbox: cfg.sandbox, checkpoint: cfg.checkpoint, effort: cfg.effort,
+    provider: "openai",
+    model: envSet("OB1_MODEL") ? prev.model : supportedProvider ? cfg.model : prev.model,
+    mode: cfg.mode,
+    planMode: cfg.planMode,
+    autoRoute: envSet("OB1_AUTO_ROUTE") ? prev.autoRoute : cfg.autoRoute,
+    subagents: envSet("OB1_SUBAGENTS") ? prev.subagents : cfg.subagents,
+    repoMap: envSet("OB1_REPO_MAP") ? prev.repoMap : cfg.repoMap,
+    memEvolve: envSet("OB1_MEM_EVOLVE") ? prev.memEvolve : cfg.memEvolve,
+    memReflect: envSet("OB1_MEM_REFLECT") ? prev.memReflect : cfg.memReflect,
+    memAutolink: envSet("OB1_MEM_AUTOLINK") ? prev.memAutolink : cfg.memAutolink,
+    skillLearn: envSet("OB1_SKILL_LEARN") ? prev.skillLearn : cfg.skillLearn,
+    qualityMode: envSet("OB1_QUALITY") ? prev.qualityMode : cfg.qualityMode,
+    permissionMode: envSet("OB1_PERMISSION") ? prev.permissionMode : cfg.permissionMode,
+    sandbox: envSet("OB1_SANDBOX") ? prev.sandbox : cfg.sandbox,
+    checkpoint: envSet("OB1_CHECKPOINT") ? prev.checkpoint : cfg.checkpoint,
+    effort: envSet("OB1_EFFORT") ? prev.effort : cfg.effort,
   };
   // Provider creds. The single tuple (providerProfile/Url/Key) names the ACTIVE provider; the
-  // providerCreds map remembers EVERY configured provider so switching free⇄paid needs no re-entry.
-  const prev = loadPersisted(cfg.settingsDir);
+  // providerCreds map remembers EVERY configured provider so switching FreeLLMAPI⇄Custom needs no
+  // re-entry.
   // GLOBAL settings (~/.ob1) are the ONLY source of truth. We no longer fall back to a per-workspace
   // <cwd>/.ob1 file: that legacy migration kept resurrecting stale provider URLs (e.g. an old remote
   // FreeLLMAPI host) into the global config. FreeLLMAPI is self-hosted/local, set up fresh via /models.
   const legacy = prev;
   const creds: Record<string, { url: string; key: string }> = { ...(prev.providerCreds ?? {}) };
   // Fold any legacy single-tuple into the map (back-compat for files written before the map existed).
-  if (legacy.providerProfile && legacy.providerUrl && legacy.providerKey && !creds[legacy.providerProfile]) {
+  if (legacy.providerProfile && legacy.providerUrl && legacy.providerKey != null && !creds[legacy.providerProfile]) {
     creds[legacy.providerProfile] = { url: legacy.providerUrl, key: legacy.providerKey };
   }
   if (cfg.providerProfile) {
@@ -251,9 +261,6 @@ export function saveSettings(cfg: Config): void {
     const key = cfg.apiKey ?? "";
     creds[cfg.providerProfile] = { url: cfg.baseUrl, key };
     data.providerProfile = cfg.providerProfile; data.providerUrl = cfg.baseUrl; data.providerKey = key;
-  } else if (legacy.providerProfile) {
-    // Env-override session (no profile): carry forward the active provider so it survives.
-    data.providerProfile = legacy.providerProfile; data.providerUrl = legacy.providerUrl; data.providerKey = legacy.providerKey;
   }
   if (Object.keys(creds).length) data.providerCreds = creds;
   try { writeSettingsFile(cfg.settingsDir, data); }
@@ -291,39 +298,30 @@ export function persistActiveProvider(settingsDir: string, profile: string, url:
   catch { /* best-effort persistence */ }
 }
 
-/** The shipped, baked-in credentials for a provider (currently OpenRouter, so the paid flagship models
- *  work without the user entering a key). Returns undefined for providers the user must configure
- *  themselves (e.g. the self-hosted FreeLLMAPI proxy). An env OPENROUTER_API_KEY overrides the key. */
+/** The shipped, baked-in credentials for a provider. Kept as a tiny compatibility shim for older callers:
+ *  no model-provider secrets ship in the client, and OpenRouter is available only via the managed server. */
 export function bakedProviderCreds(profileId: string): { url: string; key: string } | undefined {
-  // No secrets ship in the client anymore. OpenRouter is BYOK from /models: offer baked creds only
-  // when the user has exported their own OPENROUTER_API_KEY. (The shared key lives in the OB-1 server.)
-  if (profileId === "openrouter" && process.env.OPENROUTER_API_KEY) {
-    return { url: DEFAULT_OPENROUTER_URL, key: process.env.OPENROUTER_API_KEY };
-  }
+  void profileId;
   return undefined;
 }
 
 /** Every configured provider's remembered creds, keyed by profile id. Used by the /models picker to
- *  switch free⇄paid without re-prompting for a key already entered. Folds the legacy single tuple in
- *  for back-compat with settings files written before the per-provider map existed. */
+ *  switch FreeLLMAPI⇄Custom without re-prompting for a key already entered. Folds the legacy single
+ *  tuple in for back-compat with settings files written before the per-provider map existed. */
 export function savedProviderCreds(settingsDir: string): Record<string, { url: string; key: string }> {
   const s = loadPersisted(settingsDir);
   const map: Record<string, { url: string; key: string }> = { ...(s.providerCreds ?? {}) };
-  if (s.providerProfile && s.providerUrl && s.providerKey && !map[s.providerProfile]) {
+  if (s.providerProfile && s.providerUrl && s.providerKey != null && !map[s.providerProfile]) {
     map[s.providerProfile] = { url: s.providerUrl, key: s.providerKey };
   }
   return map;
 }
 
-/** Whether the active endpoint is OpenRouter — directly (openrouter.ai) or via the managed OB-1 server,
- *  which forwards the request body verbatim to OpenRouter. Those take the unified `reasoning` param. A
- *  configured provider PROFILE (FreeLLMAPI) or a direct api.openai.com endpoint is plain OpenAI-compatible
- *  and takes the legacy `reasoning_effort` instead. */
+/** Whether the active endpoint is the managed OB-1 server, which forwards model requests to OpenRouter.
+ *  That path takes the unified `reasoning` param. FreeLLMAPI and Custom API profiles are plain
+ *  OpenAI-compatible endpoints and take the legacy `reasoning_effort` instead. */
 export function isOpenRouterEndpoint(cfg: Pick<Config, "provider" | "baseUrl" | "providerProfile">): boolean {
-  if (cfg.provider !== "openai") return false;        // direct Anthropic Messages API
-  if (cfg.providerProfile) return false;              // a /models profile (FreeLLMAPI) → plain OpenAI wire
-  if (/\bapi\.openai\.com\b/i.test(cfg.baseUrl)) return false; // direct OpenAI BYOK
-  return true;                                        // managed OB-1 server (→OpenRouter) or direct openrouter.ai
+  return cfg.provider === "openai" && !cfg.providerProfile && cfg.baseUrl.startsWith(ob1ServerUrl());
 }
 
 export function loadConfig(): Config {
@@ -358,6 +356,7 @@ export function loadConfig(): Config {
   const envQualityMode = QUALITY_MODES.includes(process.env.OB1_QUALITY as QualityMode) ? process.env.OB1_QUALITY as QualityMode : undefined;
   const envCheckpoint = /^(1|true|on)$/i.test(process.env.OB1_CHECKPOINT ?? "") ? true
     : /^(0|false|off)$/i.test(process.env.OB1_CHECKPOINT ?? "") ? false : undefined;
+  const envSandbox = SANDBOXES.includes(process.env.OB1_SANDBOX as SandboxMode) ? process.env.OB1_SANDBOX as SandboxMode : undefined;
   // Migration: `adaptive` is retired as an interactive mode — it's now the off-by-default Solo
   // auto-route toggle. Collapse ANY persisted adaptive workspace to Solo; a deliberate autoRoute:true
   // is preserved independently below, so "Solo + auto-route on" reproduces the old adaptive behaviour.
@@ -378,7 +377,7 @@ export function loadConfig(): Config {
     settingsDir,
     dbPath: join(dataDir, "memory.db"),
     // Guard against a non-numeric OB1_MAX_TOKENS (e.g. "8k"): Number("8k") is NaN, and NaN flows to the
-    // Anthropic body as max_tokens (NaN ?? x === NaN), 400ing every request. Only accept a positive number.
+    // provider body as max_tokens (NaN ?? x === NaN), breaking every request. Only accept a positive number.
     maxTokens: maxTokensFromEnv(),
     mode,
     planMode: saved.planMode ?? false,
@@ -391,7 +390,7 @@ export function loadConfig(): Config {
     skillLearn: envSkillLearn ?? saved.skillLearn ?? false,
     qualityMode: envQualityMode ?? (saved.qualityMode && QUALITY_MODES.includes(saved.qualityMode) ? saved.qualityMode : "normal"),
     permissionMode: envPerm ?? (saved.permissionMode === "ask" ? "ask" : "autopilot"),
-    sandbox: (process.env.OB1_SANDBOX as SandboxMode | undefined) ?? (saved.sandbox && SANDBOXES.includes(saved.sandbox) ? saved.sandbox : "off"),
+    sandbox: envSandbox ?? (saved.sandbox && SANDBOXES.includes(saved.sandbox) ? saved.sandbox : "off"),
     checkpoint: envCheckpoint ?? saved.checkpoint ?? true,
     // Default: route web_search through the managed OB-1 server (Bearer-authenticated; the paid-tier
     // gate lives server-side). Set OB1_SEARXNG_URL to hit a SearXNG instance directly (X-API-Key auth).

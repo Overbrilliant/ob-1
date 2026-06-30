@@ -35,9 +35,9 @@ f = strip(lastFrame() ?? "");
 check("mode + phase switch reflected", f.includes("council") && f.includes("plan"));
 
 // Subscription footer: a paid plan shows a monthly credits-REMAINING bar (drains as you spend) and HIDES
-// the $ cost (subscribers pay a flat plan); free/BYOK keeps the $ cost and shows no credits bar. Reuse
+// the $ cost (subscribers pay a flat plan); free/custom keeps the $ cost and shows no credits bar. Reuse
 // the existing render (the ctrl has tokens, so a $ cost is showing) — avoids a second concurrent Ink mount.
-check("free/BYOK footer shows the $ cost and no credits bar", f.includes("$") && !f.includes("% left"));
+check("free/custom footer shows the $ cost and no credits bar", f.includes("$") && !f.includes("% left"));
 ctrl.setSubscription(true, 25, 100); // 25 of 100 monthly credits used → 75% remaining
 await tick();
 f = strip(lastFrame() ?? "");

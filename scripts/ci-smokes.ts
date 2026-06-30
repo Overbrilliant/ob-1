@@ -37,6 +37,7 @@ const SMOKES = [
   "lsp-smoke.ts",             // LSP diagnostics: message framing + client flow vs a mock server + fallback
   "parity-harness-smoke.ts",  // mock-provider parity: scripted scenarios drive runTurn + assert wire behavior
   "router-smoke.ts",          // adaptive router (Solo-first / escalate)
+  "goal-router-smoke.ts",     // /goal honors Solo's auto-route escalation
   "fusion-smoke.ts",          // fusion best-of-N + synthesizer + verify-revert
   "fusion-worktree-smoke.ts", // fusion real git-worktree test scoring
   "council-smoke.ts",         // council author ↔ reviewer revise rounds → finalizer

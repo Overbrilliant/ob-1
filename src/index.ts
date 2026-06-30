@@ -47,7 +47,7 @@ import { loadTasks } from "./eval/tasks.ts";
 import { buildRunners, ALL_MODES, SELECTABLE_MODES } from "./eval/runners.ts";
 import { runEval, computeMatched, computeCapability } from "./eval/harness.ts";
 import { renderReport, renderCapability } from "./eval/report.ts";
-import { runTurn, describe as describeTool, systemPrompt } from "./agent/loop.ts";
+import { runTurn, describe as describeTool, systemPrompt, type HeavyMode } from "./agent/loop.ts";
 import { runVerification, shellExec } from "./agent/verify.ts";
 import { latestQualityLedger, formatQualityLedger } from "./agent/task-quality.ts";
 import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
@@ -119,7 +119,7 @@ function modelReachable(): boolean {
 
 // Auth guard: when we rely on the managed OB-1 server but the saved token is missing or REJECTED
 // (expired, or the account was reset), (re)authenticate before doing anything — otherwise the first
-// request dies with a confusing 401. Interactive TTY only; BYOK / Free-LLM / OB1_TOKEN users skip it.
+// request dies with a confusing 401. Interactive TTY only; FreeLLMAPI / Custom / OB1_TOKEN users skip it.
 if (stdin.isTTY && !process.env.OB1_TOKEN) {
   const onManaged = !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
   if (onManaged) {
@@ -297,11 +297,12 @@ async function runGoalLoop(goal: string): Promise<void> {
       : `Continue toward the goal: ${goal}\n[Goal mode] End with GOAL_MET when fully done, otherwise GOAL_CONTINUE.`;
     const startLen = history.length;
     const outcome = await runTurn(prompt, history, turnDeps());
-    rememberTurn(prompt, startLen, "goal");
-    persistSession();
     if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
-    void outcome; // a heavy mode may have run inside; still counts as one iteration
-    const txt = lastAssistantText();
+    const escalatedText = outcome?.escalate ? await runEscalatedTurn(prompt, outcome.escalate) : undefined;
+    if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
+    rememberTurn(prompt, startLen, outcome?.escalate ? `goal→${outcome.escalate.mode}` : "goal");
+    persistSession();
+    const txt = escalatedText ?? lastAssistantText();
     if (/\bGOAL_MET\b/.test(txt)) { console.log(c.green(`  ✓ goal achieved after ${i + 1} iteration(s)`)); activeGoal = null; return; }
     console.log(c.dim(`  ↻ goal iteration ${i + 1}/${maxIters} — not yet met, continuing…`));
   }
@@ -397,6 +398,14 @@ async function applySolution(task: string, solution: string): Promise<void> {
     run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canEscalate: false, canSpawn: false, canSpawnWrite: false })); }, // applying a mode's result must not re-escalate or re-spawn
     log: console.log, note: c.dim,
   });
+}
+
+async function runEscalatedTurn(task: string, esc: { mode: HeavyMode; reason: string }): Promise<string | undefined> {
+  const { mode, reason } = esc;
+  console.log(c.dim(`  ↗ Solo routed this to ${modeColor(mode)(mode)} — ${reason}`));
+  if (mode === "fusion") return await fusionTurn(task);
+  if (mode === "council") return await councilTurn(task);
+  return await personasTurn(task);
 }
 
 let activeAbort: AbortController | null = null; // the current turn's cancel handle (ESC); null when idle
@@ -624,7 +633,7 @@ async function fetchPlan(timeoutMs = 4000): Promise<PlanStatus | null> {
 const isSubscribed = (p: PlanStatus | null): boolean => !!p && p.plan !== "free";
 
 /** Push the signed-in user's MONTHLY credit usage into the footer (rendered as a bar like the context
- *  meter) when on a paid managed plan — and clear it (so the $ cost shows instead) on free/BYOK. Best-
+ *  meter) when on a paid managed plan — and clear it (so the $ cost shows instead) on free/custom. Best-
  *  effort + bounded; called at TUI start and after each model turn so the bar tracks credits as spent. */
 async function refreshSubscriptionFooter(): Promise<void> {
   if (!ctrl) return;
@@ -783,9 +792,8 @@ async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolea
   return true;
 }
 
-/** Make `prof` the active provider, switching from another if needed. Uses, in order: creds remembered
- *  from a previous setup, then the shipped baked-in key (OpenRouter — so paid models need no setup).
- *  Only a provider with neither (the self-hosted FreeLLMAPI proxy) falls through to the setup form.
+/** Make `prof` the active provider, switching from another if needed. Uses creds remembered from a
+ *  previous setup. Providers with no saved creds fall through to the setup form.
  *  Returns false if that setup was cancelled. The model is left at the profile's default after a switch
  *  — the caller's picker sets the real one next. */
 async function ensureProvider(prof: ProviderProfile): Promise<boolean> {
@@ -1576,7 +1584,7 @@ async function handleCommand(line: string): Promise<boolean> {
         console.log(c.dim("  set one with /model <id>"));
         break;
       }
-      console.log(c.dim(`  output length is governed by the model${cfg.maxTokens ? ` (capped at ${cfg.maxTokens} by OB1_MAX_TOKENS)` : " (no cap on OpenAI-compatible; registry value on Anthropic)"}`));
+      console.log(c.dim(`  output length is governed by the model${cfg.maxTokens ? ` (capped at ${cfg.maxTokens} by OB1_MAX_TOKENS)` : " (no cap sent by default)"}`));
       console.log(`  ${c.bold("current")}: ${cfg.model}  ${c.dim(describeModel(cfg.model))}`);
       for (const m of MODELS) console.log(`    ${c.cyan(m.label.padEnd(18))} ${c.dim(`${(m.contextWindow / 1000).toFixed(0)}k ctx · ${(m.maxOutput / 1000).toFixed(0)}k out${m.inPrice ? ` · $${m.inPrice}/$${m.outPrice} per 1M` : ""}`)}${m.notes === "default" ? c.green("  ← default") : ""}`);
       break;
@@ -1760,8 +1768,8 @@ async function handleCommand(line: string): Promise<boolean> {
   return false;
 }
 
-async function fusionTurn(task: string): Promise<void> {
-  if (!modelReachable()) { console.log(c.yellow("  fusion needs a model provider (a key, or a configured endpoint via /models)")); return; }
+async function fusionTurn(task: string): Promise<string | undefined> {
+  if (!modelReachable()) { console.log(c.yellow("  fusion needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
   const models = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
   const n = process.env.OB1_FUSION_N ? envInt("OB1_FUSION_N", 3) : undefined;
   const check = process.env.OB1_FUSION_CHECK;
@@ -1775,7 +1783,7 @@ async function fusionTurn(task: string): Promise<void> {
   const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy each";
   console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) + auto-score → synthesizer merges the best parts${models?.length ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}${worktree ? ` + worktree real-test (${testCmd ?? "bun test"})` : ""}…`));
   const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, mkTools, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return; // ESC: don't render a partial result or apply it
+  if (activeAbort?.signal.aborted) return undefined; // ESC: don't render a partial result or apply it
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
   for (const cnd of r.candidates) {
     const v = !cnd.score?.checked ? c.gray("unscored") : cnd.score.ok ? c.green("PASS") : c.red("FAIL");
@@ -1785,10 +1793,11 @@ async function fusionTurn(task: string): Promise<void> {
   console.log("\n" + c.bold(modeColor("fusion")("Fusion result:")) + "\n" + r.synthesis + "\n");
   console.log(c.dim(`  [${r.candidates.length} candidates + synthesizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
   await applySolution(task, r.synthesis);
+  return r.synthesis;
 }
 
-async function councilTurn(task: string): Promise<void> {
-  if (!modelReachable()) { console.log(c.yellow("  council needs a model provider (a key, or a configured endpoint via /models)")); return; }
+async function councilTurn(task: string): Promise<string | undefined> {
+  if (!modelReachable()) { console.log(c.yellow("  council needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
   const models = process.env.OB1_COUNCIL_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
   const check = process.env.OB1_COUNCIL_CHECK;
   const arbiterModel = process.env.OB1_COUNCIL_ARBITER_MODEL;
@@ -1800,7 +1809,7 @@ async function councilTurn(task: string): Promise<void> {
   console.log(c.dim(`  budget (declared up front): up to ~${1 + maxR * 2 + 1} model calls (author + ${maxR}×(review + revise) + finalizer), fewer if it converges early`));
   console.log(c.dim(`  Council: author ↔ reviewer${twoModels ? ` (2 models)` : ""}${check ? " · objective-grounded" : ""} over up to ${maxR} round(s) · ${cfg.planMode ? "read-only (plan mode)" : "editing the workspace directly" + (cfg.permissionMode === "autopilot" ? "" : ", each change gated")}…`));
   const r = await runCouncil({ task, cfg, tools, rounds: maxR, models, check, arbiterModel, approve: workerApprove, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return; // ESC
+  if (activeAbort?.signal.aborted) return undefined; // ESC
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
   for (const rd of r.rounds) {
     const tag = rd.blocking ? c.red("BLOCK") : c.green("OK");
@@ -1813,16 +1822,17 @@ async function councilTurn(task: string): Promise<void> {
   if (cfg.planMode) console.log(c.dim("  (plan mode — council investigated read-only; nothing written. /act to let it edit the workspace.)"));
   else if (r.accepted) console.log(c.dim("  council edited the workspace directly; changes are in place — review and verify them."));
   else console.log(c.yellow("  ⚠ council returned REVISE (not ready to ship). Any edits it made are already in the workspace — review them and re-run or refine the task."));
+  return r.final;
 }
 
-async function personasTurn(task: string): Promise<void> {
-  if (!modelReachable()) { console.log(c.yellow("  personas needs a model provider (a key, or a configured endpoint via /models)")); return; }
+async function personasTurn(task: string): Promise<string | undefined> {
+  if (!modelReachable()) { console.log(c.yellow("  personas needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
   const rounds = envInt("OB1_PERSONAS_ROUNDS", 2);
   const max = envInt("OB1_PERSONAS_MAX", 6);
   console.log(c.dim(`  budget (declared up front): up to ~${1 + max * rounds + 1} model calls (former + ≤${max} personas × ${rounds} dialogue rounds + facilitator), or 1 if it collapses to Solo`));
   console.log(c.dim("  Personas: casting the panel for your goal…"));
   const r = await runPersonas({ task, cfg, tools, rounds, max, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return; // ESC
+  if (activeAbort?.signal.aborted) return undefined; // ESC
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
   const names = r.personas.map((p) => (p.title ? `${p.name} (${p.title})` : p.name)).join(", ");
   if (r.collapsed) console.log(c.dim(`  panel collapsed to a single solver: ${c.bold(names)} (goal didn't warrant a panel)`));
@@ -1830,6 +1840,7 @@ async function personasTurn(task: string): Promise<void> {
   console.log("\n" + c.bold(modeColor("personas")("Personas result:")) + "\n" + r.final + "\n");
   console.log(c.dim(`  [${r.collapsed ? "collapsed→solo" : `${r.personas.length} personas + facilitator`} · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
   await applySolution(task, r.final);
+  return r.final;
 }
 
 async function evalTurn(requested: string[]): Promise<void> {
@@ -1944,11 +1955,7 @@ async function processLine(line: string): Promise<boolean> {
   // call; only a genuinely hard turn pays for the heavier mode. If it escalated, forward the whole task.
   const outcome = await runTurn(turnText, history, turnDeps());
   if (outcome?.escalate) {
-    const { mode, reason } = outcome.escalate;
-    console.log(c.dim(`  ↗ Solo routed this to ${modeColor(mode)(mode)} — ${reason}`));
-    if (mode === "fusion") await fusionTurn(turnText);
-    else if (mode === "council") await councilTurn(turnText);
-    else await personasTurn(turnText);
+    await runEscalatedTurn(turnText, outcome.escalate);
   }
   rememberTurn(t, startLen, outcome?.escalate ? `solo→${outcome.escalate.mode}` : "solo");
   persistSession(); // write the conversation so /resume can reopen it
@@ -2078,7 +2085,7 @@ async function runTui(startup: string[]): Promise<void> {
       void import("./cli/login.ts").then(({ openBrowser }) => openBrowser(url)).catch(() => {});
     }
   };
-  // Seed the footer's monthly-usage bar (paid plans) / $-cost (free/BYOK). Fire-and-forget — never block
+  // Seed the footer's monthly-usage bar (paid plans) / $-cost (free/custom). Fire-and-forget — never block
   // the TUI on a network call; the bar populates a moment after boot and refreshes after each turn.
   void refreshSubscriptionFooter();
   const origLog = console.log, origErr = console.error;
@@ -2194,13 +2201,11 @@ startup.push(banner());
         : plan.plan === "free" ? "Subscription — no active plan (run /upgrade)"
         : `${plan.plan.charAt(0).toUpperCase() + plan.plan.slice(1)} plan`;
     }
-  } else {
-    // BYOK / direct provider (your own key) — name it by host, never the misleading wire "openai".
+  } else if (cfg.providerProfile === "custom") {
     const host = (() => { try { return new URL(cfg.baseUrl).host; } catch { return ""; } })();
-    const name = host.includes("openrouter") ? "OpenRouter"
-      : host.includes("anthropic") || cfg.provider === "anthropic" ? "Anthropic"
-      : host.includes("openai.com") ? "OpenAI" : "Direct API";
-    accessLine = `${name} · your key`;
+    accessLine = `Custom endpoint${host ? ` · ${host}` : ""}`;
+  } else {
+    accessLine = "Configured model endpoint";
   }
   startup.push(c.dim(`  ${accessLine}`));
 }
@@ -2276,7 +2281,7 @@ deferredMcp = new Map(mcp.tools.map((t) => [t.def.name, t]));
 if (deferredMcp.size) tools.set("load_mcp_tool", makeMcpLoaderTool(tools, deferredMcp));
 for (const line of mcp.summary) startup.push(c.dim("  " + line));
 if (deferredMcp.size) startup.push(c.dim(`  ${deferredMcp.size} MCP tool(s) deferred — loaded on demand via load_mcp_tool`));
-if (!modelReachable()) startup.push(c.yellow("  ⚠ not signed in — model disabled; memory + /commands still work. Run `ob1 login` to sign in to the managed server (free models), or /models to connect another provider, or export a key."));
+if (!modelReachable()) startup.push(c.yellow("  ⚠ not signed in — model disabled; memory + /commands still work. Run `ob1 login` to sign in to the managed server, or /models to connect FreeLLMAPI or Custom API."));
 // Surface the sandbox state at startup so env-configured (OB1_SANDBOX) sessions see a LOUD warning
 // when the requested sandbox can't be enforced — not only when /sandbox is run interactively.
 if (cfg.sandbox !== "off") {

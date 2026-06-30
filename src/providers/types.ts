@@ -1,6 +1,6 @@
-// Canonical internal LLM types (Anthropic-style content blocks). Each provider translates
-// to/from its own wire format behind the gateway, so the agent loop is provider-agnostic.
-export type Provider = "anthropic" | "openai";
+// Canonical internal LLM types. The runtime model route is OpenAI-compatible only:
+// managed OB-1 server (OpenRouter server-side), FreeLLMAPI, or Custom API.
+export type Provider = "openai";
 
 export interface ToolDef {
   name: string;
@@ -68,8 +68,7 @@ export interface CallOpts {
   apiKey: string;
   baseUrl: string;
   model: string;
-  /** Output-token cap. UNDEFINED ⇒ governed by the model: omitted entirely on the OpenAI-compatible
-   *  path; filled from the model registry on Anthropic (where the API requires it). */
+  /** Output-token cap. UNDEFINED ⇒ governed by the model and omitted on the OpenAI-compatible path. */
   maxTokens?: number;
   system: SystemInput;
   messages: Message[];
@@ -78,9 +77,9 @@ export interface CallOpts {
    *  `reasoning: { effort }`; on a plain OpenAI-compatible endpoint as the legacy top-level
    *  `reasoning_effort`. Both map low/medium/high to a thinking-token budget. */
   effort?: "low" | "medium" | "high";
-  /** True when the endpoint is OpenRouter — directly (openrouter.ai) or via the managed OB-1 proxy,
-   *  which forwards the body verbatim. Selects the unified `reasoning` param. False/undefined for plain
-   *  OpenAI-compatible endpoints (FreeLLMAPI, api.openai.com) → legacy `reasoning_effort`. */
+  /** True when the endpoint is the managed OB-1 server route to OpenRouter, which forwards the body
+   *  verbatim. Selects the unified `reasoning` param. False/undefined for plain OpenAI-compatible
+   *  endpoints (FreeLLMAPI, Custom API) → legacy `reasoning_effort`. */
   openrouter?: boolean;
   /** Live-streaming callback: invoked with each text delta as it arrives. Optional — workers
    *  omit it (just accumulate); the interactive loop passes one to print tokens live. */

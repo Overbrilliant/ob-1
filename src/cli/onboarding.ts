@@ -53,11 +53,11 @@ export function markOnboarded(dir = globalSettingsDir()): void {
   try { mkdirSync(dir, { recursive: true }); writeFileSync(markerPath(dir), new Date().toISOString()); } catch { /* best-effort */ }
 }
 
-/** Real-state gate used at boot. An explicit provider/token via ENV is a deliberate opt-out (BYOK
- *  power users — and test harnesses that pre-set a key): don't onboard. A saved provider PROFILE does
- *  NOT suppress it, so "logged out → ask to log in or sign up" still fires for normal users. */
+/** Real-state gate used at boot. OB1_TOKEN is a deliberate opt-out for signed-in automation. Direct
+ *  provider keys are not model routes; Custom API should be configured through /models. A saved provider
+ *  PROFILE does NOT suppress onboarding, so "logged out → ask to log in or sign up" still fires. */
 export function shouldOnboard(): boolean {
-  if (process.env.OB1_TOKEN || process.env.OPENROUTER_API_KEY || process.env.ANTHROPIC_API_KEY || (process.env.OPENAI_API_KEY && process.env.OB1_BASE_URL)) return false;
+  if (process.env.OB1_TOKEN) return false;
   return decideOnboard({ tty: !!stdin.isTTY, onboarded: isOnboarded(), signedIn: !!loadAuthToken() });
 }
 
@@ -89,7 +89,7 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
     // 2) Choose how to run models (arrow selector)
     const p = await arrowSelect("How do you want to run models?", [
       "Subscription   — frontier models (Opus, Sonnet, GPT, Gemini), monthly or yearly, no rate limits",
-      "Free LLM API   — free, self-hosted, managed by OB-1, BYOK",
+      "Free LLM API   — free, self-hosted, managed by OB-1, add provider keys in the dashboard",
     ]);
     if (p === 0) await runSubscriptionSetup(out);
     else if (p === 1) await runFreeLLMSetup(out);

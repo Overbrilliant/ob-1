@@ -47,9 +47,10 @@ if not bun:
     sys.exit(0)
 
 tmp = tempfile.mkdtemp(prefix="ob1-tui-pty-")
-# Clean, minimal env, cwd=tmp so Bun loads no .env and finds no .ob1/mcp.json. A DUMMY OpenRouter key
-# configures a provider (never used — we submit no model task) so /models opens the static model
-# PICKER rather than the provider-setup tab (which is what /models does when nothing is configured).
+# Clean, minimal env, cwd=tmp so Bun loads no .env and finds no .ob1/mcp.json. A DUMMY OB-1 token
+# configures the managed provider route (never used — we submit no model task) so /models opens the
+# static model PICKER rather than the provider-setup tab (which is what /models does when nothing is
+# configured).
 # OB1_MODEL pins the highlight to the FIRST registry entry so one ↓ lands on a real model, not the
 # appended "Connect FreeLLMAPI" row. NO inherited CI flag.
 env = {
@@ -59,7 +60,8 @@ env = {
     "COLORTERM": "truecolor",  # so hex colours (the grey user-message bar) pass through truecolor, not downsampled
     "LANG": os.environ.get("LANG", "en_US.UTF-8"),
     "OB1_SANDBOX": "off",
-    "OPENROUTER_API_KEY": "dummy-tui-pty-test-key",
+    "OB1_TOKEN": "dummy-tui-pty-test-token",
+    "OB1_SERVER": "http://127.0.0.1:1",
     "OB1_MODEL": "anthropic/claude-opus-4.8",
 }
 

@@ -6,17 +6,16 @@
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveSettings, hasPersistedSettings } from "../src/config.ts";
+import { loadConfig, saveSettings, hasPersistedSettings, ob1ServerUrl } from "../src/config.ts";
 
 let fail = false;
 const check = (n: string, ok: boolean, extra = "") => { console.log(`${ok ? "✓" : "✗"} ${n}${extra ? ` — ${extra}` : ""}`); if (!ok) fail = true; };
 
 const tmp = mkdtempSync(join(tmpdir(), "ob1-settings-"));
 const origCwd = process.cwd();
-// Force OpenRouter provider + clear env that would override persisted values, so the test is hermetic.
 const savedEnv = { ...process.env };
-process.env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "test-key";
-delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_QUALITY;
+delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL; delete process.env.OB1_PROVIDER; delete process.env.OB1_TOKEN; delete process.env.OB1_SERVER;
+delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_REPO_MAP; delete process.env.OB1_MEM_EVOLVE; delete process.env.OB1_MEM_REFLECT; delete process.env.OB1_MEM_AUTOLINK; delete process.env.OB1_SKILL_LEARN; delete process.env.OB1_QUALITY; delete process.env.OB1_CHECKPOINT;
 
 try {
   process.chdir(tmp);
@@ -68,10 +67,38 @@ try {
   check("env OB1_QUALITY overrides persisted", loadConfig().qualityMode === "off");
   delete process.env.OB1_SANDBOX; delete process.env.OB1_MODEL; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_QUALITY;
 
-  // 5) a saved model from a DIFFERENT provider is not applied (guard against cross-provider mismatch)
+  // 4b) env overrides must NOT become permanent just because a slash command saved settings.
+  process.env.OB1_MODEL = "env-only-model";
+  process.env.OB1_SANDBOX = "workspace-write";
+  process.env.OB1_AUTO_ROUTE = "off";
+  const envOnly = loadConfig();
+  check("env-only model/sandbox/autoroute apply at runtime", envOnly.model === "env-only-model" && envOnly.sandbox === "workspace-write" && envOnly.autoRoute === false, `${envOnly.model}/${envOnly.sandbox}/${envOnly.autoRoute}`);
+  saveSettings(envOnly);
+  delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_AUTO_ROUTE;
+  const afterEnvOnly = loadConfig();
+  check("env-only model/sandbox/autoroute were not persisted", afterEnvOnly.model === "anthropic/claude-opus-4.8" && afterEnvOnly.sandbox === "read-only" && afterEnvOnly.autoRoute === true, `${afterEnvOnly.model}/${afterEnvOnly.sandbox}/${afterEnvOnly.autoRoute}`);
+
+  process.env.OB1_SANDBOX = "yolo";
+  check("invalid OB1_SANDBOX env falls back to persisted/default", loadConfig().sandbox === "read-only", loadConfig().sandbox);
+  delete process.env.OB1_SANDBOX;
+
+  process.env.OPENROUTER_API_KEY = "or-test-key";
+  process.env.OPENAI_API_KEY = "openai-test-key";
+  process.env.ANTHROPIC_API_KEY = "anthropic-test-key";
+  process.env.OB1_BASE_URL = "https://direct.example/v1";
+  const oldSettingsDir = process.env.OB1_SETTINGS_DIR;
+  process.env.OB1_SETTINGS_DIR = join(tmp, "direct-env-ignored-settings");
+  const directIgnored = loadConfig();
+  check("direct provider env keys are ignored for model routing", directIgnored.apiKey === undefined && directIgnored.baseUrl === `${ob1ServerUrl()}/v1` && directIgnored.provider === "openai" && directIgnored.providerProfile === undefined, `${directIgnored.provider}/${directIgnored.baseUrl}/${directIgnored.apiKey}/${directIgnored.providerProfile}`);
+  delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL;
+  process.env.OB1_SETTINGS_DIR = oldSettingsDir;
+
+  // 5) a direct Anthropic provider config is not persisted as a model route.
   saveSettings({ ...base, provider: "anthropic", model: "claude-some-direct-id" } as any);
   const crossProvider = loadConfig();
-  check("model from a different provider is ignored", crossProvider.model !== "claude-some-direct-id", crossProvider.model);
+  const afterDirectAnthropic = JSON.parse(readFileSync(join(tmp, ".ob1", "settings.json"), "utf8"));
+  check("direct Anthropic provider is not persisted", afterDirectAnthropic.provider === "openai", afterDirectAnthropic.provider);
+  check("model from direct Anthropic provider is ignored", crossProvider.model !== "claude-some-direct-id", crossProvider.model);
 
   // 6) corrupt settings file → safe fallback to defaults
   mkdirSync(join(tmp, ".ob1"), { recursive: true });

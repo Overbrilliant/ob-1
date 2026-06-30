@@ -3,7 +3,7 @@
 //   - normalizeBaseUrl (forgiving paste handling: scheme, trailing slash, endpoint strip, /v1 append)
 //   - fetchModels never throws on an unreachable host (returns a clean ok:false result)
 //   - config persistence: a /models-configured profile round-trips through the settings file, with
-//     env keys taking precedence and an env-override session NOT wiping the saved provider creds
+//     direct provider env keys ignored for model routing
 // Usage: bun run scripts/freellm-smoke.ts
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,7 +67,7 @@ try {
   process.env.OB1_SETTINGS_DIR = join(tmp, ".ob1"); // keep settings hermetic in the temp workspace (not real ~/.ob1)
 
   // ── no secrets in the client: models route through the managed OB-1 server, not a baked key ──
-  check("OpenRouter ships NO baked key (BYOK; shared key lives server-side)", bakedProviderCreds("openrouter") === undefined);
+  check("OpenRouter ships NO baked key (shared key lives server-side only)", bakedProviderCreds("openrouter") === undefined);
   check("FreeLLMAPI has no baked key (user-configured proxy)", bakedProviderCreds("freellmapi") === undefined);
   // a clean workspace (no env key, not signed in) → routes to the managed OB-1 server with NO client
   // key (the app then prompts `ob1 login`); the real OpenRouter key is injected server-side.
@@ -90,16 +90,18 @@ try {
   check("persisted profile → providerProfile flag set", cfg.providerProfile === "freellmapi", cfg.providerProfile);
   check("persisted profile → model restored (auto)", cfg.model === "auto", cfg.model);
 
-  // an explicit env key takes precedence over the persisted profile
+  // direct provider env keys are not model routes; the saved profile remains active
   process.env.OPENROUTER_API_KEY = "or-key";
+  process.env.OPENAI_API_KEY = "oa-key";
+  process.env.ANTHROPIC_API_KEY = "anthropic-key";
+  process.env.OB1_BASE_URL = "https://direct.example/v1";
   const envCfg = loadConfig();
-  check("env OPENROUTER_API_KEY overrides the persisted profile", envCfg.baseUrl.includes("openrouter") && envCfg.apiKey === "or-key", envCfg.baseUrl);
-  check("env-override session is not flagged as a profile", envCfg.providerProfile === undefined);
-  // saving from an env-override session must NOT wipe the configured provider creds
+  check("direct provider env keys do not override the persisted profile", envCfg.providerProfile === "freellmapi" && envCfg.baseUrl === "https://freellm.example.sslip.io/v1" && envCfg.apiKey === "freellmapi-secret", `${envCfg.providerProfile}/${envCfg.baseUrl}/${envCfg.apiKey}`);
+  // saving from that session must not rewrite the active profile to any direct provider URL/key
   saveSettings(envCfg);
   const afterSave = JSON.parse(readFileSync(join(tmp, ".ob1", "settings.json"), "utf8"));
-  check("saveSettings preserves profile creds across an env-override session", afterSave.providerProfile === "freellmapi" && afterSave.providerKey === "freellmapi-secret");
-  delete process.env.OPENROUTER_API_KEY;
+  check("saveSettings keeps the active profile creds", afterSave.providerProfile === "freellmapi" && afterSave.providerKey === "freellmapi-secret" && afterSave.providerUrl === "https://freellm.example.sslip.io/v1");
+  delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL;
 
   // the profile still loads after that save (creds intact)
   const reCfg = loadConfig();
@@ -112,22 +114,22 @@ try {
   const written = JSON.parse(readFileSync(join(tmp, ".ob1", "settings.json"), "utf8"));
   check("saveSettings persists updated profile creds (URL/key/model)", written.providerUrl === "http://localhost:3001/v1" && written.providerKey === "freellmapi-local" && written.model === "kimi-k2.6");
 
-  // ── per-provider credential memory (switch free⇄paid without re-entry) ──
-  // Start on FreeLLMAPI (just saved above), then SWITCH the active provider to OpenRouter and save.
+  // ── per-provider credential memory (switch FreeLLMAPI⇄Custom without re-entry) ──
+  // Start on FreeLLMAPI (just saved above), then SWITCH the active provider to Custom API and save.
   const sw = loadConfig();
   check("active provider is FreeLLMAPI before switching", sw.providerProfile === "freellmapi", sw.providerProfile);
-  sw.provider = "openai"; sw.providerProfile = "openrouter"; sw.baseUrl = "https://openrouter.ai/api/v1"; sw.apiKey = "sk-or-paid"; sw.model = "anthropic/claude-opus-4.8";
+  sw.provider = "openai"; sw.providerProfile = "custom"; sw.baseUrl = "http://localhost:11434/v1"; sw.apiKey = undefined; sw.model = "llama3.1";
   saveSettings(sw);
   const both = savedProviderCreds(sw.settingsDir);
-  check("both providers remembered after switching to paid", both.freellmapi?.key === "freellmapi-local" && both.openrouter?.key === "sk-or-paid", JSON.stringify(Object.keys(both)));
-  check("active provider tuple now names OpenRouter", JSON.parse(readFileSync(join(tmp, ".ob1", "settings.json"), "utf8")).providerProfile === "openrouter");
-  // reload → OpenRouter is the active provider with its paid model restored
-  const paidCfg = loadConfig();
-  check("paid provider restored on reload", paidCfg.providerProfile === "openrouter" && paidCfg.apiKey === "sk-or-paid", paidCfg.providerProfile);
-  check("paid flagship model restored on reload", paidCfg.model === "anthropic/claude-opus-4.8", paidCfg.model);
+  check("both providers remembered after switching to Custom API", both.freellmapi?.key === "freellmapi-local" && both.custom?.url === "http://localhost:11434/v1" && both.custom?.key === "", JSON.stringify(Object.keys(both)));
+  check("active provider tuple now names Custom API", JSON.parse(readFileSync(join(tmp, ".ob1", "settings.json"), "utf8")).providerProfile === "custom");
+  // reload → Custom API is the active provider with its typed model restored
+  const customCfg = loadConfig();
+  check("custom provider restored on reload", customCfg.providerProfile === "custom" && customCfg.apiKey === undefined && customCfg.baseUrl === "http://localhost:11434/v1", `${customCfg.providerProfile}/${customCfg.baseUrl}/${customCfg.apiKey}`);
+  check("custom model restored on reload", customCfg.model === "llama3.1", customCfg.model);
   // switching BACK to FreeLLMAPI must still find the remembered free key (no re-entry needed)
-  const backCreds = savedProviderCreds(paidCfg.settingsDir);
-  check("free key still remembered while on paid (switch back is free)", backCreds.freellmapi?.key === "freellmapi-local" && backCreds.freellmapi?.url === "http://localhost:3001/v1");
+  const backCreds = savedProviderCreds(customCfg.settingsDir);
+  check("free key still remembered while on Custom API", backCreds.freellmapi?.key === "freellmapi-local" && backCreds.freellmapi?.url === "http://localhost:3001/v1");
 } finally {
   process.chdir(origCwd);
   rmSync(tmp, { recursive: true, force: true });
@@ -136,5 +138,5 @@ try {
 }
 
 if (fail) { console.error("\n✗ freellm smoke FAILED"); process.exit(1); }
-console.log("\n✓ freellm smoke passed (FreeLLMAPI sole profile · no OpenRouter surfaced · managed-server default · url normalization · resilient probe · config round-trip + env precedence · per-provider cred memory free⇄paid)");
+console.log("\n✓ freellm smoke passed (FreeLLMAPI + Custom profiles · no OpenRouter surfaced · managed-server default · url normalization · resilient probe · config round-trip + direct env ignored · per-provider cred memory)");
 process.exit(0);
