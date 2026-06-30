@@ -1,10 +1,9 @@
-// Deterministic test (no API key). Verifies OpenAI message translation AND model-governed token caps:
+// Deterministic test (no API key). Verifies the active OpenAI-compatible model route:
 //   - OpenAI-compatible OMITS max_tokens when unset (the model governs length)
-//   - the Anthropic request formatter still sets max_tokens for its API shape
+//   - OpenRouter cache/reasoning/image behavior is represented in OpenAI-format payloads
 // Usage: bun run scripts/provider-smoke.ts
 import { toOpenAIMessages, openAIBody, extractDelta, callOpenAI } from "../src/providers/openai.ts";
 import { streamSSE } from "../src/providers/http.ts";
-import { anthropicBody, toAnthropicMessages } from "../src/providers/anthropic.ts";
 import { maxOutputFor, describeModel, DEFAULT_MAX_OUTPUT, isRouterModel, supportsEffort, modelReasoning, reasoningVisible, modelSupportsVision, visionEnabled } from "../src/providers/models.ts";
 import type { Message, CallOpts } from "../src/providers/types.ts";
 
@@ -47,49 +46,6 @@ const base: CallOpts = { provider: "openai", apiKey: "x", baseUrl: "http://x", m
 const uncapped = openAIBody(base);
 check("openai OMITS max_tokens when unset (model governs)", !("max_tokens" in uncapped));
 check("openai includes max_tokens only when explicitly set", openAIBody({ ...base, maxTokens: 5000 }).max_tokens === 5000);
-
-const anth = anthropicBody({ ...base, model: "claude-sonnet-4-6" });
-check("anthropic ALWAYS sets max_tokens (API requires it)", typeof anth.max_tokens === "number" && (anth.max_tokens as number) > 4096);
-check("anthropic uses explicit cap when given", anthropicBody({ ...base, model: "claude-sonnet-4-6", maxTokens: 1234 }).max_tokens === 1234);
-
-// --- prompt caching: cache_control breakpoints on the stable prefix (system + last tool) ---
-const cached = anthropicBody({ ...base, model: "claude-sonnet-4-6",
-  tools: [{ name: "a", description: "", input_schema: {} }, { name: "b", description: "", input_schema: {} }] });
-check("anthropic: system carries a cache_control breakpoint", Array.isArray(cached.system) && (cached.system as any)[0].cache_control?.type === "ephemeral");
-check("anthropic: LAST tool cached, earlier tools not", Array.isArray(cached.tools) && (cached.tools as any).at(-1).cache_control?.type === "ephemeral" && (cached.tools as any)[0].cache_control === undefined);
-
-// --- prompt caching: split system (stable cached + volatile uncached) ---
-const split = anthropicBody({ ...base, model: "claude-sonnet-4-6",
-  system: [{ text: "STABLE INSTRUCTIONS", cache: true }, { text: "volatile date + memory" }] });
-check("anthropic: stable system block is cached, volatile tail is NOT", (() => {
-  const s = split.system as any[];
-  return s.length === 2 && s[0].text === "STABLE INSTRUCTIONS" && s[0].cache_control?.type === "ephemeral" && s[1].cache_control === undefined;
-})());
-check("anthropic: empty system blocks are dropped (no stray breakpoint)", (() => {
-  const s = anthropicBody({ ...base, model: "claude-sonnet-4-6", system: [{ text: "x", cache: true }, { text: "   " }] }).system as any[];
-  return s.length === 1;
-})());
-
-// --- prompt caching: conversation breakpoint on the LAST message (makes each step a cache hit) ---
-const convo = anthropicBody({ ...base, model: "claude-sonnet-4-6", messages: [
-  { role: "user", content: "first" },
-  { role: "assistant", content: [{ type: "text", text: "ok" }, { type: "tool_use", id: "t1", name: "read_file", input: {} }] },
-  { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "file body" }] },
-] });
-check("anthropic: cache_control sits on the LAST block of the LAST message", (() => {
-  const ms = convo.messages as any[];
-  const last = ms.at(-1);
-  return Array.isArray(last.content) && last.content.at(-1).cache_control?.type === "ephemeral" && last.content.at(-1).tool_use_id === "t1";
-})());
-check("anthropic: earlier messages are NOT given a breakpoint", (() => {
-  const ms = convo.messages as any[];
-  return JSON.stringify(ms[0]).indexOf("cache_control") === -1;
-})());
-check("anthropic: withConversationCache does not mutate the caller's history", (() => {
-  const hist: Message[] = [{ role: "user", content: "hello" }];
-  anthropicBody({ ...base, model: "claude-sonnet-4-6", messages: hist });
-  return typeof hist[0].content === "string"; // original untouched (string, not promoted to blocks)
-})());
 
 // --- prompt caching: OpenRouter path emits cache_control in OpenAI-format content arrays ---
 const orSplit: CallOpts = { ...base, openrouter: true,
@@ -270,29 +226,6 @@ check("openai non-vision: no image_url part is emitted (won't 400 a text-only mo
 check("openai non-vision: tool message notes the screenshot was omitted",
   (oaNo.find((m) => m.role === "tool") as any)?.content.includes("screenshot omitted"));
 
-// Anthropic (vision ON): image block → nested base64 source; tool_result content stays an array.
-const anVis = toAnthropicMessages(imgHistory, true) as any[];
-const anTR = (anVis.at(-1).content as any[]).find((b: any) => b.type === "tool_result");
-const anImg = (anTR.content as any[]).find((b: any) => b.type === "image");
-check("anthropic vision: image → {source:{type:'base64',media_type,data}}",
-  anImg?.source?.type === "base64" && anImg.source.media_type === "image/png" && anImg.source.data === PNG_B64);
-check("anthropic vision: tool_result content remains an array with the text block intact",
-  Array.isArray(anTR.content) && anTR.content.some((b: any) => b.type === "text" && b.text.includes("PASSED")));
-
-// Anthropic (vision OFF): the image degrades to a text placeholder — no base64 source survives.
-const anNo = toAnthropicMessages(imgHistory, false) as any[];
-check("anthropic non-vision: no base64 image source survives (degraded to text)",
-  JSON.stringify(anNo).indexOf("base64") === -1 && JSON.stringify(anNo).includes("screenshot omitted"));
-
-// End-to-end through anthropicBody: a vision model keeps the image; the conversation cache breakpoint
-// lands on the last block and never corrupts the image source.
-const anBodyVis = anthropicBody({ ...base, model: "anthropic/claude-opus-4.8", messages: imgHistory });
-check("anthropic vision (full body): the image base64 survives into the request body",
-  JSON.stringify(anBodyVis.messages).includes(PNG_B64));
-const anBodyNo = anthropicBody({ ...base, model: "claude-text-only-fake", messages: imgHistory });
-check("anthropic non-vision (full body): an unknown model strips the image to text (safe)",
-  !JSON.stringify(anBodyNo.messages).includes(PNG_B64));
-
 // A plain-string tool_result is untouched by the image path (the overwhelmingly-common case).
 const plainTR = toOpenAIMessages("sys", [
   { role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "export const x = 1;" }] },
@@ -301,4 +234,4 @@ check("string tool_result unaffected: stays a single tool message, no extra user
   plainTR.filter((m) => m.role === "tool").length === 1 && plainTR.filter((m) => m.role === "user").length === 0);
 
 if (fail) { console.error("\n✗ provider smoke FAILED"); process.exit(1); }
-console.log("\n✓ provider smoke passed (translation + model-governed max_tokens + registry + router/estimate + vision/images)");
+console.log("\n✓ provider smoke passed (OpenAI-compatible route + model-governed max_tokens + registry + router/estimate + vision/images)");

@@ -9,8 +9,8 @@ export interface ToolDef {
 }
 
 /** A base64-encoded image, provider-agnostic. `data` is the raw base64 (no data: prefix); `mediaType`
- *  is the MIME (e.g. "image/png"). Each provider translates this to its own wire shape — Anthropic's
- *  nested `source:{type:"base64",…}` block, or OpenAI's `image_url:{url:"data:…"}` part. */
+ *  is the MIME (e.g. "image/png"). The active OpenAI-compatible route translates this to an
+ *  `image_url:{url:"data:…"}` content part when the selected model supports vision. */
 export interface ImageSource { data: string; mediaType: string }
 
 export type ContentBlock =
@@ -30,8 +30,8 @@ export interface Message {
  *  prompt-cache breakpoint at the END of this segment, so everything up to and including it is a
  *  reusable cached prefix (system instructions, tool defs, repo map). Volatile per-turn content
  *  (date, model identity, retrieved memory) is left UNCACHED in a trailing segment so it never busts
- *  the big stable prefix. Honored as explicit `cache_control` on Anthropic + OpenRouter; ignored
- *  harmlessly by auto-caching endpoints (OpenAI/Grok/DeepSeek). */
+ *  the big stable prefix. Honored as explicit `cache_control` on OpenRouter; ignored harmlessly by
+ *  plain OpenAI-compatible endpoints. */
 export interface SystemBlock { text: string; cache?: boolean }
 export type SystemInput = string | SystemBlock[];
 

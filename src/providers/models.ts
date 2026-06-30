@@ -1,10 +1,9 @@
 // Model registry — "model descriptions": context window + output ceiling per model family.
 //
 // Why this exists: output length should be governed by the MODEL, not a global constant. For the
-// OpenAI-compatible path we OMIT max_tokens entirely so the provider/model decides. But the
-// Anthropic Messages API REQUIRES max_tokens, so we look up the model's real ceiling here instead
-// of capping at an arbitrary number. Values are best-effort by family and matched by regex so new
-// snapshots (…-2507, etc.) resolve without edits.
+// OpenAI-compatible path we OMIT max_tokens entirely so the provider/model decides unless the user
+// explicitly sets OB1_MAX_TOKENS. Values are best-effort by family and matched by regex so new
+// snapshots (...-2507, etc.) resolve without edits.
 export interface ModelSpec {
   match: RegExp;
   id?: string;           // canonical model id the managed OB-1 API routes to when picked from /models
@@ -59,8 +58,8 @@ export function isRouterModel(id: string): boolean {
   return /^(auto|router|default)$/i.test(id.trim());
 }
 
-/** The model's output ceiling. Used only where a number is REQUIRED (Anthropic); the
- *  OpenAI-compatible path omits max_tokens entirely and lets the model govern. */
+/** The model's output ceiling. Used for descriptions and explicit caps; the OpenAI-compatible path
+ *  omits max_tokens unless the user explicitly sets OB1_MAX_TOKENS. */
 export function maxOutputFor(id: string): number {
   return modelSpec(id)?.maxOutput ?? DEFAULT_MAX_OUTPUT;
 }

@@ -1,5 +1,5 @@
 // OpenAI-compatible Chat Completions provider (OpenRouter, OpenAI, local servers, etc.).
-// Translates OB-1's internal Anthropic-style messages/tools to OpenAI format and back.
+// Translates OB-1's internal message/tool blocks to OpenAI format and back.
 // Streams the response (idle-timeout + retry via http.ts), assembling tool-call deltas by index.
 import { toSystemBlocks, type CallOpts, type ContentBlock, type ImageSource, type ModelResponse, type SystemInput, type Usage } from "./types.ts";
 import { visionEnabled } from "./models.ts";
@@ -186,10 +186,10 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
     signal: opts.signal,
   })) {
     if (ev.usage) {
-      // OpenAI/OpenRouter report cached_tokens as a SUBSET of prompt_tokens (cache reads bill ~0.25×),
-      // so subtract it out to keep input_tokens = the UNCACHED portion — matching the Anthropic
-      // convention the usage ledger expects (input + cacheRead summed, not double-counted). cache_write
-      // is surfaced for cost but NOT subtracted (its subset-of-prompt_tokens behavior varies by
+      // OpenAI/OpenRouter report cached_tokens as a SUBSET of prompt_tokens (cache reads bill at a
+      // discount), so subtract it out to keep input_tokens = the UNCACHED portion. The usage ledger
+      // stores input + cacheRead separately so cached tokens are visible without being double-counted.
+      // cache_write is surfaced for cost but NOT subtracted (its subset-of-prompt_tokens behavior varies by
       // provider, and we must never under-report input).
       const det = ev.usage.prompt_tokens_details ?? {};
       const cachedRead = det.cached_tokens ?? 0;

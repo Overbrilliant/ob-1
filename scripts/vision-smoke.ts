@@ -1,11 +1,10 @@
 // Deterministic test for the vision/image path end-to-end (no API key, no Chromium). Proves the data
 // path a browser_check screenshot travels: a tool's {text, images} return → normalizeToolOutput →
-// toolResultContent (a tool_result content-block array) → each provider's wire format, gated by whether
-// the active model can see images. The Chromium capture itself is covered by browser-check-smoke; the
-// per-provider translation by provider-smoke. This ties the seams together. Run: bun run scripts/vision-smoke.ts
+// toolResultContent (a tool_result content-block array) → the OpenAI-compatible wire format, gated by
+// whether the active model can see images. The Chromium capture itself is covered by browser-check-smoke;
+// provider translation is covered by provider-smoke. Run: bun run scripts/vision-smoke.ts
 import { normalizeToolOutput, toolResultContent, screenshotMode, shouldAttachScreenshot, type ToolOutput } from "../src/agent/tools.ts";
 import { toOpenAIMessages } from "../src/providers/openai.ts";
-import { toAnthropicMessages } from "../src/providers/anthropic.ts";
 import { visionEnabled } from "../src/providers/models.ts";
 import type { Message, ImageSource } from "../src/providers/types.ts";
 
@@ -53,12 +52,10 @@ const history: Message[] = [
   { role: "user", content: [{ type: "tool_result", tool_use_id: "bc1", content: toolResultContent(text, images) }] },
 ];
 
-// Vision model (e.g. Opus): image survives to BOTH wire formats.
-check("e2e vision: model is vision-enabled (Opus)", visionEnabled("anthropic/claude-opus-4.8") === true);
+// Vision model: image survives to the active OpenAI-compatible wire format.
+check("e2e vision: default Qwen 3.6 Plus is vision-enabled", visionEnabled("qwen/qwen3.6-plus") === true);
 const oa = toOpenAIMessages("sys", history, false, true);
 check("e2e vision (openai): a data: image_url part reaches the wire", JSON.stringify(oa).includes(`data:image/png;base64,${PNG_B64}`));
-const an = toAnthropicMessages(history, true);
-check("e2e vision (anthropic): a base64 image source reaches the wire", JSON.stringify(an).includes(PNG_B64) && JSON.stringify(an).includes("\"base64\""));
 
 // The default Qwen 3.6 Plus IS multimodal (OpenRouter: accepts image input) → vision on by default.
 check("e2e: default Qwen 3.6 Plus is vision-enabled (multimodal)", visionEnabled("qwen/qwen3.6-plus") === true);
@@ -66,14 +63,11 @@ check("e2e: default Qwen 3.6 Plus is vision-enabled (multimodal)", visionEnabled
 // screenshot degrades to a text note; NO base64 on the wire.
 check("e2e non-vision: a text-only-via-API model (DeepSeek) is not vision-enabled", visionEnabled("deepseek/deepseek-v4-pro") === false);
 const oaNo = toOpenAIMessages("sys", history, false, false);
-const anNo = toAnthropicMessages(history, false);
 check("e2e non-vision (openai): no image bytes, a 'screenshot omitted' note instead",
   !JSON.stringify(oaNo).includes(PNG_B64) && JSON.stringify(oaNo).includes("screenshot omitted"));
-check("e2e non-vision (anthropic): no image bytes, a 'screenshot omitted' note instead",
-  !JSON.stringify(anNo).includes(PNG_B64) && JSON.stringify(anNo).includes("screenshot omitted"));
-check("e2e: the PASSED text report survives in BOTH vision states + both providers", (() => {
+check("e2e: the PASSED text report survives in both vision states", (() => {
   const needle = "browser_check PASSED";
-  return [oa, an, oaNo, anNo].every((wire) => JSON.stringify(wire).includes(needle));
+  return [oa, oaNo].every((wire) => JSON.stringify(wire).includes(needle));
 })());
 
 // ── cost-aware screenshot policy (browser_check) ──
@@ -89,5 +83,5 @@ check("attach: off → never, even on failure with a vision model", shouldAttach
 check("attach: no vision model → never attach, regardless of mode/result", shouldAttachScreenshot("always", false, false) === false && shouldAttachScreenshot("auto", false, false) === false);
 
 if (fail) { console.error("\n✗ vision smoke FAILED"); process.exit(1); }
-console.log("\n✓ vision smoke passed (normalize + assemble + end-to-end image path + screenshot policy, vision-gated, both providers)");
+console.log("\n✓ vision smoke passed (normalize + assemble + end-to-end image path + screenshot policy, vision-gated)");
 process.exit(0);
