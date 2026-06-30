@@ -2155,7 +2155,7 @@ async function runTui(startup: string[]): Promise<void> {
         activeAbort = ac;
         ctrl!.cancelTurn = () => { ac.abort(); ctrl!.queue.length = 0; procs.killAll(); }; // ESC also kills any running bash
         try { if (await processLine(t)) { ctrl!.exit(); return; } }
-        catch (e) { if (!ac.signal.aborted) { const fe = explainError((e as Error).message); ctrl!.pushLine(renderFriendly(fe, { action: false })); ctrl!.setErrorAction(fe.action); } }
+        catch (e) { if (!ac.signal.aborted) { const fe = explainError((e as Error).message, { providerProfile: cfg.providerProfile }); ctrl!.pushLine(renderFriendly(fe, { action: false })); ctrl!.setErrorAction(fe.action); } }
         finally {
           // Single source of the "stopped" notice (loop.ts no longer prints it). If the turn had already
           // run a write/edit/bash, warn that the interrupted work may be only partially applied.

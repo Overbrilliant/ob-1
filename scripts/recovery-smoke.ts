@@ -32,6 +32,7 @@ check("stale_branch is NOT auto-attemptable", !recipeFor("stale_branch").autoAtt
 
 // ── recoveryHint: a one-line user-facing fix ───────────────────────────────────
 check("recoveryHint surfaces a known fix", /Recovery \(rate_limited\)/.test(recoveryHint("API 429: slow down")));
+check("recoveryHint auth covers managed, FreeLLMAPI, and Custom API", /ob1 login/.test(recoveryHint("API 401: invalid api key")) && /\/freellm/.test(recoveryHint("API 401: invalid api key")) && /\/models/.test(recoveryHint("API 401: invalid api key")));
 check("recoveryHint is empty for an unknown error", recoveryHint("???") === "");
 
 // ── RecoveryLedger: one auto-attempt before escalation + structured events ─────

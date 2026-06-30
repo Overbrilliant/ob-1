@@ -135,6 +135,24 @@ function deps(cfg: any, brain: MockBrain, over: Partial<TurnDeps> = {}): TurnDep
   check("json_text_after_work: the fix file was written by the recovered call", existsSync(join(dir, "fix8.txt")));
 }
 
+// ── scenario 8b: false capability refusal — model says it cannot write files despite file tools ──
+// A live FreeLLMAPI run did this for a PHP task: it returned a code block and claimed it couldn't create
+// files. The guard must nudge once so the model uses write_file instead of ending the turn as "success".
+{
+  const brain = new MockBrain([
+    asText("I currently don't have the capability to create or write files directly.\n\n```php\n<?php // MATRIX_PHP_OK\n```"),
+    asToolUse([{ name: "write_file", input: { path: "index.php", content: "<?php // MATRIX_PHP_OK\n" } }]),
+    asText("done"),
+  ]);
+  const history: Message[] = [];
+  await runTurn("create index.php", history, deps(baseCfg, brain, { onMutate: () => {} }));
+  check("capability_refusal: the turn did NOT end on the refusal", brain.steps === 3);
+  check("capability_refusal: corrective nudge says file tools are available",
+    !!brain.request(1)?.messages.some((m) => m.role === "user" && typeof m.content === "string" && /DO have file tools|write_file/i.test(m.content)));
+  check("capability_refusal: recovered write_file created index.php",
+    existsSync(join(dir, "index.php")) && readFileSync(join(dir, "index.php"), "utf8").includes("MATRIX_PHP_OK"));
+}
+
 // ── scenario 9: no false positive — an explanatory final answer that NAMES a tool isn't flagged ──
 // A normal answer mentioning a tool (after real work) must NOT be treated as an unsent tool call.
 {

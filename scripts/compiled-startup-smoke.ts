@@ -53,6 +53,7 @@ try {
     });
     const out = dec.decode(run.stdout) + dec.decode(run.stderr);
     check("compiled binary starts and exits", (run.exitCode ?? 1) === 0, out.trim().slice(-300));
+    check("NO_COLOR strips ANSI escapes from startup output", !/\x1b\[/.test(out));
     check("standalone skips web-tree-sitter wasm loader", !out.includes("tree-sitter.wasm"));
     check("standalone uses regex repo-map fallback", !out.includes("repo map: tree-sitter"));
     check("standalone uses cosine memory fallback", !out.includes("memory: sqlite-vec KNN index"));

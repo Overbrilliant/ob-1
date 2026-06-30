@@ -29,6 +29,12 @@ check("402 render: shows the URL somewhere reachable (link or fallback)", r402.i
 // 401 → sign-in guidance, no retry.
 const e401 = explainError(`API 401: {"error":"token expired"}`);
 check("401: sign-in title + login hint", e401.title === "Sign-in needed" && /ob1 login/.test(e401.hint ?? "") && e401.retry === false);
+const e401Free = explainError(`API 401: {"error":{"message":"Invalid API key"}}`, { providerProfile: "freellmapi" });
+check("401 FreeLLMAPI: points to /freellm, not ob1 login", e401Free.title === "FreeLLMAPI authentication needed" && /\/freellm/.test(e401Free.hint ?? "") && !/ob1 login/.test(e401Free.hint ?? "") && e401Free.retry === false);
+const e401Custom = explainError(`API 401: {"error":"bad key"}`, { providerProfile: "custom" });
+check("401 Custom API: points to /models, not ob1 login", e401Custom.title === "Provider authentication failed" && /\/models/.test(e401Custom.hint ?? "") && !/ob1 login/.test(e401Custom.hint ?? "") && e401Custom.retry === false);
+const e403Free = explainError(`API 403: {"error":"denied"}`, { providerProfile: "freellmapi" });
+check("403 FreeLLMAPI: points to /freellm", e403Free.title === "FreeLLMAPI access denied" && /\/freellm/.test(e403Free.hint ?? "") && e403Free.retry === false);
 
 // 429 / 5xx → retryable.
 check("429: rate limited + retryable", explainError(`API 429: {"error":"slow down"}`).retry === true);

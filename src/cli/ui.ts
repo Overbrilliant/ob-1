@@ -1,9 +1,12 @@
 // Tiny zero-dependency ANSI helpers + banner. (Ink/TUI is a later phase; R7.)
 const ESC = "\x1b[";
-const wrap = (code: string) => (s: string) => `${ESC}${code}m${s}${ESC}0m`;
+function colorEnabled(): boolean {
+  return !Object.prototype.hasOwnProperty.call(process.env, "NO_COLOR");
+}
+const wrap = (code: string) => (s: string) => colorEnabled() ? `${ESC}${code}m${s}${ESC}0m` : s;
 
 export const c = {
-  reset: `${ESC}0m`,
+  get reset() { return colorEnabled() ? `${ESC}0m` : ""; },
   dim: wrap("2"),
   bold: wrap("1"),
   red: wrap("31"),
@@ -93,8 +96,13 @@ export interface FriendlyError {
   retry: boolean;                             // true ⇒ a retry might help ⇒ offer "continue"
 }
 
+export interface ErrorExplainContext {
+  /** Active /models provider profile, when the request did not go through the managed OB-1 server. */
+  providerProfile?: string;
+}
+
 /** Map a raw error string to a human-readable, actionable shape. Pure + tested. */
-export function explainError(raw: string): FriendlyError {
+export function explainError(raw: string, ctx: ErrorExplainContext = {}): FriendlyError {
   const msg = String(raw ?? "").trim();
   // `API <status>: <body>` (http.ts). Body may be JSON ({error, upgrade_url, resets_in_days, …}).
   const m = msg.match(/^API (\d{3}):\s*([\s\S]*)$/);
@@ -107,6 +115,7 @@ export function explainError(raw: string): FriendlyError {
   const upgradeUrl: string | undefined = parsed?.upgrade_url ?? parsed?.upgradeUrl;
   const resets: number | undefined = typeof parsed?.resets_in_days === "number" ? parsed.resets_in_days : undefined;
   const resetHint = resets != null ? `Credits reset in ${resets} day${resets === 1 ? "" : "s"}.` : undefined;
+  const providerProfile = ctx.providerProfile;
 
   switch (status) {
     case 402: return {
@@ -115,16 +124,38 @@ export function explainError(raw: string): FriendlyError {
       action: upgradeUrl ? { label: "Upgrade your plan", url: upgradeUrl } : undefined,
       hint: resetHint, retry: false,
     };
-    case 401: return {
-      title: "Sign-in needed",
-      detail: serverMsg || "Your session has expired.",
-      hint: "Run `ob1 login` to sign back in.", retry: false,
-    };
-    case 403: return {
-      title: "Access denied",
-      detail: serverMsg || "This account can't use that model or feature.",
-      action: upgradeUrl ? { label: "See plans", url: upgradeUrl } : undefined, retry: false,
-    };
+    case 401:
+      if (providerProfile === "freellmapi") return {
+        title: "FreeLLMAPI authentication needed",
+        detail: serverMsg || "The local FreeLLMAPI proxy rejected the saved API key.",
+        hint: "Run `/freellm` to reconnect or refresh the proxy key.", retry: false,
+      };
+      if (providerProfile === "custom") return {
+        title: "Provider authentication failed",
+        detail: serverMsg || "The configured Custom API endpoint rejected the saved key.",
+        hint: "Run `/models` to update the Custom API key or endpoint.", retry: false,
+      };
+      return {
+        title: "Sign-in needed",
+        detail: serverMsg || "Your session has expired.",
+        hint: "Run `ob1 login` to sign back in.", retry: false,
+      };
+    case 403:
+      if (providerProfile === "freellmapi") return {
+        title: "FreeLLMAPI access denied",
+        detail: serverMsg || "The local FreeLLMAPI proxy rejected this request.",
+        hint: "Run `/freellm` to reconnect, refresh the proxy key, or choose a model you can use.", retry: false,
+      };
+      if (providerProfile === "custom") return {
+        title: "Provider access denied",
+        detail: serverMsg || "The configured Custom API endpoint rejected this request.",
+        hint: "Run `/models` to update the Custom API key, endpoint, or model.", retry: false,
+      };
+      return {
+        title: "Access denied",
+        detail: serverMsg || "This account can't use that model or feature.",
+        action: upgradeUrl ? { label: "See plans", url: upgradeUrl } : undefined, retry: false,
+      };
     case 404: return {
       title: "Not found",
       detail: serverMsg || "The model or endpoint wasn't found — check the model id.", retry: false,
@@ -162,8 +193,8 @@ export function renderFriendly(e: FriendlyError, opts: { action?: boolean } = {}
 }
 
 /** Convenience: parse a raw error string and render it. */
-export function renderError(raw: string): string {
-  return renderFriendly(explainError(raw));
+export function renderError(raw: string, ctx: ErrorExplainContext = {}): string {
+  return renderFriendly(explainError(raw, ctx));
 }
 
 export function banner(): string {

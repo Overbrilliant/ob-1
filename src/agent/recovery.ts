@@ -8,7 +8,7 @@
 export type FailureScenario =
   | "rate_limited"      // 429 — back off / slow down
   | "provider_failure"  // 5xx / stream drop / empty body — transient upstream
-  | "auth_failure"      // 401/403 — token expired / wrong account
+  | "auth_failure"      // 401/403 — saved credentials were rejected
   | "mcp_handshake"     // an MCP server failed to connect / initialize
   | "missing_tool"      // a CLI the command needs isn't installed
   | "stale_branch"      // local git branch is behind / diverged from upstream
@@ -34,8 +34,8 @@ const RECIPES: Record<FailureScenario, Omit<RecoveryRecipe, "scenario">> = {
     autoAttemptable: true,
   },
   auth_failure: {
-    summary: "Authentication failed (401/403) — token expired or wrong account.",
-    steps: ["Re-authenticate with `ob1 login`.", "Confirm the CLI is signed into the account that holds your plan."],
+    summary: "Authentication failed (401/403) — saved credentials were rejected.",
+    steps: ["Reconnect the active provider: managed server uses `ob1 login`, FreeLLMAPI uses `/freellm`, and Custom API uses `/models`.", "Confirm the selected account, API key, endpoint, and model are valid."],
     autoAttemptable: false,
   },
   mcp_handshake: {

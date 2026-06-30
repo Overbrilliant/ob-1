@@ -544,6 +544,14 @@ export function looksLikeUnsentToolCall(text: string): boolean {
   return (hasPath && hasWriteBody) || hasCommand;
 }
 
+function looksLikeToolCapabilityRefusal(text: string): boolean {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  const deniesCapability = /\b(?:can't|cannot|unable to|not able to|don't have (?:the )?(?:capability|ability)|do not have (?:the )?(?:capability|ability)|no capability)\b/i.test(t);
+  const namesFileWork = /\b(?:create|write|edit|modify|save|add|delete)\b.{0,120}\b(?:file|files|workspace|disk|directly)\b/i.test(t);
+  return deniesCapability && namesFileWork;
+}
+
 export async function runTurn(userInput: string, history: Message[], deps: TurnDeps): Promise<TurnOutcome> {
   const { cfg, tools, store, approve, log } = deps;
   const call = deps._callModel ?? callModel;
@@ -665,7 +673,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         onText: deps.onText ? (d) => { gapOnce(); deps.onText!(d); streamed = true; } : undefined,
         onReasoning: deps.onReasoning ? (d) => { gapOnce(); deps.onReasoning!(d); } : undefined,
         onRetry: ({ attempt, max, delayMs, error }) =>
-          log(c.yellow(`  ⚠ ${explainError(error).title.toLowerCase()} — retrying (${attempt}/${max}) in ${Math.round(delayMs / 1000)}s…`)),
+          log(c.yellow(`  ⚠ ${explainError(error, { providerProfile: cfg.providerProfile }).title.toLowerCase()} — retrying (${attempt}/${max}) in ${Math.round(delayMs / 1000)}s…`)),
         signal: deps.signal,
       });
     } catch (e) {
@@ -686,7 +694,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       // On abort (ESC) the drain loop prints "⊘ stopped" once — don't duplicate it here. Only a real
       // upstream failure (not an abort) gets surfaced as an error.
       if (!aborted) {
-        const fe = explainError(err.message);
+        const fe = explainError(err.message, { providerProfile: cfg.providerProfile });
         // In the TUI the action is a focusable button above the prompt (onErrorAction) — don't ALSO print
         // it inline (it'd appear twice). Under the REPL there's no banner, so keep the inline link.
         log(renderFriendly(fe, { action: !deps.onErrorAction }));
@@ -725,24 +733,31 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       // happen AFTER real work too — a weak model does a few steps, then serializes its fix into content
       // and stalls (the task-09 dogfooding case), so it must fire regardless of stepsWithTools/mutated.
       const unsentToolCall = looksLikeUnsentToolCall(finalText);
+      const capabilityRefusal = !mutated && stepsWithTools === 0 && looksLikeToolCapabilityRefusal(finalText);
       // The legacy weaker signal (a bare mention like `read_file(` mid-text) stays scoped to a turn that
       // did nothing — broadening it would flag explanatory answers that name a tool after real work.
       const legacyNoopProse = /\b(?:read_file|write_file|edit_file|run_bash|list_dir|web_search|web_fetch)\b\s*[({]/.test(finalText);
-      const noopTurn = !mutated && stepsWithTools === 0 && (finalText.length === 0 || unsentToolCall || legacyNoopProse);
-      const degenerate = (unsentToolCall || noopTurn) && !deps.signal?.aborted;
+      const noopTurn = !mutated && stepsWithTools === 0 && (finalText.length === 0 || unsentToolCall || legacyNoopProse || capabilityRefusal);
+      const degenerate = (unsentToolCall || capabilityRefusal || noopTurn) && !deps.signal?.aborted;
       if (degenerate) {
         if (noopRetries < 1) {
           noopRetries++;
           log(c.yellow(unsentToolCall
             ? "  ⚠ the model wrote a tool call as text instead of invoking it — retrying once"
+            : capabilityRefusal
+            ? "  ⚠ the model claimed it could not write files, but file tools are available — retrying once"
             : "  ⚠ the model ended without taking any action — retrying once"));
           history.push({ role: "user", content: unsentToolCall
             ? "Your previous message described or serialized a tool call as TEXT — prose like `write_file(path=\"…\")`, or a JSON object such as {\"path\":\"…\",\"content\":\"…\"} — instead of actually invoking it, so NOTHING happened. Re-issue it NOW as a REAL tool call (read_file / edit_file / write_file / run_bash); never print a tool call as text or JSON. If the task is genuinely complete, run the project's check and give a one-line answer."
+            : capabilityRefusal
+            ? "You incorrectly claimed you cannot create or write files. In this CLI you DO have file tools available. Use a REAL write_file or edit_file tool call now to make the requested change; do not just provide code for the user to save manually."
             : "You ended the turn without calling any tool or giving a complete answer. If this task needs changes, USE THE TOOLS now (read_file / edit_file / write_file / run_bash) to actually do the work — do NOT just describe a tool call in prose. If genuinely no action is needed, give a complete answer." });
           continue;
         }
         log(c.yellow(unsentToolCall
           ? "  ⚠ the model kept emitting tool calls as text — they did not run, so the task may be unfinished. Try again or rephrase."
+          : capabilityRefusal
+          ? "  ⚠ the model kept claiming it could not write files, so the task may be unfinished. Try again or rephrase."
           : "  ⚠ the model produced no action and no answer — nothing was done this turn. Try again or rephrase the task."));
       }
       // Auto-verify + self-correct: the model thinks it's done, but if it CHANGED files, run the project's

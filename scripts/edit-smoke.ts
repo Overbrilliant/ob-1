@@ -41,6 +41,11 @@ check("diff: one line changed (1×- 1×+ 2×keep)", dl.filter((l) => l.t === "-"
 check("diff: identical → all keep", diffLines("x\ny", "x\ny").every((l) => l.t === " "));
 check("renderDiff: empty string when identical", renderDiff("x\ny", "x\ny") === "");
 check("renderDiff: non-empty + path on change", renderDiff("x", "y", "f.ts").includes("f.ts") && renderDiff("x", "y").length > 0);
+const prevNoColor = process.env.NO_COLOR;
+process.env.NO_COLOR = "1";
+check("renderDiff: NO_COLOR strips ANSI escapes", !/\x1b\[/.test(renderDiff("x", "y", "f.ts")));
+if (prevNoColor === undefined) delete process.env.NO_COLOR;
+else process.env.NO_COLOR = prevNoColor;
 
 if (fail) { console.error("\n✗ edit smoke FAILED"); process.exit(1); }
 console.log("\n✓ edit smoke passed (exact + replace_all + ambiguity guard + whitespace-flexible fallback + diff)");
