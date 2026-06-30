@@ -1,9 +1,11 @@
 // Session persistence — every conversation is written to <dataDir>/sessions/<id>.json after each turn so
 // it survives exit and can be reopened with /resume. Per-workspace (dataDir is the project's .ob1), so the
 // resume picker is naturally scoped to the project you're in — the same model Claude Code uses.
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { Message } from "../providers/types.ts";
+
+const MAX_SESSIONS = 50; // keep the newest N per workspace; override with OB1_MAX_SESSIONS
 
 export interface SessionMeta {
   id: string;
@@ -33,17 +35,31 @@ export function deriveTitle(history: Message[]): string {
   const raw = typeof first.content === "string"
     ? first.content
     : (first.content as any[]).map((b) => (b?.type === "text" ? b.text : "")).join(" ");
-  // Drop the @mention attachment appendix (added to the prompt sent to the model) so the title stays clean.
-  const head = raw.split("\n\n--- Attached via")[0];
+  // Title = the first paragraph only, so machine-appended suffixes don't leak in: the @mention attachment
+  // block and the /goal "[Goal mode] …" instructions are both separated from the user's text by a blank line.
+  const head = raw.split(/\n\s*\n/)[0];
   return head.replace(/\s+/g, " ").trim().slice(0, 72) || "(untitled)";
 }
 
-/** Persist a session (no-op for empty history — nothing worth resuming). */
+/** Persist a session (no-op for empty history — nothing worth resuming). Prunes oldest beyond the cap. */
 export function saveSession(dataDir: string, sess: SessionFile): void {
   if (!sess.history.length) return;
   const d = dir(dataDir);
   if (!existsSync(d)) mkdirSync(d, { recursive: true });
   writeFileSync(join(d, `${sess.id}.json`), JSON.stringify(sess));
+  pruneSessions(d);
+}
+
+/** Keep only the newest N session files (by mtime) so the directory can't grow without bound. The current
+ *  session is rewritten each turn, so its mtime is always fresh — it's never the one pruned. */
+function pruneSessions(d: string): void {
+  const cap = Number(process.env.OB1_MAX_SESSIONS) > 0 ? Number(process.env.OB1_MAX_SESSIONS) : MAX_SESSIONS;
+  try {
+    const files = readdirSync(d).filter((f) => f.endsWith(".json"))
+      .map((f) => ({ f, t: statSync(join(d, f)).mtimeMs }))
+      .sort((a, b) => b.t - a.t);
+    for (const { f } of files.slice(cap)) { try { unlinkSync(join(d, f)); } catch { /* already gone */ } }
+  } catch { /* prune is best-effort */ }
 }
 
 /** Metadata for saved sessions, newest first. Filtered to `cwd` when given (skips corrupt files). */

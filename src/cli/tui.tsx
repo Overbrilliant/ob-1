@@ -194,6 +194,9 @@ export class TuiController {
   // Prefill the input box with text + move the cursor to the end (registered by <TuiApp>). Used by
   // /rewind to drop the rewound prompt back into the input so the user can re-edit / re-run it.
   setInput?: (text: string) => void;
+  // Workspace file completions for @path mentions (registered by index.ts). Given the partial after "@",
+  // returns up to ~10 candidate relative paths. Undefined ⇒ no @-autocomplete (e.g. the REPL).
+  completeFiles?: (q: string) => string[];
   private seq = 0;
   private listeners = new Set<() => void>();
   // Render coalescing (see emit): streaming fires one emit per token; rendering each repaints the whole
@@ -777,7 +780,7 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/help", "show all commands"],
   ["/clear", "reset the conversation context (previous kept in /resume)"],
   ["/resume", "reopen a previous conversation (↑↓ · Enter)"],
-  ["/export", "save the conversation to a markdown file"],
+  ["/export", "save the conversation to a file (or /export clipboard)"],
   ["/exit", "exit the session"],
   // ── model & mode ──
   ["/models", "pick a model — or connect FreeLLMAPI (↑↓ · Enter)"],
@@ -839,6 +842,7 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
   const [, force] = useReducer((x: number) => x + 1, 0);
   const [value, setValue] = useState("");
   const [menuIndex, setMenuIndex] = useState(0);
+  const [atIndex, setAtIndex] = useState(0);
   // Bumping this remounts the <TextInput> so it re-initializes its cursor to the END of the value —
   // ink-text-input only clamps its cursor down, never forward, so a programmatic setValue (e.g. accepting
   // a suggestion) would otherwise leave the cursor at offset 0. Call setAtEnd() instead of bare setValue.
@@ -965,12 +969,28 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
   const menuOpen = matches.length > 0;
   const sel = Math.max(0, Math.min(menuIndex, matches.length - 1));
 
+  // @file autocomplete — suggest workspace files when the trailing token is an @path. Mutually exclusive
+  // with the slash menu (that needs a leading "/" and no space; this needs a trailing @token).
+  const atActive = !!ctrl.completeFiles && !menuOpen && !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.prompt && !ctrl.procFocus;
+  const atMatch = atActive ? /(?:^|\s)@([^\s]*)$/.exec(value) : null;
+  const atCands = atMatch ? ctrl.completeFiles!(atMatch[1]) : [];
+  const atMenuOpen = atCands.length > 0;
+  const atSel = Math.max(0, Math.min(atIndex, atCands.length - 1));
+  const completeAt = (line: string) => { setAtEnd(line.replace(/@[^\s]*$/, "@" + atCands[atSel] + " ")); setAtIndex(0); };
+
   // Menu navigation (active only while it's open, so it never fights the approval handler).
   useInput((_input, key) => {
     if (key.upArrow) setMenuIndex(() => Math.max(0, sel - 1));
     else if (key.downArrow) setMenuIndex(() => Math.min(matches.length - 1, sel + 1));
     else if (key.tab) { setAtEnd(matches[sel][0] + " "); setMenuIndex(0); } // setAtEnd: remount so the cursor lands at end, not mid-string
   }, { isActive: menuOpen });
+
+  // @file menu navigation (active only while it's open; mutually exclusive with the slash menu).
+  useInput((_input, key) => {
+    if (key.upArrow) setAtIndex(() => Math.max(0, atSel - 1));
+    else if (key.downArrow) setAtIndex(() => Math.min(atCands.length - 1, atSel + 1));
+    else if (key.tab) completeAt(value);
+  }, { isActive: atMenuOpen });
 
   // Tab accepts the next-step suggestion (shown as the placeholder) when the input is empty and no
   // menu/modal owns the frame. It just fills the input — the user still reviews + presses Enter.
@@ -1036,7 +1056,7 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
     } else if (key.downArrow) {
       if (!recallNext() && value === "" && ctrl.upsellEligible()) ctrl.focusUpsell();
     }
-  }, { isActive: !menuOpen && !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.prompt && !ctrl.procFocus && !ctrl.upsellFocus && !ctrl.errorFocus });
+  }, { isActive: !menuOpen && !atMenuOpen && !ctrl.pending && !ctrl.picker && !ctrl.ask && !ctrl.setup && !ctrl.prompt && !ctrl.procFocus && !ctrl.upsellFocus && !ctrl.errorFocus });
 
   // While the upsell button is focused: Enter opens the pricing page in the browser; ↑ / Esc return to
   // the input. The <TextInput> is unfocused (focus={!ctrl.upsellFocus}) so typing doesn't leak into it.
@@ -1085,6 +1105,7 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
     (procN > 0 && !sidePanelsHidden ? procN + 1 : 0) +                                          // proc list + hint
     (ctrl.queue.length > 0 && !ctrl.setup ? ctrl.queue.length : 0) +                            // queued prompts
     (menuOpen ? Math.min(matches.length, 8) + 1 : 0) +                                          // slash menu + hint
+    (atMenuOpen ? Math.min(atCands.length, 8) + 1 : 0) +                                        // @file menu + hint
     (ctrl.lastErrorAction && !panelOpen && !menuOpen ? 1 : 0) +                                 // error action banner
     (ctrl.upsellEligible() && !panelOpen && !menuOpen ? 1 : 0) +                                // upsell banner
     (ctrl.exitArmed ? 1 : 0) +                                                                  // ⌃C hint
@@ -1184,6 +1205,16 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
             </Text>
           ))}
           <Text dimColor>  ↑↓ navigate · Tab complete · Enter run</Text>
+        </Box>
+      ) : null}
+      {atMenuOpen ? (
+        <Box flexDirection="column" paddingX={1}>
+          {atCands.slice(0, 8).map((p, i) => (
+            <Text key={p}>
+              <Text color={i === atSel ? "cyan" : "gray"} bold={i === atSel}>{(i === atSel ? "❯ " : "  ") + "@" + p}</Text>
+            </Text>
+          ))}
+          <Text dimColor>  ↑↓ navigate · Tab/Enter attach file</Text>
         </Box>
       ) : null}
       {/* The most recent error's action (e.g. "Upgrade your plan") sits directly ABOVE the input, so ↑
@@ -1343,8 +1374,11 @@ export function TuiApp({ ctrl }: { ctrl: TuiController }) {
                 key={inputKey}
                 focus={!ctrl.upsellFocus && !ctrl.errorFocus}
                 value={value}
-                onChange={(v) => { setValue(v); setMenuIndex(0); }}
+                onChange={(v) => { setValue(v); setMenuIndex(0); setAtIndex(0); }}
                 onSubmit={(line) => {
+                  // While the @file menu is open, Enter ATTACHES the highlighted file (completes the
+                  // trailing @token) instead of submitting — mirrors the slash menu's Enter-acts-on-highlight.
+                  if (atMenuOpen && atCands[atSel]) { completeAt(line); return; }
                   // Re-sending a recalled QUEUED prompt: drop the original from the queue so it runs once
                   // (with any edits) instead of twice, then leave recall mode. Only on an ACTUAL submit —
                   // not the arg-completion path below, which keeps the recalled command to type its arg.

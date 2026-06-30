@@ -47,7 +47,7 @@ import { loadTasks } from "./eval/tasks.ts";
 import { buildRunners, ALL_MODES, SELECTABLE_MODES } from "./eval/runners.ts";
 import { runEval, computeMatched, computeCapability } from "./eval/harness.ts";
 import { renderReport, renderCapability } from "./eval/report.ts";
-import { runTurn, describe as describeTool } from "./agent/loop.ts";
+import { runTurn, describe as describeTool, systemPrompt } from "./agent/loop.ts";
 import { runVerification, shellExec } from "./agent/verify.ts";
 import { latestQualityLedger, formatQualityLedger } from "./agent/task-quality.ts";
 import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
@@ -258,6 +258,18 @@ function resumeSession(id: string): void {
   console.log(c.dim("  continue where you left off, or /clear to start fresh"));
 }
 
+/** Copy text to the OS clipboard (pbcopy / clip / xclip). Returns false if no clipboard tool is available. */
+async function copyToClipboard(text: string): Promise<boolean> {
+  const cmd = process.platform === "darwin" ? ["pbcopy"]
+    : process.platform === "win32" ? ["clip"]
+    : ["xclip", "-selection", "clipboard"];
+  try {
+    const p = Bun.spawn(cmd, { stdin: new TextEncoder().encode(text), stdout: "ignore", stderr: "ignore" });
+    await p.exited;
+    return p.exitCode === 0;
+  } catch { return false; }
+}
+
 /** Render the conversation as plain markdown for /export. */
 function renderTranscript(h: Message[]): string {
   const lines: string[] = [`# OB-1 conversation — ${new Date().toISOString()}`, `model: ${cfg.model}  ·  ${h.length} messages`, ""];
@@ -455,7 +467,7 @@ ${c.bold("Commands")}
   ${c.cyan("/help")}                 show this help
   ${c.cyan("/clear")}                reset the conversation context ${c.dim("(previous kept in /resume)")}
   ${c.cyan("/resume")} ${c.dim("[n]")}           reopen a previous conversation ${c.dim("(↑↓ · Enter)")} — saved per workspace
-  ${c.cyan("/export")} ${c.dim("[file]")}        write the conversation to a markdown file
+  ${c.cyan("/export")} ${c.dim("[file|clipboard]")}  write the conversation to a markdown file ${c.dim("(or copy it)")}
   ${c.cyan("/exit")} ${c.dim("|")} ${c.cyan("/quit")}          exit the session
 
   ${c.bold("Model & mode")}
@@ -1291,11 +1303,14 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     }
     case "context": {
-      const tok = approxTokens(history);
       const model = cfg.resolvedModel ?? cfg.model;
       const win = contextWindowFor(model);
-      const pct = win ? Math.min(100, Math.round((tok / win) * 100)) : 0;
-      let textCh = 0, toolCh = 0, otherCh = 0; // system prompt is built per-turn, not stored in history
+      const tk = (ch: number) => Math.round(ch / 4); // ~4 chars/token, matching approxTokens()
+      // Fixed per-turn overhead that is NOT stored in history: the system prompt (repo map + AGENTS.md +
+      // memory) and the tool schemas. Counting these makes the % reflect the REAL window occupancy.
+      const sysTok = tk(systemPrompt(cfg, store).reduce((n, b) => n + b.text.length, 0));
+      const toolsTok = tk(JSON.stringify([...tools.values()].map((t) => t.def)).length);
+      let textCh = 0, toolCh = 0, otherCh = 0;
       for (const m of history) {
         if (typeof m.content === "string") { textCh += m.content.length; continue; }
         for (const b of m.content as any[]) {
@@ -1305,23 +1320,31 @@ async function handleCommand(line: string): Promise<boolean> {
           else otherCh += len;
         }
       }
-      const barLen = 32, filled = Math.round((pct / 100) * barLen);
+      const histTok = tk(textCh + toolCh + otherCh);
+      const totalTok = sysTok + toolsTok + histTok;
+      const pct = win ? Math.min(100, Math.round((totalTok / win) * 100)) : 0;
+      const barLen = 32, filled = Math.min(barLen, Math.round((pct / 100) * barLen));
       const bar = c.cyan("█".repeat(filled)) + c.dim("░".repeat(barLen - filled));
       const budget = budgetChars(model);
       console.log(`\n  ${c.bold("Context")}  ${c.dim(describeModel(model))}`);
-      console.log(`  ${bar}  ${pct}%  ${c.dim(`(~${tok} / ${(win / 1000).toFixed(0)}k tokens)`)}`);
-      console.log(c.dim(`  messages ~${Math.round(textCh / 4)} tok · tool results ~${Math.round(toolCh / 4)} tok · other ~${Math.round(otherCh / 4)} tok · ${history.length} msgs`));
-      console.log(c.dim(`  auto-compaction: evict ~${Math.round((budget * 0.60) / 4 / 1000)}k tok · summarize ~${Math.round((budget * 0.85) / 4 / 1000)}k tok`));
-      if (tok > (budget * 0.85) / 4) console.log(c.yellow("  ⚠ over the summary threshold — /compact to free space now"));
+      console.log(`  ${bar}  ${pct}%  ${c.dim(`(~${totalTok} / ${(win / 1000).toFixed(0)}k tokens · estimate)`)}`);
+      console.log(c.dim(`  system+tools ~${sysTok + toolsTok} tok ${c.dim(`(prompt ~${sysTok} · tools ~${toolsTok})`)}`));
+      console.log(c.dim(`  conversation ~${histTok} tok  ${c.dim(`(messages ~${tk(textCh)} · tool results ~${tk(toolCh)} · ${history.length} msgs)`)}`));
+      console.log(c.dim(`  auto-compaction (history): evict ~${Math.round((budget * 0.60) / 4 / 1000)}k tok · summarize ~${Math.round((budget * 0.85) / 4 / 1000)}k tok`));
+      if (histTok > (budget * 0.85) / 4) console.log(c.yellow("  ⚠ history is over the summary threshold — /compact to free space now"));
       console.log("");
       break;
     }
     case "diff": {
-      const r = await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git -c color.ui=always --no-pager diff --stat; echo; git -c color.ui=always --no-pager diff", signal: activeAbort?.signal });
-      const out = r.output.trim();
-      if (!out) { console.log(c.dim("  no uncommitted changes")); break; }
-      if (/not a git repository|fatal:/i.test(out)) { console.log(c.dim("  not a git repository (or git unavailable)")); break; }
-      const lines = out.split("\n"), cap = 400;
+      // status --short surfaces untracked/new files (which a bare `git diff` omits); the full diff follows,
+      // separated by a sentinel. Check ONLY the status section for the not-a-repo error — the diff body can
+      // legitimately contain the phrase "not a git repository" (e.g. this very source file).
+      const r = await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git -c color.ui=always --no-pager status --short 2>&1; echo '@@OB1DIFF@@'; git -c color.ui=always --no-pager diff 2>&1", signal: activeAbort?.signal });
+      const [statusPart = "", diffPart = ""] = r.output.split("@@OB1DIFF@@");
+      if (/not a git repository|fatal:/i.test(statusPart)) { console.log(c.dim("  not a git repository (or git unavailable)")); break; }
+      const body = (statusPart.trim() + (diffPart.trim() ? "\n\n" + diffPart.trim() : "")).trim();
+      if (!body) { console.log(c.dim("  no uncommitted changes")); break; }
+      const lines = body.split("\n"), cap = 400;
       console.log("\n" + lines.slice(0, cap).join("\n"));
       if (lines.length > cap) console.log(c.dim(`  … ${lines.length - cap} more lines (run \`git diff\` for the full output)`));
       console.log("");
@@ -1352,11 +1375,17 @@ async function handleCommand(line: string): Promise<boolean> {
     }
     case "export": {
       if (!history.length) { console.log(c.dim("  nothing to export yet")); break; }
+      const text = renderTranscript(history);
+      if (/^(clipboard|copy|clip)$/i.test(arg.trim())) {
+        const ok = await copyToClipboard(text);
+        console.log(ok ? c.green(`  ✓ copied ${history.length} messages to the clipboard`) : c.yellow("  couldn't access the clipboard — try /export <file> instead"));
+        break;
+      }
       try {
         const dir = join(cfg.dataDir, "exports");
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
         const file = arg ? (arg.startsWith("/") ? arg : join(cfg.cwd, arg)) : join(dir, `conversation-${convoId}.md`);
-        writeFileSync(file, renderTranscript(history));
+        writeFileSync(file, text);
         console.log(c.green(`  ✓ exported ${history.length} messages → ${file}`));
       } catch (e) { console.log(c.red(`  /export failed: ${(e as Error).message}`)); }
       break;
@@ -2022,6 +2051,17 @@ async function runTui(startup: string[]): Promise<void> {
   // providers via /models toggles it. [[no-auto-escalation-to-expensive-modes]]
   ctrl.upsellEligible = () => cfg.providerProfile === "freellmapi";
   ctrl.onUpsell = () => { void openPricingPage(); };
+  // @path autocomplete: complete against the workspace file list (built once, lazily, from the repo map so
+  // it respects ignores). Prefix matches first, then substring; capped at 10.
+  let _completeFiles: string[] | null = null;
+  ctrl.completeFiles = (q: string): string[] => {
+    if (!_completeFiles) { try { _completeFiles = buildRepoMap(cfg.cwd).files.map((f) => f.path).sort(); } catch { _completeFiles = []; } }
+    const ql = q.toLowerCase();
+    if (!ql) return _completeFiles.slice(0, 10);
+    const pref = _completeFiles.filter((f) => f.toLowerCase().startsWith(ql));
+    const sub = _completeFiles.filter((f) => !f.toLowerCase().startsWith(ql) && f.toLowerCase().includes(ql));
+    return [...pref, ...sub].slice(0, 10);
+  };
   // Open the parked error action (e.g. an upgrade link) when the user selects it via ↑ + Enter. If it
   // points at OUR managed server (the 402 upgrade link), go through the AUTHENTICATED handoff so checkout
   // attaches to THIS CLI's account — opening the raw URL would land on an anonymous/other browser session,
