@@ -14,8 +14,10 @@ not depend on it.
 
 ## Billing
 
-Hosted model credits spend at OpenRouter cost plus 30%. The margin pays for key custody, subscription
-billing, prompt-cache routing, usage dashboards, and one balance across frontier providers.
+Each plan includes a monthly credit balance that spends across frontier models at the per-model prices
+returned by `GET /v1/models` (and shown in the app). One balance, no keys to manage — credits cover key
+custody, subscription billing, prompt-cache routing, usage dashboards, and search. FreeLLMAPI and your
+own endpoints stay free.
 
 ## CLI Flow
 

@@ -4,5 +4,4 @@
 - Feature requests: use the GitHub feature request template.
 - Starter work: filter issues by `good first issue`.
 - Security issues: follow `SECURITY.md`; do not post private vulnerabilities publicly.
-
-Discord: add the live Overbrilliant Discord invite here before public launch.
+- Questions & discussion: open a GitHub issue for now. A chat community may follow after launch.
