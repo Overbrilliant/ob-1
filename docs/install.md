@@ -14,7 +14,7 @@ ob1
 Pin a release when you need a controlled rollout:
 
 ```sh
-curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.3
+curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.4
 ```
 
 Apple Silicon and Intel macOS release archives are published separately. The installer picks the right

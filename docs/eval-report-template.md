@@ -6,7 +6,7 @@ Use this template for the first published compute-matched eval. Keep failures in
 
 | Field | Value |
 |---|---|
-| OB-1 version | `v0.1.3` |
+| OB-1 version | `v0.1.4` |
 | Git SHA | `TODO` |
 | Date | `TODO` |
 | Machine | `TODO` |

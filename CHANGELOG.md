@@ -2,7 +2,7 @@
 
 All notable OB-1 CLI changes are documented here.
 
-## 0.1.4 - Unreleased
+## 0.1.4 - 2026-07-02
 
 - Made the first-run contract explicit: FreeLLMAPI is the default free path, BYOK/env endpoints are
   first-class, and hosted frontier models are the optional paid convenience tier.
