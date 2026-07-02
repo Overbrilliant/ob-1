@@ -5,7 +5,7 @@
 //   • manage_skill tool: create/update(full + targeted)/delete, gated (mutating=true), round-trips via use_skill
 //   • archived skills are hidden from the model index but visible to management views
 // Usage: bun run scripts/skill-learn-smoke.ts
-import { mkdtempSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listSkills, readSkill, writeSkill, patchSkill, deleteSkill, findSkill, setSkillState, learnedDir } from "../src/skills/registry.ts";
@@ -71,10 +71,10 @@ try {
   check("manage_skill create: discoverable in the model index", listSkills(dir).some((s) => s.name === "retry-pattern"));
   check("manage_skill create: loadable via use_skill", (readSkill(dir, "retry-pattern") ?? "").includes("exponential backoff"));
 
-  const c2 = await ms.run({ action: "update", name: "Retry Pattern", old_string: "exponential backoff", new_string: "exponential backoff with jitter" });
+  await ms.run({ action: "update", name: "Retry Pattern", old_string: "exponential backoff", new_string: "exponential backoff with jitter" });
   check("manage_skill update (targeted): applied", (readSkill(dir, "retry-pattern") ?? "").includes("with jitter"));
 
-  const c3 = await ms.run({ action: "update", name: "Retry Pattern", body: "Full new body." });
+  await ms.run({ action: "update", name: "Retry Pattern", body: "Full new body." });
   check("manage_skill update (full body): replaces, keeps description", (readSkill(dir, "retry-pattern") ?? "") === "Full new body." && findSkill(dir, "retry-pattern")?.description === "retry with backoff");
 
   const c4 = await ms.run({ action: "delete", name: "Retry Pattern" });

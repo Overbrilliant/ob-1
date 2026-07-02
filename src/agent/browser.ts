@@ -170,7 +170,7 @@ export async function runBrowserCheck(opts: BrowserCheckOpts): Promise<BrowserCh
       // of dead waiting per check, which made the agent look stuck). "load" fires reliably in a few hundred
       // ms; rely on the caller's waitForSelector / wait actions for any post-hydration settling.
       await page.goto(opts.url, { waitUntil: "load", timeout });
-    } catch (e) {
+    } catch {
       try { await page.goto(opts.url, { waitUntil: "domcontentloaded", timeout }); }
       catch (e2) { result.error = `could not load ${opts.url}: ${(e2 as Error).message}. Is the dev server running and serving this URL?`; return result; }
     }

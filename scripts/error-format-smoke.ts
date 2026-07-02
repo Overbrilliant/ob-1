@@ -18,6 +18,9 @@ check("402: detail is the server's human sentence", e402.detail === "No active p
 check("402: surfaces the upgrade action with its url", e402.action?.label === "Upgrade your plan" && e402.action?.url === "http://localhost:8787/upgrade");
 check("402: does NOT offer a pointless retry", e402.retry === false);
 check("402: reset hint pluralised", e402.hint === "Credits reset in 3 days.");
+const e402Exhausted = explainError(`API 402: {"error":"Monthly credits exhausted.","upgrade_url":"http://localhost:8787/upgrade","resets_in_days":1}`);
+check("402 exhausted: names monthly credits", e402Exhausted.title === "Monthly credits exhausted" && e402Exhausted.action?.label === "Upgrade for more credits");
+check("402 exhausted: reminds self-hosted routes still work", /FreeLLMAPI/.test(e402Exhausted.hint ?? "") && /1 day/.test(e402Exhausted.hint ?? ""));
 
 // The rendered block: no raw JSON, no naked url when hyperlinks degrade, carries the action label.
 const r402 = renderError(E402);
@@ -38,6 +41,8 @@ check("403 FreeLLMAPI: points to /freellm", e403Free.title === "FreeLLMAPI acces
 
 // 429 / 5xx → retryable.
 check("429: rate limited + retryable", explainError(`API 429: {"error":"slow down"}`).retry === true);
+const e429Free = explainError(`API 429: {"error":"anonymous provider rate limit"}`, { providerProfile: "freellmapi" });
+check("429 FreeLLMAPI: explains anonymous pool pressure", e429Free.title === "FreeLLMAPI anonymous pool busy" && /provider key/.test(e429Free.hint ?? "") && e429Free.retry === true);
 check("5xx: provider error + retryable", (() => { const e = explainError(`API 503: upstream boom`); return e.title === "Provider error" && e.retry === true; })());
 
 // OpenRouter-style nested error object.

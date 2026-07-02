@@ -6,7 +6,7 @@
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveSettings, hasPersistedSettings, ob1ServerUrl } from "../src/config.ts";
+import { loadConfig, saveSettings, hasPersistedSettings } from "../src/config.ts";
 
 let fail = false;
 const check = (n: string, ok: boolean, extra = "") => { console.log(`${ok ? "✓" : "✗"} ${n}${extra ? ` — ${extra}` : ""}`); if (!ok) fail = true; };
@@ -14,7 +14,7 @@ const check = (n: string, ok: boolean, extra = "") => { console.log(`${ok ? "✓
 const tmp = mkdtempSync(join(tmpdir(), "ob1-settings-"));
 const origCwd = process.cwd();
 const savedEnv = { ...process.env };
-delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL; delete process.env.OB1_PROVIDER; delete process.env.OB1_TOKEN; delete process.env.OB1_SERVER;
+delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.GEMINI_API_KEY; delete process.env.GROQ_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL; delete process.env.OB1_API_KEY; delete process.env.OB1_PROVIDER; delete process.env.OB1_TOKEN; delete process.env.OB1_SERVER;
 delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_REPO_MAP; delete process.env.OB1_MEM_EVOLVE; delete process.env.OB1_MEM_REFLECT; delete process.env.OB1_MEM_AUTOLINK; delete process.env.OB1_SKILL_LEARN; delete process.env.OB1_QUALITY; delete process.env.OB1_CHECKPOINT;
 
 try {
@@ -86,11 +86,17 @@ try {
   process.env.OPENAI_API_KEY = "openai-test-key";
   process.env.ANTHROPIC_API_KEY = "anthropic-test-key";
   process.env.OB1_BASE_URL = "https://direct.example/v1";
+  process.env.OB1_API_KEY = "direct-key";
   const oldSettingsDir = process.env.OB1_SETTINGS_DIR;
-  process.env.OB1_SETTINGS_DIR = join(tmp, "direct-env-ignored-settings");
-  const directIgnored = loadConfig();
-  check("direct provider env keys are ignored for model routing", directIgnored.apiKey === undefined && directIgnored.baseUrl === `${ob1ServerUrl()}/v1` && directIgnored.provider === "openai" && directIgnored.providerProfile === undefined, `${directIgnored.provider}/${directIgnored.baseUrl}/${directIgnored.apiKey}/${directIgnored.providerProfile}`);
-  delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL;
+  process.env.OB1_SETTINGS_DIR = join(tmp, "direct-env-settings");
+  const directEnv = loadConfig();
+  check("direct provider env keys route the model at runtime", directEnv.apiKey === "direct-key" && directEnv.baseUrl === "https://direct.example/v1" && directEnv.provider === "openai" && directEnv.providerProfile === undefined, `${directEnv.provider}/${directEnv.baseUrl}/${directEnv.apiKey}/${directEnv.providerProfile}`);
+  saveSettings(directEnv);
+  check("direct env route does not create a settings file with env secrets", !hasPersistedSettings(directEnv.settingsDir) || !readFileSync(join(directEnv.settingsDir, "settings.json"), "utf8").includes("direct-key"));
+  delete process.env.OB1_BASE_URL; delete process.env.OB1_API_KEY;
+  const openRouterEnv = loadConfig();
+  check("OPENROUTER_API_KEY routes when generic OB1_BASE_URL is absent", openRouterEnv.baseUrl === "https://openrouter.ai/api/v1" && openRouterEnv.apiKey === "or-test-key", `${openRouterEnv.baseUrl}/${openRouterEnv.apiKey}`);
+  delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY;
   process.env.OB1_SETTINGS_DIR = oldSettingsDir;
 
   // 5) a direct Anthropic provider config is not persisted as a model route.

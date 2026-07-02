@@ -8,8 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   detectRuntime, freePort, isCloned, ensureCloned, ensureEnv, waitReady, nodeBuild, MANAGED_PORT,
-  dashboardSetup, fetchUnifiedKey, isUsable, providerKeyCount, loadManaged, saveManaged, clearManaged,
-  type Runner, type ManagedState,
+  dashboardSetup, dashboardSetupDetailed, fetchUnifiedKey, isUsable, providerKeyCount, loadManaged, saveManaged, clearManaged,
+  formatManagedStatus, probeManagedStatus, type Runner, type ManagedState,
 } from "../src/cli/freellm-manage.ts";
 
 let fail = false;
@@ -56,7 +56,7 @@ const tmp = mkdtempSync(join(tmpdir(), "ob1-flm-"));
 const settingsDir = join(tmp, ".ob1");
 mkdirSync(settingsDir, { recursive: true });
 const savedEnv = { ...process.env };
-for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OB1_TOKEN", "OB1_SERVER", "OB1_SEARXNG_URL"]) delete process.env[k];
+for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OB1_BASE_URL", "OB1_API_KEY", "OB1_TOKEN", "OB1_SERVER", "OB1_SEARXNG_URL"]) delete process.env[k];
 process.env.OB1_SETTINGS_DIR = settingsDir;
 const origCwd = process.cwd();
 process.chdir(tmp);
@@ -77,6 +77,31 @@ try {
   writeFileSync(join(repoDir, "package.json"), "{}"); // pretend already cloned
   check("isCloned true once package.json exists", isCloned(repoDir));
   check("ensureCloned no-ops (pull) on an existing clone", ensureCloned(repoDir, mk(() => true)) === true);
+  const cloneDir = join(tmp, "freellmapi-clone");
+  const cloneRepos: string[] = [];
+  const cloneRunner: Runner = {
+    has: () => true,
+    exec: (a) => {
+      if (a[1] !== "clone") return { code: 0, out: "" };
+      cloneRepos.push(a[4]);
+      mkdirSync(a[5], { recursive: true });
+      writeFileSync(join(a[5], "package.json"), "{}");
+      return { code: 0, out: "" };
+    },
+    spawnDetached: () => 4242,
+  };
+  check("ensureCloned uses the current FreeLLMAPI repo", ensureCloned(cloneDir, cloneRunner) && isCloned(cloneDir) && cloneRepos.length === 1 && /tashfeenahmed\/freellmapi/.test(cloneRepos[0]));
+  const repairDir = join(tmp, "freellmapi-repair");
+  mkdirSync(join(repairDir, "data"), { recursive: true });
+  writeFileSync(join(repairDir, ".env"), "ENCRYPTION_KEY=keep\nPORT=49317\n");
+  writeFileSync(join(repairDir, "data", "freeapi.db"), "local provider key db");
+  check(
+    "ensureCloned preserves .env + local data when repairing a partial checkout",
+    ensureCloned(repairDir, cloneRunner) &&
+      isCloned(repairDir) &&
+      readFileSync(join(repairDir, ".env"), "utf8").includes("ENCRYPTION_KEY=keep") &&
+      readFileSync(join(repairDir, "data", "freeapi.db"), "utf8") === "local provider key db",
+  );
   ensureEnv(repoDir, port);
   const env = readFileSync(join(repoDir, ".env"), "utf8");
   check("ensureEnv writes ENCRYPTION_KEY (64 hex) + PORT", /ENCRYPTION_KEY=[0-9a-f]{64}/.test(env) && env.includes(`PORT=${port}`));
@@ -118,6 +143,8 @@ try {
   check("dashboardSetup (first run) returns a session token", !!session);
   const session2 = await dashboardSetup(url, "u@x", "supersecret1");
   check("dashboardSetup falls back to login when already set up (409)", !!session2);
+  const nonExistingFailure = await dashboardSetupDetailed(`${url}/broken`, "u@x", "supersecret1");
+  check("dashboardSetupDetailed does not label non-409 errors as existing accounts", !nonExistingFailure.ok && nonExistingFailure.existing === false && nonExistingFailure.status === 404);
   const key = await fetchUnifiedKey(url, session!);
   check("fetchUnifiedKey returns the unified API key", key === UNIFIED);
   check("fetchUnifiedKey rejects a bad session", (await fetchUnifiedKey(url, "nope")) === null);
@@ -125,8 +152,12 @@ try {
   // ── usable vs "user added keys" (anon providers serve models with 0 user keys) ──
   check("isUsable true even with 0 user keys (anon providers)", (await isUsable(url, key!)) === true);
   check("providerKeyCount 0 before any key is added", (await providerKeyCount(url, session!)) === 0);
+  const anonProbe = await probeManagedStatus({ managed: true, dir: repoDir, runtime: "docker", port, url, sessionToken: session!, providerKeys: 0 });
+  check("probeManagedStatus distinguishes proxy, anonymous usability, and key count", anonProbe.proxyUp && anonProbe.anonymousModelsUsable === true && anonProbe.providerKeys === 0);
+  check("formatManagedStatus names anonymous models separately", /proxy running/.test(formatManagedStatus(anonProbe)) && /anonymous models usable/.test(formatManagedStatus(anonProbe)) && /0 provider keys/.test(formatManagedStatus(anonProbe)));
   state.providerKeys = 2; // user adds keys in the dashboard
   check("providerKeyCount reflects added keys", (await providerKeyCount(url, session!)) === 2);
+  check("probeManagedStatus reflects added provider keys", (await probeManagedStatus({ managed: true, dir: repoDir, runtime: "docker", port, url, sessionToken: session!, providerKeys: 0 })).providerKeys === 2);
 
   // ── AUTO-WIRE: persist creds → loadConfig resolves FreeLLMAPI as the active provider ──
   const { persistActiveProvider, loadConfig } = await import("../src/config.ts");
@@ -136,10 +167,10 @@ try {
   check("auto-wired: baseUrl + apiKey come from the managed proxy", cfg.baseUrl === `${url}/v1` && cfg.apiKey === UNIFIED, `${cfg.baseUrl} / ${cfg.apiKey}`);
 
   // ── managed-state round-trip ──
-  const st: ManagedState = { managed: true, dir: repoDir, runtime: "docker", port, url, email: "u@x", sessionToken: session!, providerKeys: 2 };
+  const st: ManagedState = { managed: true, dir: repoDir, runtime: "docker", port, url, email: "u@x", dashboardPassword: "supersecret1", sessionToken: session!, providerKeys: 2 };
   saveManaged(st, settingsDir);
   const reloaded = loadManaged(settingsDir);
-  check("managed state round-trips", reloaded?.url === url && reloaded?.runtime === "docker" && reloaded?.providerKeys === 2);
+  check("managed state round-trips", reloaded?.url === url && reloaded?.runtime === "docker" && reloaded?.providerKeys === 2 && reloaded?.dashboardPassword === "supersecret1");
   clearManaged(settingsDir);
   check("clearManaged removes the state file", loadManaged(settingsDir) === null && !existsSync(join(settingsDir, "freellm.json")));
 } finally {

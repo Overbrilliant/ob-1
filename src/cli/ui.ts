@@ -1,4 +1,6 @@
 // Tiny zero-dependency ANSI helpers + banner. (Ink/TUI is a later phase; R7.)
+import { CLI_VERSION } from "../version.ts";
+
 const ESC = "\x1b[";
 function colorEnabled(): boolean {
   return !Object.prototype.hasOwnProperty.call(process.env, "NO_COLOR");
@@ -118,12 +120,16 @@ export function explainError(raw: string, ctx: ErrorExplainContext = {}): Friend
   const providerProfile = ctx.providerProfile;
 
   switch (status) {
-    case 402: return {
-      title: "Subscription required",
-      detail: serverMsg || "Your plan doesn't cover intelligent models.",
-      action: upgradeUrl ? { label: "Upgrade your plan", url: upgradeUrl } : undefined,
-      hint: resetHint, retry: false,
-    };
+    case 402: {
+      const exhausted = /exhaust|credit/i.test(serverMsg ?? "");
+      return {
+        title: exhausted ? "Monthly credits exhausted" : "Subscription required",
+        detail: serverMsg || (exhausted ? "Your hosted monthly credits are used up." : "Your plan doesn't cover intelligent models."),
+        action: upgradeUrl ? { label: exhausted ? "Upgrade for more credits" : "Upgrade your plan", url: upgradeUrl } : undefined,
+        hint: [resetHint, exhausted ? "FreeLLMAPI and custom endpoints keep working outside hosted credits." : undefined].filter(Boolean).join(" ") || undefined,
+        retry: false,
+      };
+    }
     case 401:
       if (providerProfile === "freellmapi") return {
         title: "FreeLLMAPI authentication needed",
@@ -160,11 +166,18 @@ export function explainError(raw: string, ctx: ErrorExplainContext = {}): Friend
       title: "Not found",
       detail: serverMsg || "The model or endpoint wasn't found — check the model id.", retry: false,
     };
-    case 429: return {
-      title: "Rate limited",
-      detail: serverMsg || "Too many requests right now.",
-      hint: "Wait a moment, then retry.", retry: true,
-    };
+    case 429:
+      if (providerProfile === "freellmapi") return {
+        title: "FreeLLMAPI anonymous pool busy",
+        detail: serverMsg || "The current anonymous route is throttled or out of shared capacity.",
+        hint: "Wait and retry, or run `/freellm` and add your own provider key for reliable capacity.",
+        retry: true,
+      };
+      return {
+        title: "Rate limited",
+        detail: serverMsg || "Too many requests right now.",
+        hint: "Wait a moment, then retry.", retry: true,
+      };
   }
   if (status && status >= 500) return {
     title: "Provider error",
@@ -211,7 +224,7 @@ export function banner(): string {
     "",
     c.bold(c.brightCyan(art)),                              // prominent wordmark
     "",
-    "  " + c.bold(c.cyan("OB-1")) + c.dim("  free, multi-agent, token-efficient coding agent") + c.gray("   ·   v0.1.3"),
+    "  " + c.bold(c.cyan("OB-1")) + c.dim("  free, multi-agent, token-efficient coding agent") + c.gray(`   ·   v${CLI_VERSION}`),
     c.gray(rule),
     c.cyan("  /help") + c.dim(" commands   ·   ") + c.cyan("/models") + c.dim(" setup   ·   press ") + c.cyan("/") + c.dim(" for menu"), // model shown once, below
     "",

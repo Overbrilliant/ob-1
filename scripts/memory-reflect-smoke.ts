@@ -54,9 +54,9 @@ const mk = (reflectReply: string) => {
 {
   const { store } = mk('[{"insight":"top-level synthesis","sources":[1],"importance":5}]');
   // seed one fact, then manually add near-cap reflections to confirm the level math + window filter.
-  const a = store.addFact("base fact", "project", 5);
-  const r1 = store.addFact("mid reflection", "project", 5, { kind: "reflection", level: MAX_REFLECTION_DEPTH - 1 });
-  const atCap = store.addFact("capped reflection", "project", 5, { kind: "reflection", level: MAX_REFLECTION_DEPTH });
+  store.addFact("base fact", "project", 5);
+  store.addFact("mid reflection", "project", 5, { kind: "reflection", level: MAX_REFLECTION_DEPTH - 1 });
+  store.addFact("capped reflection", "project", 5, { kind: "reflection", level: MAX_REFLECTION_DEPTH });
   // Only facts with level < MAX are eligible sources; force a reflect and check it doesn't exceed the cap.
   const made = await store.reflect();
   const top = store.listFacts().filter((f) => f.kind === "reflection" && f.reflection_level === MAX_REFLECTION_DEPTH);

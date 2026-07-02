@@ -1,0 +1,34 @@
+# Maintainer: Overbrilliant <support@overbrilliant.com>
+pkgname=ob1-git
+pkgver=0.1.3.r0
+pkgrel=1
+pkgdesc="OB-1, the free open-source CLI coding agent"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Overbrilliant/ob-1"
+license=('Apache-2.0')
+depends=('bun' 'git')
+makedepends=('git')
+provides=('ob1')
+conflicts=('ob1' 'ob1-bin')
+source=('git+https://github.com/Overbrilliant/ob-1.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/ob-1"
+  local version
+  version="$(bun -e 'console.log(require("./package.json").version)')"
+  printf "%s.r%s.%s" "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "${srcdir}/ob-1"
+  install -dm755 "${pkgdir}/usr/lib/ob1"
+  cp -a . "${pkgdir}/usr/lib/ob1"
+  rm -rf "${pkgdir}/usr/lib/ob1/.git" "${pkgdir}/usr/lib/ob1/node_modules"
+  install -dm755 "${pkgdir}/usr/bin"
+  cat > "${pkgdir}/usr/bin/ob1" <<'EOF'
+#!/usr/bin/env sh
+exec bun run /usr/lib/ob1/src/index.ts "$@"
+EOF
+  chmod 755 "${pkgdir}/usr/bin/ob1"
+}

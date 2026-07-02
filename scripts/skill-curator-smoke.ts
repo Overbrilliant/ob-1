@@ -21,7 +21,6 @@ try {
   writeFileSync(join(dir, "skills", "shipped.md"), "---\nname: shipped\ndescription: shipped\norigin: user\n---\n\nShipped.\n");
   writeSkill(dir, { name: "deploy-flow", description: "deploy", body: "steps" });
 
-  const DAY = 86_400_000;
   const now = Date.parse("2026-06-22T00:00:00.000Z");
 
   // ── usage telemetry ───────────────────────────────────────────────────────

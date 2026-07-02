@@ -9,7 +9,6 @@
 //
 // This module is the pure, testable core (parse + command-build + observation-format) plus a loop with
 // injected model/exec/approve seams. Source: arxiv 2402.01030 (CodeAct) + OpenHands runtime.
-import type { Config } from "../config.ts";
 
 export interface CodeAction { lang: "python" | "bash"; code: string }
 

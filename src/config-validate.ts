@@ -6,6 +6,7 @@
 // warnings for unknown keys. Pure + dependency-free; loadPersisted() sanitizes through it, and a
 // /doctor-style check can surface the messages.
 import type { PersistedSettings } from "./config.ts";
+import { PROFILES } from "./providers/profiles.ts";
 
 const ENUMS: Record<string, readonly string[]> = {
   provider: ["openai"],
@@ -17,7 +18,7 @@ const ENUMS: Record<string, readonly string[]> = {
 };
 const BOOLS = ["planMode", "autoRoute", "subagents", "repoMap", "memEvolve", "memReflect", "memAutolink", "skillLearn", "checkpoint"] as const;
 const STRINGS = ["model", "providerUrl", "providerKey"] as const;
-const PROVIDER_PROFILES = ["freellmapi", "custom"] as const;
+const PROVIDER_PROFILES = PROFILES.map((p) => p.id);
 const KNOWN = new Set<string>([...Object.keys(ENUMS), ...BOOLS, ...STRINGS, "providerCreds"]);
 KNOWN.add("providerProfile");
 
@@ -54,13 +55,13 @@ export function validateSettings(raw: unknown): ValidationReport {
       if (typeof val === "string") value[key] = val;
       else errors.push({ field: key, message: `invalid ${key}: ${JSON.stringify(val)} — expected a string` });
     } else if (key === "providerProfile") {
-      if (typeof val === "string" && (PROVIDER_PROFILES as readonly string[]).includes(val)) value[key] = val;
+      if (typeof val === "string" && PROVIDER_PROFILES.includes(val)) value[key] = val;
       else errors.push({ field: key, message: `invalid providerProfile: ${JSON.stringify(val)} — expected one of ${PROVIDER_PROFILES.join(" | ")}` });
     } else if (key === "providerCreds") {
       if (isPlainObject(val)) {
         const creds: Record<string, { url: string; key: string }> = {};
         for (const [pid, entry] of Object.entries(val)) {
-          if (!(PROVIDER_PROFILES as readonly string[]).includes(pid)) {
+          if (!PROVIDER_PROFILES.includes(pid)) {
             warnings.push({ field: `providerCreds.${pid}`, message: `unknown provider profile "${pid}" (ignored)` });
             continue;
           }

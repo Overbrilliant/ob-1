@@ -27,6 +27,7 @@ const SMOKES = [
   "bash-validation-smoke.ts", // bash command intent classifier + block/warn/allow pipeline + run_bash guard
   "config-validate-smoke.ts", // settings schema validation: drop invalid fields, warn on unknown keys
   "cli-flags-smoke.ts",       // package-manager flags: --version / --help exit before interactive startup
+  "update-smoke.ts",          // non-blocking update-check comparison + registry parsing (mocked fetch)
   "claims-smoke.ts",          // structured claim/report schema: typing + hash dedupe + projection + render
   "green-contract-smoke.ts",  // graduated green contract: level→kinds + pass/fail + known-flake tolerance
   "task-quality-smoke.ts",    // task quality profile + evidence ledger + scenario scoring

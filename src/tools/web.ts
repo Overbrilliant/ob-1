@@ -4,8 +4,9 @@
 // an injectable `fetchFn`, so it's unit-testable without the network.
 
 import { lookup } from "node:dns/promises";
+import { CLI_VERSION } from "../version.ts";
 
-const UA = "OB-1/0.1 (+https://github.com/overbrilliant/ob-1)";
+const UA = `OB-1/${CLI_VERSION} (+https://github.com/overbrilliant/ob-1)`;
 const TIMEOUT_MS = 20_000;
 export type Fetcher = typeof fetch;
 /** Resolve a hostname to its IP address(es). Injectable so the SSRF DNS check stays hermetic in tests. */

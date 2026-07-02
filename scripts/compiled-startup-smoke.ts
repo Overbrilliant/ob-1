@@ -18,6 +18,9 @@ const runCwd = mkdtempSync(join(tmpdir(), "ob1-compiled-run-"));
 const env = { ...process.env };
 for (const key of [
   "ANTHROPIC_API_KEY",
+  "GEMINI_API_KEY",
+  "GROQ_API_KEY",
+  "OB1_API_KEY",
   "OB1_BASE_URL",
   "OB1_MODEL",
   "OB1_PROVIDER",

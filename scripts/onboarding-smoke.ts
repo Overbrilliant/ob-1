@@ -4,7 +4,8 @@
 import { mkdtempSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decideOnboard, isOnboarded, markOnboarded, subscribeFlow } from "../src/cli/onboarding.ts";
+import { decideOnboard, generatedDashboardCredentials, isOnboarded, markOnboarded, subscribeFlow } from "../src/cli/onboarding.ts";
+import { detectEnvProvider } from "../src/config.ts";
 
 let fail = false;
 const check = (n: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} ${n}`); if (!ok) fail = true; };
@@ -29,12 +30,26 @@ function mockServer(opts: { statusSeq: string[]; webLogin?: boolean }) {
   return { fetchFn, calls };
 }
 
-// ── gate: onboard interactively, once, whenever not signed in ──
-check("onboard when tty + fresh + signed-out", decideOnboard({ tty: true, onboarded: false, signedIn: false }) === true);
-check("no onboard on non-tty (pipe/CI)", decideOnboard({ tty: false, onboarded: false, signedIn: false }) === false);
-check("no onboard once already onboarded", decideOnboard({ tty: true, onboarded: true, signedIn: false }) === false);
-check("no onboard when already signed in", decideOnboard({ tty: true, onboarded: false, signedIn: true }) === false);
-check("still onboards when signed-out even if a provider is configured", decideOnboard({ tty: true, onboarded: false, signedIn: false }) === true);
+// ── gate: onboard interactively, once, only when no model route exists ──
+check("onboard when tty + fresh + no provider", decideOnboard({ tty: true, onboarded: false, hasProvider: false, hasEnvProvider: false }) === true);
+check("no onboard on non-tty (pipe/CI)", decideOnboard({ tty: false, onboarded: false, hasProvider: false, hasEnvProvider: false }) === false);
+check("no onboard once already onboarded", decideOnboard({ tty: true, onboarded: true, hasProvider: false, hasEnvProvider: false }) === false);
+check("no onboard when a provider is already saved", decideOnboard({ tty: true, onboarded: false, hasProvider: true, hasEnvProvider: false }) === false);
+check("no onboard when an explicit OB1_BASE_URL route is available", decideOnboard({ tty: true, onboarded: false, hasProvider: false, hasEnvProvider: true }) === false);
+check("named env keys are offered during onboarding, not treated as already configured", decideOnboard({ tty: true, onboarded: false, hasProvider: false, hasEnvProvider: false }) === true);
+
+{
+  const env = { OPENROUTER_API_KEY: "or-test" } as any;
+  check("detectEnvProvider finds OPENROUTER_API_KEY", detectEnvProvider(env)?.baseUrl === "https://openrouter.ai/api/v1");
+  check("detectEnvProvider lets OB1_BASE_URL win over named keys", detectEnvProvider({ ...env, OB1_BASE_URL: "localhost:9999" } as any)?.baseUrl === "http://localhost:9999/v1");
+}
+{
+  const creds = generatedDashboardCredentials();
+  // Must use a REAL TLD: FreeLLMAPI's dashboard rejects invented TLDs like `.ob1` with a 400,
+  // which stalls first-run setup at the reconnect prompt (found live 2026-07-02).
+  check("generated FreeLLMAPI dashboard email is local and valid-looking", /^ob1-local-[0-9a-f]{10}@local\.overbrilliant\.com$/.test(creds.email));
+  check("generated FreeLLMAPI dashboard password is strong enough for setup", creds.password.length >= 24);
+}
 
 // (auth + provider choice are now up/down arrow selectors — interactive, covered by manual e2e)
 

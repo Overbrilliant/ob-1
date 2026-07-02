@@ -26,6 +26,8 @@ export interface ProviderProfile {
   defaultModel: string;
   /** Location presets offered as the first row of the setup form. */
   presets: { label: string; hint: string; url: string }[];
+  /** Well-known environment keys for this provider. Used by onboarding/docs only; never persisted. */
+  envKeys?: string[];
   /** When true, the API key is OPTIONAL: a local/LAN OpenAI-compatible server (Ollama, llama.cpp, vLLM,
    *  LM Studio, …) usually needs none. The setup form lets you Save with a blank key, no Authorization
    *  header is sent on the wire, and the keyless profile is persisted + restored across restarts. */
@@ -39,11 +41,14 @@ export interface ProviderProfile {
 export const FREELLMAPI: ProviderProfile = {
   id: "freellmapi",
   name: "FreeLLMAPI",
-  tagline: "One OpenAI-compatible endpoint · ~16 free LLM providers stacked (~1.7B tokens/mo)",
+  tagline: "One OpenAI-compatible endpoint · anonymous bootstrap routes + your free provider keys",
   blurb: [
-    "FreeLLMAPI is a self-hosted proxy that aggregates the FREE tiers of ~16 LLM providers",
-    "(Gemini, Groq, Cerebras, Mistral, GitHub Models, Cohere, …) behind ONE",
-    "OpenAI-compatible endpoint — ~1.7B tokens/month with no per-provider rate-limit juggling.",
+    "FreeLLMAPI is a self-hosted proxy that aggregates anonymous bootstrap routes and the",
+    "FREE tiers of providers you connect yourself (Gemini, Groq, Cerebras, Mistral,",
+    "GitHub Models, Cohere, …) behind ONE OpenAI-compatible endpoint.",
+    "",
+    "Anonymous public routes are useful for setup and quick checks, but shared capacity can throttle.",
+    "Add your own provider keys when you need predictable coding sessions.",
     "",
     "You run the server (Docker / Node) on this machine or a remote host; OB-1 just points at it.",
     "Your provider keys stay encrypted inside the server — OB-1 only needs the proxy URL + token.",
@@ -88,12 +93,130 @@ export const CUSTOM: ProviderProfile = {
   ],
 };
 
-// The frontier (paid) models are NOT a user-configurable provider profile: they're served by the managed
-// OB-1 server on the user's subscription credits (see config.ts resolveProvider's managed-server path and
-// index.ts switchToManaged). The client never asks the user for an upstream gateway key — picking a
-// frontier model from /models just switches the active model on the managed server. The user-facing
-// provider profiles are the self-hosted FreeLLMAPI proxy and a bring-your-own Custom endpoint.
-export const PROFILES: ProviderProfile[] = [FREELLMAPI, CUSTOM];
+export const OPENROUTER: ProviderProfile = {
+  id: "openrouter",
+  name: "OpenRouter",
+  tagline: "Bring your own OpenRouter key for 300+ hosted models",
+  blurb: [
+    "Use your own OpenRouter account and key. OB-1 talks to OpenRouter through the same",
+    "OpenAI-compatible route as every other provider, but your billing and limits stay with OpenRouter.",
+    "",
+    "Set OPENROUTER_API_KEY for a runtime-only route, or save this profile from /models.",
+  ],
+  wire: "openai",
+  docsUrl: "https://openrouter.ai/docs",
+  defaultLocalUrl: "https://openrouter.ai/api/v1",
+  keyPrefix: "sk-or-",
+  defaultModel: "qwen/qwen3.6-plus",
+  envKeys: ["OPENROUTER_API_KEY"],
+  presets: [
+    { label: "OpenRouter", hint: "hosted OpenAI-compatible gateway", url: "https://openrouter.ai/api/v1" },
+  ],
+};
+
+export const OLLAMA: ProviderProfile = {
+  id: "ollama",
+  name: "Ollama",
+  tagline: "Local models through Ollama's OpenAI-compatible endpoint",
+  blurb: [
+    "Run models locally with Ollama, then point OB-1 at the local OpenAI-compatible endpoint.",
+    "The API key is usually blank. Type the model id you have pulled, such as llama3.1 or qwen2.5-coder.",
+  ],
+  wire: "openai",
+  docsUrl: "https://github.com/ollama/ollama/blob/main/docs/openai.md",
+  defaultLocalUrl: "http://localhost:11434/v1",
+  defaultModel: "",
+  keyOptional: true,
+  needsModel: true,
+  presets: [
+    { label: "Local", hint: "Ollama default :11434", url: "http://localhost:11434/v1" },
+    { label: "LAN", hint: "Ollama on another machine", url: "http://" },
+  ],
+};
+
+export const LM_STUDIO: ProviderProfile = {
+  id: "lmstudio",
+  name: "LM Studio",
+  tagline: "Local desktop models through LM Studio's OpenAI-compatible server",
+  blurb: [
+    "Start LM Studio's local server, then connect OB-1 to its /v1 endpoint.",
+    "The API key is usually blank. Type the model id shown by LM Studio.",
+  ],
+  wire: "openai",
+  docsUrl: "https://lmstudio.ai/docs/app/api",
+  defaultLocalUrl: "http://localhost:1234/v1",
+  defaultModel: "",
+  keyOptional: true,
+  needsModel: true,
+  presets: [
+    { label: "Local", hint: "LM Studio default :1234", url: "http://localhost:1234/v1" },
+    { label: "LAN", hint: "LM Studio on another machine", url: "http://" },
+  ],
+};
+
+export const LLAMA_CPP: ProviderProfile = {
+  id: "llamacpp",
+  name: "llama.cpp",
+  tagline: "Local or LAN llama.cpp server",
+  blurb: [
+    "Run llama.cpp's server with OpenAI-compatible mode enabled, then connect OB-1 to /v1.",
+    "The API key is usually blank. Type the model id your server exposes.",
+  ],
+  wire: "openai",
+  docsUrl: "https://github.com/ggml-org/llama.cpp/tree/master/tools/server",
+  defaultLocalUrl: "http://localhost:8080/v1",
+  defaultModel: "",
+  keyOptional: true,
+  needsModel: true,
+  presets: [
+    { label: "Local", hint: "common llama.cpp server port :8080", url: "http://localhost:8080/v1" },
+    { label: "LAN", hint: "llama.cpp on another machine", url: "http://" },
+  ],
+};
+
+export const VLLM: ProviderProfile = {
+  id: "vllm",
+  name: "vLLM",
+  tagline: "Self-hosted OpenAI-compatible vLLM server",
+  blurb: [
+    "Point OB-1 at a vLLM OpenAI-compatible server running locally, on a LAN GPU box, or in your cloud.",
+    "Leave the API key blank unless your server enforces one. Type the served model id.",
+  ],
+  wire: "openai",
+  docsUrl: "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html",
+  defaultLocalUrl: "http://localhost:8000/v1",
+  defaultModel: "",
+  keyOptional: true,
+  needsModel: true,
+  presets: [
+    { label: "Local", hint: "common vLLM port :8000", url: "http://localhost:8000/v1" },
+    { label: "LAN / Cloud", hint: "vLLM on another host", url: "http://" },
+  ],
+};
+
+export const GROQ: ProviderProfile = {
+  id: "groq",
+  name: "Groq",
+  tagline: "Bring your own Groq key for fast hosted open models",
+  blurb: [
+    "Use your own Groq account and key through Groq's OpenAI-compatible endpoint.",
+    "Set GROQ_API_KEY for a runtime-only route, or save this profile from /models.",
+  ],
+  wire: "openai",
+  docsUrl: "https://console.groq.com/docs/openai",
+  defaultLocalUrl: "https://api.groq.com/openai/v1",
+  defaultModel: "llama-3.3-70b-versatile",
+  envKeys: ["GROQ_API_KEY"],
+  presets: [
+    { label: "Groq", hint: "hosted OpenAI-compatible endpoint", url: "https://api.groq.com/openai/v1" },
+  ],
+};
+
+// The hosted frontier tier is NOT a provider profile: those models are served by the managed OB-1 server
+// on subscription credits (see config.ts resolveProvider's managed-server path and index.ts
+// switchToManaged). BYOK/provider-neutral routes are profiles: FreeLLMAPI, named OpenAI-compatible
+// presets, and a bring-your-own Custom endpoint.
+export const PROFILES: ProviderProfile[] = [FREELLMAPI, OPENROUTER, OLLAMA, LM_STUDIO, LLAMA_CPP, VLLM, GROQ, CUSTOM];
 
 export function profileById(id?: string): ProviderProfile | undefined {
   return id ? PROFILES.find((p) => p.id === id) : undefined;

@@ -8,7 +8,7 @@
 import { useEffect, useReducer, useRef, useState, Component, type ReactNode } from "react";
 import { render, Box, Text, Static, useApp, useInput, usePaste } from "ink";
 import TextInput from "ink-text-input";
-import { estimateCost, modelSpec, modelReasoning } from "../providers/models.ts";
+import { modelSpec, modelReasoning } from "../providers/models.ts";
 import { costForUsage } from "../usage/log.ts";
 import type { ProcRegistry, ProcInfo } from "../agent/procs.ts";
 import type { AgentRegistry, AgentInfo } from "../agent/agent-registry.ts";

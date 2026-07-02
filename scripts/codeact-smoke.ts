@@ -3,7 +3,7 @@
 // observation formatting (exit_code + head/tail clip), and the runCodeAct loop: execute→observe→repeat
 // until a no-code answer, the approval gate, abort, the step cap, and the repetition/loop guard.
 // Usage: bun run scripts/codeact-smoke.ts
-import { parseCodeAction, buildCommand, formatObservation, clip, runCodeAct, CODEACT_SYSTEM, MAX_CODEACT_STEPS, type CodeAction } from "../src/agent/codeact.ts";
+import { parseCodeAction, buildCommand, formatObservation, clip, runCodeAct, CODEACT_SYSTEM, MAX_CODEACT_STEPS } from "../src/agent/codeact.ts";
 
 let fail = false;
 const check = (n: string, ok: boolean, extra = "") => { console.log(`${ok ? "✓" : "✗"} ${n}${extra ? ` — ${extra}` : ""}`); if (!ok) fail = true; };

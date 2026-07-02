@@ -4,7 +4,7 @@
 //   • web_search defaults to the server /v1/search with Bearer auth; OB1_SEARXNG_URL → direct X-API-Key
 //   • the paid (402) and not-signed-in (401) search responses produce actionable errors
 // Pure + hermetic (temp settings dir, injected fetch). Usage: bun run scripts/auth-route-smoke.ts
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, loadAuthToken, ob1ServerUrl } from "../src/config.ts";
@@ -14,7 +14,7 @@ let fail = false;
 const check = (n: string, ok: boolean, d = "") => { console.log(`${ok ? "✓" : "✗"} ${n}${ok || !d ? "" : `  — ${d}`}`); if (!ok) fail = true; };
 
 const savedEnv = { ...process.env };
-for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OB1_BASE_URL", "OB1_PROVIDER", "OB1_TOKEN", "OB1_SERVER", "OB1_SEARXNG_URL", "OB1_SEARXNG_KEY"]) delete process.env[k];
+for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OB1_BASE_URL", "OB1_API_KEY", "OB1_PROVIDER", "OB1_TOKEN", "OB1_SERVER", "OB1_SEARXNG_URL", "OB1_SEARXNG_KEY"]) delete process.env[k];
 
 const tmp = mkdtempSync(join(tmpdir(), "ob1-auth-"));
 const settingsDir = join(tmp, ".ob1");
@@ -39,14 +39,21 @@ try {
   check("web_search defaults to the server /v1/search + Bearer", cfg.searxngUrl === `${ob1ServerUrl()}/v1/search` && cfg.searxngBearer === true);
   check("web_search key is the token", cfg.searxngKey === "file-token");
 
-  // ── direct model-provider env keys are ignored; Custom API must be configured via /models ──
+  // ── model-provider env precedence ──
   process.env.OPENROUTER_API_KEY = "or-test";
   process.env.OPENAI_API_KEY = "oa-test";
   process.env.ANTHROPIC_API_KEY = "anthropic-test";
   process.env.OB1_BASE_URL = "https://direct.example/v1";
+  process.env.OB1_API_KEY = "direct-test";
   const cfgDirectIgnored = loadConfig();
-  check("direct model-provider env keys do not bypass the managed route", cfgDirectIgnored.baseUrl === `${ob1ServerUrl()}/v1` && cfgDirectIgnored.apiKey === "file-token" && cfgDirectIgnored.providerProfile === undefined, `${cfgDirectIgnored.baseUrl}/${cfgDirectIgnored.apiKey}/${cfgDirectIgnored.providerProfile}`);
-  delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL;
+  check("OB1_BASE_URL/OB1_API_KEY bypass the managed route", cfgDirectIgnored.baseUrl === "https://direct.example/v1" && cfgDirectIgnored.apiKey === "direct-test" && cfgDirectIgnored.providerProfile === undefined, `${cfgDirectIgnored.baseUrl}/${cfgDirectIgnored.apiKey}/${cfgDirectIgnored.providerProfile}`);
+  delete process.env.OB1_BASE_URL; delete process.env.OB1_API_KEY;
+  const cfgNamedWithToken = loadConfig();
+  check("named provider env keys do not shadow a signed-in managed route", cfgNamedWithToken.baseUrl === `${ob1ServerUrl()}/v1` && cfgNamedWithToken.apiKey === "file-token" && cfgNamedWithToken.providerProfile === undefined, `${cfgNamedWithToken.baseUrl}/${cfgNamedWithToken.apiKey}/${cfgNamedWithToken.providerProfile}`);
+  rmSync(join(settingsDir, "auth.json"), { force: true });
+  const cfgOpenRouter = loadConfig();
+  check("OPENROUTER_API_KEY routes to OpenRouter when no token/profile exists", cfgOpenRouter.baseUrl === "https://openrouter.ai/api/v1" && cfgOpenRouter.apiKey === "or-test" && cfgOpenRouter.providerProfile === undefined, `${cfgOpenRouter.baseUrl}/${cfgOpenRouter.apiKey}/${cfgOpenRouter.providerProfile}`);
+  delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY;
 
   // ── direct SearXNG override uses X-API-Key (not Bearer) ──
   process.env.OB1_SEARXNG_URL = "https://searx.example/search";

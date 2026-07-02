@@ -3,12 +3,12 @@
 //   - normalizeBaseUrl (forgiving paste handling: scheme, trailing slash, endpoint strip, /v1 append)
 //   - fetchModels never throws on an unreachable host (returns a clean ok:false result)
 //   - config persistence: a /models-configured profile round-trips through the settings file, with
-//     direct provider env keys ignored for model routing
+//     env provider keys honored at runtime without being persisted
 // Usage: bun run scripts/freellm-smoke.ts
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FREELLMAPI, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels } from "../src/providers/profiles.ts";
+import { FREELLMAPI, CUSTOM, LM_STUDIO, PROFILES, VLLM, profileById, normalizeBaseUrl, fetchModels } from "../src/providers/profiles.ts";
 import { loadConfig, saveSettings, savedProviderCreds, bakedProviderCreds, ob1ServerUrl } from "../src/config.ts";
 
 let fail = false;
@@ -32,10 +32,12 @@ check("Custom endpoint offers Local + LAN/Remote presets", CUSTOM.presets.length
 check("Custom endpoint bakes no secret (presets carry no key)", !(CUSTOM as any).presets.some((p: any) => p.key));
 
 // ── frontier (paid) models are served by the managed server, NOT a user-facing provider profile ──
-check("user-facing profiles are exactly FreeLLMAPI + Custom", PROFILES.length === 2 && PROFILES.includes(FREELLMAPI) && PROFILES.includes(CUSTOM));
+check("user-facing profiles include FreeLLMAPI + named OpenAI-compatible presets + Custom", PROFILES.length >= 7 && PROFILES.includes(FREELLMAPI) && PROFILES.includes(CUSTOM));
 check("FreeLLMAPI is the free/default profile (listed first)", PROFILES[0] === FREELLMAPI);
-check("no OpenRouter profile is surfaced to users", profileById("openrouter") === undefined);
-check("profiles no longer name OpenRouter anywhere", !JSON.stringify(PROFILES).toLowerCase().includes("openrouter"));
+check("OpenRouter is surfaced as a named BYOK preset", profileById("openrouter")?.name === "OpenRouter");
+check("every profile has a docs URL and at least one preset", PROFILES.every((p) => p.docsUrl.startsWith("https://") && p.presets.length > 0));
+check("LM Studio preset has local metadata", profileById("lmstudio") === LM_STUDIO && LM_STUDIO.defaultLocalUrl === "http://localhost:1234/v1" && LM_STUDIO.keyOptional === true && LM_STUDIO.needsModel === true && /lmstudio/i.test(LM_STUDIO.docsUrl));
+check("vLLM preset has local metadata", profileById("vllm") === VLLM && VLLM.defaultLocalUrl === "http://localhost:8000/v1" && VLLM.keyOptional === true && VLLM.needsModel === true && /vllm/i.test(VLLM.docsUrl));
 
 // ── normalizeBaseUrl ──
 const N = normalizeBaseUrl;
@@ -60,7 +62,7 @@ check("empty input → empty string", N("") === "" && N("   ") === "");
 const tmp = mkdtempSync(join(tmpdir(), "ob1-freellm-"));
 const origCwd = process.cwd();
 const savedEnv = { ...process.env };
-for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OB1_BASE_URL", "OB1_PROVIDER", "OB1_MODEL", "OB1_SANDBOX", "OB1_PERMISSION", "OB1_EFFORT", "OB1_AUTO_ROUTE", "OB1_SUBAGENTS", "OB1_TOKEN", "OB1_SERVER", "OB1_SEARXNG_URL", "OB1_SEARXNG_KEY"]) delete process.env[k];
+for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OB1_BASE_URL", "OB1_API_KEY", "OB1_PROVIDER", "OB1_MODEL", "OB1_SANDBOX", "OB1_PERMISSION", "OB1_EFFORT", "OB1_AUTO_ROUTE", "OB1_SUBAGENTS", "OB1_TOKEN", "OB1_SERVER", "OB1_SEARXNG_URL", "OB1_SEARXNG_KEY"]) delete process.env[k];
 
 try {
   process.chdir(tmp);
@@ -90,18 +92,28 @@ try {
   check("persisted profile → providerProfile flag set", cfg.providerProfile === "freellmapi", cfg.providerProfile);
   check("persisted profile → model restored (auto)", cfg.model === "auto", cfg.model);
 
-  // direct provider env keys are not model routes; the saved profile remains active
+  // OB1_BASE_URL is an explicit runtime override and takes precedence over a saved profile.
   process.env.OPENROUTER_API_KEY = "or-key";
   process.env.OPENAI_API_KEY = "oa-key";
   process.env.ANTHROPIC_API_KEY = "anthropic-key";
   process.env.OB1_BASE_URL = "https://direct.example/v1";
   const envCfg = loadConfig();
-  check("direct provider env keys do not override the persisted profile", envCfg.providerProfile === "freellmapi" && envCfg.baseUrl === "https://freellm.example.sslip.io/v1" && envCfg.apiKey === "freellmapi-secret", `${envCfg.providerProfile}/${envCfg.baseUrl}/${envCfg.apiKey}`);
+  check("OB1_BASE_URL overrides the persisted profile at runtime", envCfg.providerProfile === undefined && envCfg.baseUrl === "https://direct.example/v1" && envCfg.apiKey === undefined && envCfg.model === "auto", `${envCfg.providerProfile}/${envCfg.baseUrl}/${envCfg.apiKey}/${envCfg.model}`);
   // saving from that session must not rewrite the active profile to any direct provider URL/key
   saveSettings(envCfg);
   const afterSave = JSON.parse(readFileSync(join(tmp, ".ob1", "settings.json"), "utf8"));
-  check("saveSettings keeps the active profile creds", afterSave.providerProfile === "freellmapi" && afterSave.providerKey === "freellmapi-secret" && afterSave.providerUrl === "https://freellm.example.sslip.io/v1");
+  check("saveSettings keeps the active profile creds while env-routed", afterSave.providerProfile === "freellmapi" && afterSave.providerKey === "freellmapi-secret" && afterSave.providerUrl === "https://freellm.example.sslip.io/v1", JSON.stringify(afterSave));
   delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL;
+
+  process.env.OPENROUTER_API_KEY = "or-key";
+  const shadowedOpenRouterCfg = loadConfig();
+  check("named env keys do not shadow a saved FreeLLMAPI profile", shadowedOpenRouterCfg.providerProfile === "freellmapi" && shadowedOpenRouterCfg.baseUrl === "https://freellm.example.sslip.io/v1", `${shadowedOpenRouterCfg.baseUrl}/${shadowedOpenRouterCfg.providerProfile}`);
+  const namedEnvDir = join(tmp, ".ob1-named-env");
+  process.env.OB1_SETTINGS_DIR = namedEnvDir;
+  const openRouterCfg = loadConfig();
+  check("OPENROUTER_API_KEY routes to OpenRouter when no saved profile/token exists", openRouterCfg.baseUrl === "https://openrouter.ai/api/v1" && openRouterCfg.apiKey === "or-key" && openRouterCfg.providerProfile === undefined && openRouterCfg.envProviderSource === "OPENROUTER_API_KEY", `${openRouterCfg.baseUrl}/${openRouterCfg.apiKey}/${openRouterCfg.providerProfile}/${openRouterCfg.envProviderSource}`);
+  process.env.OB1_SETTINGS_DIR = join(tmp, ".ob1");
+  delete process.env.OPENROUTER_API_KEY;
 
   // the profile still loads after that save (creds intact)
   const reCfg = loadConfig();
@@ -138,5 +150,5 @@ try {
 }
 
 if (fail) { console.error("\n✗ freellm smoke FAILED"); process.exit(1); }
-console.log("\n✓ freellm smoke passed (FreeLLMAPI + Custom profiles · no OpenRouter surfaced · managed-server default · url normalization · resilient probe · config round-trip + direct env ignored · per-provider cred memory)");
+console.log("\n✓ freellm smoke passed (FreeLLMAPI + named provider profiles · managed-server default · env routes · url normalization · resilient probe · config round-trip + per-provider cred memory)");
 process.exit(0);

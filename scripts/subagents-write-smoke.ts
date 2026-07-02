@@ -6,7 +6,7 @@
 import { mkdtempSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { partitionConflicts, overlappingChanges, gitChangedFiles, runWriteSubagents, applyMerge, type WriteAssignment } from "../src/multimind/subagents-write.ts";
+import { partitionConflicts, overlappingChanges, runWriteSubagents, applyMerge, type WriteAssignment } from "../src/multimind/subagents-write.ts";
 import { runTurn, type TurnDeps } from "../src/agent/loop.ts";
 import type { WorkerResult, runWorker } from "../src/multimind/runtime.ts";
 import type { ModelResponse } from "../src/providers/types.ts";

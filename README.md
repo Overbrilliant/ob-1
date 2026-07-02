@@ -13,11 +13,26 @@
 [![Homebrew](https://img.shields.io/badge/Homebrew-overbrilliant%2Ftap-orange)](https://github.com/Overbrilliant/homebrew-tap)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
-OB-1 is a CLI coding agent you run from the root of a repository. It reads your project, builds a
-repo map, keeps visible memory, proposes edits, and asks before it runs risky tools.
+![OB-1 start-free demo](docs/media/start-free.gif)
 
-It can work like a normal single-agent coding assistant. For harder tasks, it can fan out into
-review, synthesis, and eval-driven modes so you can spend more compute only when the task needs it.
+*Start free: `ob1` sets up FreeLLMAPI locally — no account or card. Anonymous bootstrap routes can start you; add your own free provider keys for reliable capacity.*
+
+![OB-1 completing a task](docs/media/first-task.gif)
+
+*A real session: OB-1 writes `primes.py`, runs it, and shows the output — on free models.*
+
+![OB-1 memory inspector](docs/media/memory-graph.gif)
+
+*`/memory` shows the facts and relationship graph OB-1 built from real work.*
+
+OB-1 is a free, open-source CLI coding agent with persistent project memory. Run `ob1` in a
+repository and it can read the codebase, build a repo map, edit files, run checks, inspect memory, and
+coordinate deeper multi-agent passes when the task deserves more compute.
+
+The default path is free out of the box: OB-1 sets up
+[FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi), a local OpenAI-compatible gateway, and can
+use anonymous bootstrap routes before you add keys. No API key, card, or account is required to start;
+add your own free provider keys for predictable capacity.
 
 ## What You Get
 
@@ -31,8 +46,10 @@ review, synthesis, and eval-driven modes so you can spend more compute only when
   approvals with `OB1_PERMISSION=ask`, and confine writes/network with `OB1_SANDBOX=workspace-write` or
   `read-only` (or set `permissionMode` / `sandbox` in `settings.json`). Even in autopilot, catastrophic
   commands (e.g. `rm -rf /`) are hard-blocked and destructive actions are flagged.
-- **Model setup that does not require a cloud account on day one.** Use FreeLLMAPI for the free path,
-  or subscribe when you want credits for more intelligent models.
+- **Free out of the box.** Start with FreeLLMAPI's anonymous bootstrap routes when public pools have
+  capacity, then add free provider keys for better models and predictable monthly capacity.
+- **Provider-neutral routing.** Use your own OpenAI-compatible endpoint, OpenRouter, OpenAI, Gemini,
+  Groq, Ollama, LM Studio, llama.cpp, vLLM, or a LAN GPU box.
 - **Release paths people can test.** Homebrew, npm, native archives, checksums, attestations, and
   fresh-machine install checks are part of the project.
 
@@ -41,7 +58,7 @@ review, synthesis, and eval-driven modes so you can spend more compute only when
 ### Homebrew
 
 ```sh
-brew install overbrilliant/tap/ob-1
+brew install overbrilliant/tap/ob1
 ```
 
 ### Native Installer
@@ -90,12 +107,27 @@ Run OB-1 from a Git repository:
 ob1
 ```
 
-On first run, choose a model route.
+On first run, choose a model route. Pressing Esc at the first picker starts the free path.
 
-| Route | Pick it if | What OB-1 does |
-| --- | --- | --- |
-| **FreeLLMAPI — 100% free** | You want the free path and can run a local or self-hosted proxy. | OB-1 can download, run, and wire [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi). Free anonymous models work right away. Add your own provider keys later if you want more free-tier capacity or better model coverage. |
-| **Subscribe — credits for more intelligent models** | You want stronger models without managing provider keys. | OB-1 opens the plans page, connects your account, and uses subscription credits for models such as Claude, GPT, Gemini, and Qwen. |
+| Tier | What you do | Cost | Account? |
+| --- | --- | --- | --- |
+| **Free (default)** | `ob1` -> **Start free** | $0 | No |
+| **Your endpoint** | Export `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, or set `OB1_BASE_URL` / `OB1_API_KEY`; or use `/models` | Your key or local model | No |
+| **Hosted frontier** | `ob1 login` or choose **Hosted frontier** | Paid subscription | Yes |
+
+Free setup downloads, runs, and wires [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) for
+you. Anonymous providers are a bootstrap path with variable quality and shared limits. Add provider
+keys in the local dashboard for stronger free-tier coverage; OB-1 keeps using the single local `/v1`
+endpoint.
+
+BYOK env routes are runtime-only and are never persisted. For Gemini:
+
+```sh
+GEMINI_API_KEY=... OB1_MODEL=gemini-2.5-pro ob1
+```
+
+Hosted frontier is the convenience tier: no provider keys, one bill, Claude/GPT/Gemini/Qwen-class
+models through the managed OB-1 server.
 
 If onboarding does not start, run:
 
@@ -111,6 +143,9 @@ You can change the route later:
 /upgrade      subscribe or manage your plan
 ```
 
+Full launch docs are in [docs/](docs/): quickstart, install, FreeLLMAPI, providers, core concepts,
+commands, troubleshooting, architecture, distribution, extensions, privacy, and eval notes.
+
 Useful commands:
 
 ```text
@@ -122,6 +157,20 @@ Useful commands:
 
 Without a model connection, setup, repository mapping, and memory inspection still work. Coding
 tasks need a model.
+
+Update checks are non-blocking and skip CI. Set `OB1_NO_UPDATE_CHECK=1` to disable the version nudge.
+
+## Comparison
+
+| Capability | OB-1 | Claude Code | opencode | aider |
+| --- | --- | --- | --- | --- |
+| License | Apache-2.0 | Proprietary | Open source | Open source |
+| Works with no API key | Yes, via FreeLLMAPI | No | No | No |
+| Local/LAN models | Yes | Limited | Yes | Yes |
+| Persistent visible memory | SQLite + graph inspector | No | No | No |
+| Multi-agent modes | Fusion, Council, Personas | No | No | No |
+| Sandbox/permissions | macOS Seatbelt, Linux bubblewrap, approvals | Yes | Varies | Limited |
+| Hosted convenience tier | Optional paid | Required account | Bring your own | Bring your own |
 
 ## How It Works
 
@@ -192,7 +241,7 @@ ob1 --version       print the version
 OB-1 publishes through:
 
 - GitHub releases with native macOS arm64/x64 and Linux arm64/x64 archives
-- Homebrew: `overbrilliant/tap/ob-1`
+- Homebrew: `overbrilliant/tap/ob1`
 - npm: `@overbrilliant/ob1`
 
 Release archives include `checksums.txt`. GitHub artifact attestations are generated for release
@@ -223,6 +272,7 @@ Checks worth running before a PR:
 bun run scripts/cli-flags-smoke.ts
 bun run scripts/ci-smokes.ts
 bun run typecheck
+bun run lint
 ```
 
 Build a standalone binary:
@@ -257,6 +307,12 @@ support, multi-agent modes, and smoke-test harness are active. Interfaces may ch
 
 Roadmap and design notes:
 
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/package-managers.md`](docs/package-managers.md)
+- [`docs/extensions.md`](docs/extensions.md)
+- [`docs/privacy.md`](docs/privacy.md)
+- [`docs/sharing.md`](docs/sharing.md)
+- [`docs/evals.md`](docs/evals.md)
 - [`docs/planning/PROGRESS.md`](docs/planning/PROGRESS.md)
 - [`docs/planning/ob1-plan.html`](docs/planning/ob1-plan.html)
 - [`docs/research/`](docs/research/)
@@ -271,7 +327,7 @@ Report suspected vulnerabilities privately. See [`SECURITY.md`](SECURITY.md).
 ## Contributing
 
 Focused, tested PRs are welcome. Start with [`CONTRIBUTING.md`](CONTRIBUTING.md) and follow
-[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Community entry points are in [`COMMUNITY.md`](COMMUNITY.md).
 
 ## License
 

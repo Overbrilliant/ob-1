@@ -6,7 +6,8 @@ let fail = false;
 const check = (n: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} ${n}`); if (!ok) fail = true; };
 
 // ── hashing: stable + normalization-insensitive ───────────────────────────────
-check("hash is stable for identical input", hashClaim("observed_fact", "X") === hashClaim("observed_fact", "X"));
+const stableHash = hashClaim("observed_fact", "X");
+check("hash is stable for identical input", stableHash === hashClaim("observed_fact", "X"));
 check("hash ignores case/whitespace", hashClaim("inference", "The  Flake") === hashClaim("inference", "the flake"));
 check("hash distinguishes kind", hashClaim("observed_fact", "x") !== hashClaim("hypothesis", "x"));
 check("hash is 12 hex chars", /^[0-9a-f]{12}$/.test(hashClaim("inference", "y")));

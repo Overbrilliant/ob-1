@@ -2,7 +2,7 @@
 // the model sees its contents without having to call read_file first. The visible @token is kept; the
 // content is appended as a fenced block. Mirrors the @-mention UX of other coding CLIs.
 import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 export interface MentionResult { text: string; attached: string[]; missing: string[] }
 

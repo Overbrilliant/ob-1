@@ -1,26 +1,30 @@
-// First-run onboarding (soft, skippable, pre-TUI). Runs once when the user is not signed in and has no
-// provider configured: sign in → choose how to run models → for the free path, OB-1 sets up and
+// First-run onboarding (soft, pre-TUI). Runs once when the user has no configured model route:
+// Start free (FreeLLMAPI) → own endpoint/env → hosted frontier. For the free path, OB-1 sets up and
 // auto-wires the user's FreeLLMAPI proxy (see freellm-manage.ts). Plain readline prompts (same style as
 // login.ts) so it works before the Ink TUI takes raw-mode stdin. Re-runnable via `ob1 onboard`.
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { join } from "node:path";
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { globalSettingsDir, loadAuthToken, persistActiveProvider, persistSubscription, ob1ServerUrl } from "../config.ts";
+import { randomBytes } from "node:crypto";
+import { detectEnvProvider, envRouteIsExplicitOverride, globalSettingsDir, loadAuthToken, persistActiveProvider, persistedSettings, persistSubscription, ob1ServerUrl } from "../config.ts";
 import { runLogin, openBrowser } from "./login.ts";
 import { banner, c } from "./ui.ts";
+import { normalizeBaseUrl } from "../providers/profiles.ts";
 import * as flm from "./freellm-manage.ts";
 
 // ── decision helpers (pure — unit-tested) ─────────────────────────────────────
-export interface OnboardState { tty: boolean; onboarded: boolean; signedIn: boolean }
-/** Onboard whenever the user isn't signed in to OB-1 — interactively, once (the marker prevents
- *  nagging). Not gated on a configured provider: "not logged in → ask to log in or sign up". */
+export interface OnboardState { tty: boolean; onboarded: boolean; hasProvider: boolean; hasEnvProvider: boolean }
+/** Onboard interactively, once, only when there is no usable model route yet. The default route is the
+ *  local FreeLLMAPI setup; hosted sign-in is now a deliberate paid-tier choice. */
 export function decideOnboard(s: OnboardState): boolean {
-  return s.tty && !s.onboarded && !s.signedIn;
+  return s.tty && !s.onboarded && !s.hasProvider && !s.hasEnvProvider;
 }
+type ArrowSelection = number | "skip" | "abort";
+
 /** A minimal up/down arrow selector for the pre-TUI onboarding (the Ink pickers aren't mounted yet).
- *  Returns the chosen index, or null if the user skips (Ctrl-C / Esc). TTY-only (onboarding is). */
-function arrowSelect(title: string, options: string[]): Promise<number | null> {
+ *  Returns the chosen index, "skip" for Esc, or "abort" for Ctrl-C. TTY-only (onboarding is). */
+function arrowSelect(title: string, options: string[]): Promise<ArrowSelection> {
   return new Promise((resolve) => {
     let idx = 0;
     const draw = (first: boolean) => {
@@ -30,18 +34,19 @@ function arrowSelect(title: string, options: string[]): Promise<number | null> {
         stdout.write(`\r\x1b[2K  ${sel ? c.cyan("❯ ") + c.bold(options[i]) : "  " + c.dim(options[i])}\n`);
       }
     };
-    stdout.write(`\n  ${c.bold(title)}  ${c.dim("(↑/↓ · Enter · Esc skips)")}\n`);
+    stdout.write(`\n  ${c.bold(title)}  ${c.dim("(↑/↓ · Enter · Esc skips · Ctrl-C aborts)")}\n`);
     draw(true);
     const prevRaw = stdin.isRaw;
     stdin.setRawMode?.(true);
     stdin.resume();
-    const done = (val: number | null) => { stdin.off("data", onData); stdin.setRawMode?.(!!prevRaw); stdin.pause(); resolve(val); };
+    const done = (val: ArrowSelection) => { stdin.off("data", onData); stdin.setRawMode?.(!!prevRaw); stdin.pause(); resolve(val); };
     const onData = (b: Buffer) => {
       const s = b.toString();
       if (s === "\x1b[A" || s === "k") { idx = (idx - 1 + options.length) % options.length; draw(false); }
       else if (s === "\x1b[B" || s === "j") { idx = (idx + 1) % options.length; draw(false); }
       else if (s === "\r" || s === "\n") done(idx);
-      else if (s === "\x03" || s === "\x1b") done(null); // Ctrl-C / Esc → skip
+      else if (s === "\x1b") done("skip");
+      else if (s === "\x03") done("abort");
     };
     stdin.on("data", onData);
   });
@@ -52,13 +57,20 @@ export function isOnboarded(dir = globalSettingsDir()): boolean { return existsS
 export function markOnboarded(dir = globalSettingsDir()): void {
   try { mkdirSync(dir, { recursive: true }); writeFileSync(markerPath(dir), new Date().toISOString()); } catch { /* best-effort */ }
 }
+function abortOnboarding(out: (s?: string) => void): never {
+  out("\n  Onboarding cancelled. Run `ob1 onboard` anytime.");
+  process.exit(130);
+}
 
-/** Real-state gate used at boot. OB1_TOKEN is a deliberate opt-out for signed-in automation. Direct
- *  provider keys are not model routes; Custom API should be configured through /models. A saved provider
- *  PROFILE does NOT suppress onboarding, so "logged out → ask to log in or sign up" still fires. */
+/** Real-state gate used at boot. OB1_TOKEN is a deliberate opt-out for signed-in automation. A saved
+ *  provider profile or existing auth token is a configured route. Named provider env keys are offered
+ *  inside onboarding; only explicit OB1_BASE_URL suppresses it. */
 export function shouldOnboard(): boolean {
   if (process.env.OB1_TOKEN) return false;
-  return decideOnboard({ tty: !!stdin.isTTY, onboarded: isOnboarded(), signedIn: !!loadAuthToken() });
+  const saved = persistedSettings(globalSettingsDir());
+  const hasProvider = !!(saved.providerProfile && saved.providerUrl) || !!loadAuthToken();
+  const envRoute = detectEnvProvider();
+  return decideOnboard({ tty: !!stdin.isTTY, onboarded: isOnboarded(), hasProvider, hasEnvProvider: envRouteIsExplicitOverride(envRoute) });
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -69,35 +81,33 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
   stdout.write(banner());                                   // the same OB-1 wordmark as the TUI
   out("");                                                  // breathing room above the welcome line
   out("");
-  out("  Welcome — let's get you set up. Use ↑/↓ and Enter to choose; Esc skips.");
+  out("  Welcome — let's get you set up. Use ↑/↓ and Enter to choose.");
+  let completed = false;
   try {
-    // 1) Authenticate — opens the server's sign-in page in the browser and waits for it to hand a token
-    //    back (no passwords typed in the terminal). Choose Create account or Log in; Esc skips.
-    if (!loadAuthToken()) {
-      const choice = await arrowSelect("Sign in to OB-1 in your browser:", [
-        "Create account",
-        "Log in   (I already have one)",
-      ]);
-      if (choice === 0) await runLogin({ mode: "signup" });
-      else if (choice === 1) await runLogin({ mode: "login" });
-      else { out("\n  Skipped — run `ob1 login` later. The model stays disabled until you do."); markOnboarded(); out(""); return; }
-    } else {
-      out("\n  ✓ Already signed in.");
-    }
-    if (!loadAuthToken()) { markOnboarded(); out(""); return; } // sign-in skipped or failed → stop here
-
-    // 2) Choose how to run models (arrow selector)
+    const envRoute = detectEnvProvider();
     const p = await arrowSelect("How do you want to run models?", [
-      "Subscription   — frontier models (Opus, Sonnet, GPT, Gemini), monthly or yearly, no rate limits",
-      "Free LLM API   — free, self-hosted, managed by OB-1, add provider keys in the dashboard",
+      "Start free       — OB-1 sets up FreeLLMAPI locally; anonymous bootstrap models + your keys",
+      envRoute
+        ? `Use ${envRoute.source} — ${envRoute.label}; runtime-only, no settings write`
+        : "Use my endpoint — OpenAI-compatible URL/key, Ollama, LM Studio, llama.cpp, vLLM, LAN GPU",
+      "Hosted frontier  — sign in + subscribe for Claude/GPT/Gemini/Qwen with one bill",
     ]);
-    if (p === 0) await runSubscriptionSetup(out);
-    else if (p === 1) await runFreeLLMSetup(out);
-    else out("\n  Skipped — connect a provider anytime via /models.");
+    if (p === "abort") {
+      abortOnboarding(out);
+    } else if (p === "skip") {
+      out("\n  Setup skipped. Run `ob1 onboard` anytime.");
+      completed = true;
+    } else if (p === 0) {
+      completed = await runFreeLLMSetup(out);
+    } else if (p === 1) {
+      completed = await runOwnEndpointSetup(out, envRoute);
+    } else if (p === 2) {
+      completed = await runHostedSetup(out);
+    }
   } catch (e) {
     out(`  Onboarding error: ${(e as Error).message} — you can finish setup later via /models.`);
   } finally {
-    markOnboarded();
+    if (completed) markOnboarded();
     out("");
   }
 }
@@ -184,15 +194,77 @@ async function runSubscriptionSetup(out: (s?: string) => void): Promise<void> {
   });
 }
 
+async function runHostedSetup(out: (s?: string) => void): Promise<boolean> {
+  if (!loadAuthToken()) {
+    const choice = await arrowSelect("Hosted frontier models need an OB-1 account:", [
+      "Create account",
+      "Log in   (I already have one)",
+    ]);
+    if (choice === 0) await runLogin({ mode: "signup" });
+    else if (choice === 1) await runLogin({ mode: "login" });
+    else if (choice === "abort") {
+      abortOnboarding(out);
+    } else {
+      out("\n  Hosted setup skipped. Start free anytime with `ob1 onboard` or /models.");
+      return false;
+    }
+  } else {
+    out("\n  ✓ Already signed in.");
+  }
+  if (!loadAuthToken()) return false;
+  await runSubscriptionSetup(out);
+  return true;
+}
+
+async function runOwnEndpointSetup(out: (s?: string) => void, envRoute = detectEnvProvider()): Promise<boolean> {
+  const rl = readline.createInterface({ input: stdin, output: stdout });
+  try {
+    if (envRoute) {
+      const ans = (await rl.question(`\n  Found ${envRoute.source} for ${envRoute.label}. Use it for this session? [Y/n] `)).trim().toLowerCase();
+      if (!ans || ans === "y" || ans === "yes") {
+        out(`  ✓ Using ${envRoute.label} from the environment. It is not written to ~/.ob1/settings.json.`);
+        out(`    Endpoint: ${envRoute.baseUrl}`);
+        out(`    Model: ${envRoute.model}`);
+        return true;
+      }
+      out("  OK — let's save a custom endpoint instead.");
+    }
+
+    out("\n  Connect an OpenAI-compatible endpoint. Leave the API key blank for local servers with no auth.");
+    const rawUrl = (await rl.question("    Endpoint URL (…/v1): ")).trim();
+    const url = normalizeBaseUrl(rawUrl);
+    if (!url) { out("  ✗ Need an endpoint URL. Start free anytime with `ob1 onboard`."); return false; }
+    const model = (await rl.question("    Model id (e.g. auto, llama3.1, qwen2.5-coder): ")).trim();
+    if (!model) { out("  ✗ Need a model id. Start free anytime with `ob1 onboard`."); return false; }
+    const key = (await rl.question("    API key (optional): ")).trim();
+    persistActiveProvider(globalSettingsDir(), "custom", url, key, model);
+    out(`  ✓ Saved Custom endpoint ${url} with model ${model}.`);
+    out("    Tip: named presets for OpenRouter, Ollama, LM Studio, llama.cpp, vLLM, and Groq are in /models.");
+
+    return true;
+  } finally {
+    rl.close();
+  }
+}
+
 /** I/O for the managed FreeLLMAPI setup, injected so the SAME pipeline runs under readline (onboarding,
- *  pre-TUI) and inside the Ink TUI (/freellm). `ask` returns the entered text (mask hides
- *  it — readline can't, the TUI does); `waitForDone` resolves when the user signals they've finished
- *  adding keys on the dashboard (Enter), letting us do a final key count. */
+ *  pre-TUI) and inside the Ink TUI (/freellm). `ask` is only used if an existing FreeLLMAPI dashboard
+ *  account needs reconnecting; `waitForDone` resolves when the user signals they've finished adding keys
+ *  on the dashboard (Enter), letting us do a final key count. */
 export interface FreeLLMSetupDeps {
   ask: (question: string, opts?: { mask?: boolean }) => Promise<string>;
   out: (s?: string) => void;
   openUrl: (url: string) => void;
   waitForDone: () => Promise<void>;
+}
+
+export function generatedDashboardCredentials(): { email: string; password: string } {
+  const suffix = randomBytes(5).toString("hex");
+  const password = randomBytes(18).toString("base64url");
+  // Real TLD required: FreeLLMAPI's dashboard validates the email format and rejects invented TLDs
+  // (`.ob1` → 400 "A valid email is required", which stalls first-run setup at the reconnect prompt).
+  // The account is local-only and never emailed, so any well-formed domain we control works.
+  return { email: `ob1-local-${suffix}@local.overbrilliant.com`, password };
 }
 
 /** The managed FreeLLMAPI pipeline: clone → run → dashboard account → auto-wire URL+unified key → open
@@ -211,10 +283,11 @@ export async function freeLLMSetupFlow(d: FreeLLMSetupDeps): Promise<boolean> {
   d.out("  Downloading FreeLLMAPI…");
   if (!flm.ensureCloned(dir)) { d.out("  ✗ Couldn't download it (need git + network). Try again later."); return false; }
 
-  d.out("\n  Set a login for your local FreeLLMAPI dashboard (you'll use it to add provider keys):");
-  const email = (await d.ask("Email")).trim();
-  const password = (await d.ask("Password (min 8 chars)", { mask: true })).trim();
-  if (!email || password.length < 8) { d.out("  ✗ Need a valid email and an 8+ char password. Try again."); return false; }
+  const generated = generatedDashboardCredentials();
+  d.out("\n  Creating a local FreeLLMAPI dashboard login for you.");
+  d.out(`    Email: ${generated.email}`);
+  d.out(`    Password: ${generated.password}`);
+  d.out("    Use these if the dashboard asks you to sign in; change them later in the dashboard.");
 
   const port = await flm.freePort(3001);
   flm.ensureEnv(dir, port);
@@ -223,16 +296,35 @@ export async function freeLLMSetupFlow(d: FreeLLMSetupDeps): Promise<boolean> {
   d.out("  Waiting for the proxy to come up…");
   if (!(await flm.waitReady(url))) { d.out("  ✗ The proxy didn't come up in time. Try again."); return false; }
 
-  const session = await flm.dashboardSetup(url, email, password);
-  if (!session) { d.out("  ✗ Couldn't create the dashboard account. Try again."); return false; }
+  let email = generated.email;
+  let dashboardPassword = generated.password;
+  let setup = await flm.dashboardSetupDetailed(url, generated.email, generated.password);
+  let session = setup.ok ? setup.token : null;
+  if (!setup.ok && setup.existing) {
+    d.out("\n  An existing FreeLLMAPI dashboard account is already set up. Enter it to reconnect:");
+    email = (await d.ask("Email")).trim();
+    const password = (await d.ask("Password", { mask: true })).trim();
+    if (!email || !password) { d.out("  ✗ Need the existing dashboard email and password. Try again."); return false; }
+    dashboardPassword = password;
+    setup = await flm.dashboardSetupDetailed(url, email, password);
+    if (!setup.ok) {
+      d.out(`  ✗ Couldn't sign in to the existing dashboard account: ${setup.message}. Try again.`);
+      return false;
+    }
+    session = setup.token;
+  } else if (!setup.ok) {
+    d.out(`  ✗ Couldn't create the dashboard account: ${setup.message}. Try again.`);
+    return false;
+  }
+  if (!session) { d.out("  ✗ Couldn't create the dashboard account: setup response did not include a session token. Try again."); return false; }
   const key = await flm.fetchUnifiedKey(url, session);
   if (!key) { d.out("  ✗ Couldn't read the proxy's API key. Try again."); return false; }
 
   // AUTO-WIRE: no manual URL/key entry — OB-1 knows both because it manages the proxy.
   persistActiveProvider(globalSettingsDir(), "freellmapi", `${url}/v1`, key);
-  flm.saveManaged({ managed: true, dir, runtime, port, url, email, sessionToken: session, providerKeys: 0 });
+  flm.saveManaged({ managed: true, dir, runtime, port, url, email, dashboardPassword, sessionToken: session, providerKeys: 0 });
   d.out(`  ✓ Connected OB-1 to your local proxy at ${url}/v1 (no key entry needed).`);
-  d.out("    The free anonymous models work right away — add your own provider keys for more/better models.");
+  d.out("    Anonymous bootstrap models may work right away; add your own provider keys for reliable capacity.");
 
   d.out("\n  Opening the dashboard — add your provider keys on the Keys page, then come back here.");
   d.openUrl(url);
@@ -244,13 +336,13 @@ export async function freeLLMSetupFlow(d: FreeLLMSetupDeps): Promise<boolean> {
   if (st) flm.saveManaged({ ...st, providerKeys: Math.max(0, keys) });
   d.out(keys > 0
     ? `  ✓ ${keys} provider key${keys === 1 ? "" : "s"} added — you're all set.`
-    : "  No provider key added yet — the free anonymous models still work. Add keys anytime; OB-1 picks them up. Manage with /freellm.");
+    : "  No provider key added yet — anonymous bootstrap models are available when public pools have capacity. Add keys anytime; OB-1 picks them up. Manage with /freellm.");
   return true;
 }
 
 /** Onboarding (pre-TUI) entry: drive freeLLMSetupFlow with a plain readline (raw-mode arrow selectors
  *  above are closed by here, so a fresh rl is safe). */
-async function runFreeLLMSetup(out: (s?: string) => void): Promise<void> {
+async function runFreeLLMSetup(out: (s?: string) => void): Promise<boolean> {
   const rl = readline.createInterface({ input: stdin, output: stdout });
   // Masked prompt: readline still does the line editing, we just suppress the terminal ECHO so a password
   // isn't printed in cleartext (and left in scrollback). Without this, `{ mask: true }` was silently
@@ -269,7 +361,7 @@ async function runFreeLLMSetup(out: (s?: string) => void): Promise<void> {
     finally { rlAny._writeToOutput = orig; }
   };
   try {
-    await freeLLMSetupFlow({
+    return await freeLLMSetupFlow({
       ask: async (q, opts) => opts?.mask ? askMasked(q) : (await rl.question(`    ${q}: `)).trim(),
       out,
       openUrl: openBrowser,

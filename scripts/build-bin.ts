@@ -12,13 +12,20 @@
 // Bun from the repo with node_modules intact.
 export {}; // make this a module so top-level await is allowed
 
+const versionSync = Bun.spawnSync(["bun", "run", "scripts/generate-version.ts"], { stdout: "pipe", stderr: "pipe" });
+if ((versionSync.exitCode ?? 1) !== 0) {
+  process.stdout.write(versionSync.stdout);
+  process.stderr.write(versionSync.stderr);
+  process.exit(versionSync.exitCode ?? 1);
+}
+
 const outfile = process.argv[2] ?? "ob1";
 const target = process.argv[3] || process.env.OB1_BUILD_TARGET || undefined;
 
 const out = await Bun.build({
   entrypoints: ["./src/index.ts"],
   target: "bun",
-  // @ts-ignore — `compile` is supported by Bun.build (produces a standalone executable)
+  // @ts-expect-error — `compile` is supported by Bun.build (produces a standalone executable)
   compile: target ? { outfile, target } : { outfile },
   plugins: [
     {

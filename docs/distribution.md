@@ -3,7 +3,7 @@
 OB-1 ships through three public channels:
 
 - GitHub releases: native archives plus `install.sh`
-- Homebrew: `brew install overbrilliant/tap/ob-1`
+- Homebrew: `brew install overbrilliant/tap/ob1`
 - npm: `npm install -g @overbrilliant/ob1` (requires Bun at runtime)
 
 ## Release pipeline
@@ -60,6 +60,9 @@ The fresh install workflow tests the supported clean-machine paths:
 | `curl .../install.sh \| sh` | macOS arm64, macOS x64, Linux arm64, Linux x64 |
 | Homebrew | macOS arm64, macOS x64 |
 | npm | Linux x64 with Bun installed |
+
+See `docs/package-managers.md` for Nix, AUR, winget, and Scoop notes.
+Draft package-manager artifacts live in `packaging/`.
 
 Run it manually from GitHub Actions, or with:
 

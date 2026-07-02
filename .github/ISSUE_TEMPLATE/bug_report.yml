@@ -1,0 +1,54 @@
+name: Bug report
+description: Report something broken in OB-1
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting a bug. Please avoid posting API keys, tokens, private code, or full logs with secrets.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `ob1`
+        2. Choose ...
+        3. See ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OB-1 version
+      placeholder: output of `ob1 --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Model route
+      options:
+        - FreeLLMAPI
+        - Hosted frontier
+        - OpenRouter
+        - OpenAI
+        - Gemini
+        - Groq
+        - Ollama / local
+        - Custom endpoint
+        - No model route
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste the shortest useful output. Redact secrets.
+      render: text

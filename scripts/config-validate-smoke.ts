@@ -36,7 +36,9 @@ const creds = validateSettings({ providerCreds: { ok: { url: "u", key: "k" }, br
 check("unknown cred entries ignored, broken allowed-profile entry errors", !creds.value.providerCreds?.ok && creds.warnings.some((w) => w.field === "providerCreds.ok") && creds.errors.length === 0);
 const badProfileCreds = validateSettings({ providerCreds: { custom: { url: 1 } } });
 check("malformed allowed providerCreds entry errors", badProfileCreds.errors.some((e) => e.field === "providerCreds.custom"));
-const badProfile = validateSettings({ providerProfile: "openrouter", providerUrl: "https://openrouter.ai/api/v1", providerKey: "k" });
+const openrouterProfile = validateSettings({ providerProfile: "openrouter", providerUrl: "https://openrouter.ai/api/v1", providerKey: "k" });
+check("OpenRouter is a supported saved provider profile", openrouterProfile.value.providerProfile === "openrouter");
+const badProfile = validateSettings({ providerProfile: "not-a-provider", providerUrl: "https://example.test/v1", providerKey: "k" });
 check("unsupported providerProfile is dropped", badProfile.errors.some((e) => e.field === "providerProfile") && badProfile.value.providerProfile === undefined);
 const badProvider = validateSettings({ provider: "anthropic", model: "claude-direct-id" });
 check("unsupported direct provider is dropped", badProvider.errors.some((e) => e.field === "provider") && badProvider.value.provider === undefined);

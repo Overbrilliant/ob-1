@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { readFileSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import type { Provider } from "./providers/types.ts";
-import { profileById } from "./providers/profiles.ts";
+import { normalizeBaseUrl, profileById } from "./providers/profiles.ts";
 import { validateSettings } from "./config-validate.ts";
 
 export type Mode = "solo" | "fusion" | "council" | "personas" | "adaptive";
@@ -14,14 +14,108 @@ export type QualityMode = "off" | "normal" | "strict";
  *  one behind an approval prompt. (Default resolved in loadConfig: autopilot unless a saved value is "ask".) */
 export type PermissionMode = "ask" | "autopilot";
 
-/** Pick provider. Supported model routes are deliberately narrow:
- *  1. a provider profile configured via /models (FreeLLMAPI or Custom API),
- *  2. the managed OB-1 server subscription route, where the server injects OpenRouter.
- *
- *  Direct model-provider env keys are ignored here; Custom API must be configured as a profile so it is
- *  visible, persisted, and switchable from the same /models surface as FreeLLMAPI. */
-function resolveProvider(saved: PersistedSettings): { provider: Provider; apiKey: string | undefined; baseUrl: string; model: string; providerProfile?: string } {
+export interface EnvProviderRoute {
+  source: string;
+  label: string;
+  provider: Provider;
+  apiKey: string | undefined;
+  baseUrl: string;
+  model: string;
+  openrouter?: boolean;
+}
+
+export function envRouteIsExplicitOverride(route: EnvProviderRoute | undefined): boolean {
+  return !!route && route.source.startsWith("OB1_BASE_URL");
+}
+
+function envVal(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const v = env[name]?.trim();
+  return v ? v : undefined;
+}
+
+/** Runtime-only provider routes from well-known environment variables. These never get written to
+ *  settings.json; they are for "export a key and run ob1" workflows. Precedence is explicit generic
+ *  OB1_BASE_URL/OB1_API_KEY first, then named hosted providers. Only OB1_BASE_URL is an explicit
+ *  override; named provider keys are convenience routes when no saved provider or subscription exists. */
+export function detectEnvProvider(env: NodeJS.ProcessEnv = process.env): EnvProviderRoute | undefined {
+  const model = envVal(env, "OB1_MODEL");
+  const ob1Base = envVal(env, "OB1_BASE_URL");
+  const ob1Key = envVal(env, "OB1_API_KEY");
+  if (ob1Base) {
+    return {
+      source: ob1Key ? "OB1_BASE_URL + OB1_API_KEY" : "OB1_BASE_URL",
+      label: "Custom endpoint from OB1_BASE_URL",
+      provider: "openai",
+      apiKey: ob1Key,
+      baseUrl: normalizeBaseUrl(ob1Base),
+      model: model ?? "auto",
+    };
+  }
+
+  const openRouter = envVal(env, "OPENROUTER_API_KEY");
+  if (openRouter) {
+    return {
+      source: "OPENROUTER_API_KEY",
+      label: "OpenRouter",
+      provider: "openai",
+      apiKey: openRouter,
+      baseUrl: "https://openrouter.ai/api/v1",
+      model: model ?? "qwen/qwen3.6-plus",
+      openrouter: true,
+    };
+  }
+
+  const openAI = envVal(env, "OPENAI_API_KEY");
+  if (openAI) {
+    return {
+      source: "OPENAI_API_KEY",
+      label: "OpenAI",
+      provider: "openai",
+      apiKey: openAI,
+      baseUrl: "https://api.openai.com/v1",
+      model: model ?? "gpt-4o-mini",
+    };
+  }
+
+  const gemini = envVal(env, "GEMINI_API_KEY") ?? envVal(env, "GOOGLE_API_KEY");
+  if (gemini) {
+    return {
+      source: envVal(env, "GEMINI_API_KEY") ? "GEMINI_API_KEY" : "GOOGLE_API_KEY",
+      label: "Gemini",
+      provider: "openai",
+      apiKey: gemini,
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      model: model ?? "gemini-2.5-pro",
+    };
+  }
+
+  const groq = envVal(env, "GROQ_API_KEY");
+  if (groq) {
+    return {
+      source: "GROQ_API_KEY",
+      label: "Groq",
+      provider: "openai",
+      apiKey: groq,
+      baseUrl: "https://api.groq.com/openai/v1",
+      model: model ?? "llama-3.3-70b-versatile",
+    };
+  }
+
+  return undefined;
+}
+
+/** Pick provider. Supported model routes:
+ *  1. explicit runtime override (`OB1_BASE_URL`, optionally `OB1_API_KEY`),
+ *  2. a provider profile configured via /models (FreeLLMAPI, local presets, Custom API),
+ *  3. the managed OB-1 server subscription route, where the server injects upstream keys,
+ *  4. named env provider keys (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`)
+ *     when nothing more deliberate is configured. */
+function resolveProvider(saved: PersistedSettings): { provider: Provider; apiKey: string | undefined; baseUrl: string; model: string; providerProfile?: string; envProviderSource?: string } {
   const model = process.env.OB1_MODEL?.trim() || undefined;
+  const envRoute = detectEnvProvider();
+  if (envRoute && envRouteIsExplicitOverride(envRoute)) {
+    return { provider: envRoute.provider, apiKey: envRoute.apiKey, baseUrl: envRoute.baseUrl, model: model ?? envRoute.model, envProviderSource: envRoute.source };
+  }
   // A provider profile (e.g. FreeLLMAPI, or a bring-your-own Custom endpoint) set up via /models — creds
   // restored from persisted settings. The KEY is optional (a keyless Custom/LAN endpoint persists an empty
   // string), so a profile is restored on URL alone; apiKey stays undefined when no key was saved.
@@ -29,10 +123,17 @@ function resolveProvider(saved: PersistedSettings): { provider: Provider; apiKey
   if (prof && saved.providerUrl) {
     return { provider: "openai", apiKey: saved.providerKey || undefined, baseUrl: saved.providerUrl, model: model ?? saved.model ?? prof?.defaultModel ?? "auto", providerProfile: saved.providerProfile };
   }
+  const token = loadAuthToken();
+  if (token) {
+    return { provider: "openai", apiKey: token, baseUrl: `${ob1ServerUrl()}/v1`, model: model ?? "qwen/qwen3.6-plus" };
+  }
+  if (envRoute) {
+    return { provider: envRoute.provider, apiKey: envRoute.apiKey, baseUrl: envRoute.baseUrl, model: model ?? envRoute.model, envProviderSource: envRoute.source };
+  }
   // Nothing configured → route through the managed OB-1 server with the signed-in user's token (the
-  // server injects the real OpenRouter key). No token yet → apiKey undefined: the app disables the
-  // model and prompts `ob1 login` or /models for FreeLLMAPI / Custom API.
-  return { provider: "openai", apiKey: loadAuthToken(), baseUrl: `${ob1ServerUrl()}/v1`, model: model ?? "qwen/qwen3.6-plus" };
+  // server injects the upstream key). No token yet → apiKey undefined: the app disables model calls and
+  // prompts `ob1 onboard` or /models for FreeLLMAPI / BYOK / Custom API.
+  return { provider: "openai", apiKey: undefined, baseUrl: `${ob1ServerUrl()}/v1`, model: model ?? "qwen/qwen3.6-plus" };
 }
 
 export type Effort = "low" | "medium" | "high";
@@ -48,6 +149,8 @@ export interface Config {
   /** Set when the active provider was configured via the /models setup flow (e.g. "freellmapi").
    *  Gates persistence of baseUrl/apiKey: only profile creds are written to disk — never an env key. */
   providerProfile?: string;
+  /** Runtime-only env route source when an env provider is active; never persisted. */
+  envProviderSource?: string;
   /** Runtime-only (never persisted): when `model` is a router alias (`auto`), the concrete model the
    *  proxy routed the LAST request to — captured from the response so the system prompt can tell the
    *  model what it actually is, instead of it parroting "auto". Updated each turn; undefined until the
@@ -139,7 +242,7 @@ export interface PersistedSettings {
   // A provider configured via the /models setup flow. Creds live here (the file is gitignored) so the
   // provider survives restarts without re-entry. Direct provider env keys are not model routes.
   // The single tuple names the ACTIVE provider (what resolveProvider restores on next launch).
-  providerProfile?: string;     // e.g. "freellmapi" | "custom"
+  providerProfile?: string;     // e.g. "freellmapi" | "ollama" | "custom"
   providerUrl?: string;         // the active provider base URL (…/v1)
   providerKey?: string;         // the active provider bearer token
   // Per-provider credential memory, keyed by profile id. Remembers EVERY configured provider's URL+key
@@ -224,9 +327,11 @@ function envSet(name: string): boolean {
 export function saveSettings(cfg: Config): void {
   const prev = loadPersisted(cfg.settingsDir);
   const supportedProvider = cfg.provider === "openai";
+  const envRoute = detectEnvProvider();
+  const envActive = !!envRoute && cfg.provider === envRoute.provider && cfg.baseUrl === envRoute.baseUrl && (cfg.apiKey ?? "") === (envRoute.apiKey ?? "");
   const data: PersistedSettings = {
     provider: "openai",
-    model: envSet("OB1_MODEL") ? prev.model : supportedProvider ? cfg.model : prev.model,
+    model: envActive || envSet("OB1_MODEL") ? prev.model : supportedProvider ? cfg.model : prev.model,
     mode: cfg.mode,
     planMode: cfg.planMode,
     autoRoute: envSet("OB1_AUTO_ROUTE") ? prev.autoRoute : cfg.autoRoute,
@@ -261,6 +366,10 @@ export function saveSettings(cfg: Config): void {
     const key = cfg.apiKey ?? "";
     creds[cfg.providerProfile] = { url: cfg.baseUrl, key };
     data.providerProfile = cfg.providerProfile; data.providerUrl = cfg.baseUrl; data.providerKey = key;
+  } else if (envActive && prev.providerProfile && prev.providerUrl && prev.providerKey != null) {
+    data.providerProfile = prev.providerProfile;
+    data.providerUrl = prev.providerUrl;
+    data.providerKey = prev.providerKey;
   }
   if (Object.keys(creds).length) data.providerCreds = creds;
   try { writeSettingsFile(cfg.settingsDir, data); }
@@ -289,17 +398,18 @@ export function persistSubscription(settingsDir: string, model: string): void {
   catch { /* best-effort persistence */ }
 }
 
-export function persistActiveProvider(settingsDir: string, profile: string, url: string, key: string): void {
+export function persistActiveProvider(settingsDir: string, profile: string, url: string, key: string, model?: string): void {
   const prev = loadPersisted(settingsDir);
   const creds: Record<string, { url: string; key: string }> = { ...(prev.providerCreds ?? {}) };
   creds[profile] = { url, key };
   const data: PersistedSettings = { ...prev, providerProfile: profile, providerUrl: url, providerKey: key, providerCreds: creds };
+  if (model) data.model = model;
   try { writeSettingsFile(settingsDir, data); }
   catch { /* best-effort persistence */ }
 }
 
 /** The shipped, baked-in credentials for a provider. Kept as a tiny compatibility shim for older callers:
- *  no model-provider secrets ship in the client, and OpenRouter is available only via the managed server. */
+ *  no model-provider secrets ship in the client; use env keys or /models for BYOK routes. */
 export function bakedProviderCreds(profileId: string): { url: string; key: string } | undefined {
   void profileId;
   return undefined;
@@ -317,11 +427,17 @@ export function savedProviderCreds(settingsDir: string): Record<string, { url: s
   return map;
 }
 
-/** Whether the active endpoint is the managed OB-1 server, which forwards model requests to OpenRouter.
- *  That path takes the unified `reasoning` param. FreeLLMAPI and Custom API profiles are plain
- *  OpenAI-compatible endpoints and take the legacy `reasoning_effort` instead. */
+/** Whether the active endpoint speaks OpenRouter semantics. The managed OB-1 server forwards model
+ *  requests to OpenRouter, and a direct `OPENROUTER_API_KEY` route does too. Those paths take the unified
+ *  `reasoning` param; plain OpenAI-compatible endpoints take the legacy `reasoning_effort` instead. */
 export function isOpenRouterEndpoint(cfg: Pick<Config, "provider" | "baseUrl" | "providerProfile">): boolean {
-  return cfg.provider === "openai" && !cfg.providerProfile && cfg.baseUrl.startsWith(ob1ServerUrl());
+  if (cfg.provider !== "openai") return false;
+  if (!cfg.providerProfile && cfg.baseUrl.startsWith(ob1ServerUrl())) return true;
+  try {
+    return new URL(cfg.baseUrl).host === "openrouter.ai";
+  } catch {
+    return false;
+  }
 }
 
 export function loadConfig(): Config {
@@ -372,6 +488,7 @@ export function loadConfig(): Config {
     apiKey: p.apiKey,
     baseUrl: p.baseUrl,
     providerProfile: p.providerProfile,
+    envProviderSource: p.envProviderSource,
     cwd,
     dataDir,
     settingsDir,

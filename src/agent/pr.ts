@@ -124,7 +124,7 @@ export async function prChecks(opts: PrChecksOpts, ctx: PrCtx, sleep: (ms: numbe
   if (!(await hasBinary("gh", run))) return "pr_checks: the GitHub CLI `gh` is not installed. Install it and `gh auth login` to poll CI status.";
   const deadline = Date.now() + Math.max(0, Math.min(1800, Number(opts.timeoutS) || 600)) * 1000;
   const argv = ["gh", "pr", "checks", ...(opts.pr != null ? [String(opts.pr)] : [])];
-  for (let attempt = 0; ; attempt++) {
+  for (;;) {
     const r = await run(argv, { cwd, timeoutMs: 60_000 });
     // gh exits non-zero when checks have failed OR when there are none — distinguish via the parse.
     const sum = parsePrChecks(r.stdout || r.stderr);

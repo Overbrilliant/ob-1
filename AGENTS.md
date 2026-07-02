@@ -46,9 +46,9 @@
 <!-- OB1:END memory -->
 
 ## Conventions
-- **Zero runtime dependencies.** Prefer Bun built-ins (`bun:sqlite`, `fetch`, `node:*`). Native
-  modules and grammar WASM don't load under Bun — use pure-TS implementations behind a stable
-  interface (see `embed.ts`, `repomap.ts`).
+- **Minimal runtime dependencies.** Prefer Bun built-ins (`bun:sqlite`, `fetch`, `node:*`) where they
+  fit. Heavy optional features such as `browser_check` load their packages lazily; keep new runtime
+  dependencies justified and narrow.
 - **Run `bun run scripts/smoke.ts`** before committing memory/embedding changes.
 - **Bundle-check** with `bun build src/index.ts --target=bun --outfile=/tmp/x.js` (no tsc install).
 - Each layer is provider-/backend-swappable: sqlite-vec, tree-sitter, and other LLM providers

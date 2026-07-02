@@ -13,12 +13,15 @@
 //
 // Side-effecting OS ops go through an injectable Runner so the smoke can drive the whole orchestration
 // against a mock server without Docker/npm/network (mirrors the injectable exec in agent/verify.ts).
-import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, chmodSync, renameSync, cpSync } from "node:fs";
 import { createServer } from "node:net";
 import { globalSettingsDir } from "../config.ts";
 
-export const FREELLM_REPO = "https://github.com/tashfeenahmed/freellmapi";
+export const FREELLM_REPOS = [
+  "https://github.com/tashfeenahmed/freellmapi",
+] as const;
+export const FREELLM_REPO = FREELLM_REPOS[0];
 const STATE_FILE = "freellm.json";
 /** Default port for the OB-1-managed proxy. Deliberately in the private/dynamic range (49152–65535) so it
  *  doesn't collide with the crowded dev ports people actually use (3000/3001/8000/8080/8888). freePort()
@@ -26,6 +29,7 @@ const STATE_FILE = "freellm.json";
 export const MANAGED_PORT = 49317;
 /** Path (relative to the clone) of the built Node entrypoint. */
 const NODE_ENTRY = "server/dist/index.js";
+const PRESERVED_REPAIR_PATHS = [".env", "data", "server/data"] as const;
 
 export type Runtime = "docker" | "node";
 
@@ -36,8 +40,15 @@ export interface ManagedState {
   port: number;
   url: string;            // http://localhost:<port>
   email?: string;
+  dashboardPassword?: string; // generated/entered dashboard password; freellm.json is owner-only
   sessionToken?: string;  // dashboard session (to re-fetch the unified key / check provider keys)
   providerKeys?: number;  // how many provider keys the user has added in the dashboard
+}
+
+export interface ManagedStatus {
+  proxyUp: boolean;
+  anonymousModelsUsable: boolean | null;
+  providerKeys: number | null;
 }
 
 // ── injectable OS runner ──────────────────────────────────────────────────────
@@ -71,7 +82,7 @@ export function loadManaged(settingsDir = globalSettingsDir()): ManagedState | n
   try { return JSON.parse(readFileSync(stateFile(settingsDir), "utf8")) as ManagedState; } catch { return null; }
 }
 export function saveManaged(s: ManagedState, settingsDir = globalSettingsDir()): void {
-  // freellm.json holds the dashboard sessionToken + email — owner-only (0o600), re-tightened on rewrite.
+  // freellm.json holds dashboard credentials/session + email — owner-only (0o600), re-tightened on rewrite.
   try { mkdirSync(settingsDir, { recursive: true, mode: 0o700 }); const p = stateFile(settingsDir); writeFileSync(p, JSON.stringify(s, null, 2), { mode: 0o600 }); chmodSync(p, 0o600); } catch { /* best-effort */ }
 }
 export function clearManaged(settingsDir = globalSettingsDir()): void { try { rmSync(stateFile(settingsDir), { force: true }); } catch { /* nothing to clear */ } }
@@ -97,11 +108,81 @@ export function freePort(preferred = MANAGED_PORT): Promise<number> {
 // ── filesystem setup ──────────────────────────────────────────────────────────
 export function isCloned(dir: string): boolean { return existsSync(join(dir, "package.json")); }
 
+function preservedPath(root: string, rel: string): string {
+  return join(root, ...rel.split("/"));
+}
+
+function snapshotPreservedPaths(dir: string, parent: string, base: string): string | null {
+  if (!existsSync(dir)) return null;
+  const backup = join(parent, `.${base}.preserve-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  let copied = false;
+  for (const rel of PRESERVED_REPAIR_PATHS) {
+    const src = preservedPath(dir, rel);
+    if (!existsSync(src)) continue;
+    try {
+      const dest = preservedPath(backup, rel);
+      mkdirSync(dirname(dest), { recursive: true });
+      cpSync(src, dest, { recursive: true, preserveTimestamps: true });
+      copied = true;
+    } catch { /* best-effort; other paths may still be preserved */ }
+  }
+  if (!copied) {
+    rmSync(backup, { recursive: true, force: true });
+    return null;
+  }
+  return backup;
+}
+
+function restorePreservedPaths(backup: string | null, dir: string): void {
+  if (!backup) return;
+  for (const rel of PRESERVED_REPAIR_PATHS) {
+    const src = preservedPath(backup, rel);
+    const dest = preservedPath(dir, rel);
+    if (!existsSync(src) || existsSync(dest)) continue;
+    try {
+      mkdirSync(dirname(dest), { recursive: true });
+      cpSync(src, dest, { recursive: true, preserveTimestamps: true });
+      if (rel === ".env") chmodSync(dest, 0o600);
+    } catch { /* best-effort; do not fail a successful repair */ }
+  }
+}
+
 /** Clone the repo (or `git pull` if already present). Returns false on failure (caller falls back). */
 export function ensureCloned(dir: string, runner: Runner = realRunner): boolean {
   if (isCloned(dir)) { runner.exec(["git", "-C", dir, "pull", "--ff-only"], { timeoutMs: 60000 }); return true; }
+  const parent = dirname(dir);
+  const base = basename(dir);
+  const envPath = join(dir, ".env");
+  let existingEnv: string | null = null;
+  try { existingEnv = existsSync(envPath) ? readFileSync(envPath, "utf8") : null; } catch { existingEnv = null; }
+  mkdirSync(parent, { recursive: true });
+  const preserved = snapshotPreservedPaths(dir, parent, base);
+
+  for (const repo of FREELLM_REPOS) {
+    const tmp = join(parent, `.${base}.clone-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    rmSync(tmp, { recursive: true, force: true });
+    const ok = runner.exec(["git", "clone", "--depth", "1", repo, tmp], { timeoutMs: 120000 }).code === 0 && isCloned(tmp);
+    if (ok) {
+      rmSync(dir, { recursive: true, force: true });
+      renameSync(tmp, dir);
+      restorePreservedPaths(preserved, dir);
+      if (existingEnv && !existsSync(envPath)) {
+        writeFileSync(envPath, existingEnv, { mode: 0o600 });
+        try { chmodSync(envPath, 0o600); } catch { /* perms are best-effort */ }
+      }
+      if (preserved) rmSync(preserved, { recursive: true, force: true });
+      return true;
+    }
+    rmSync(tmp, { recursive: true, force: true });
+  }
+
+  if (preserved) rmSync(preserved, { recursive: true, force: true });
   mkdirSync(dir, { recursive: true });
-  return runner.exec(["git", "clone", "--depth", "1", FREELLM_REPO, dir], { timeoutMs: 120000 }).code === 0;
+  if (existingEnv && !existsSync(envPath)) {
+    writeFileSync(envPath, existingEnv, { mode: 0o600 });
+    try { chmodSync(envPath, 0o600); } catch { /* perms are best-effort */ }
+  }
+  return false;
 }
 
 function randomHex(bytes: number): string {
@@ -182,21 +263,72 @@ export function stop(s: ManagedState, runner: Runner = realRunner): void {
   try { const pid = Number(readFileSync(join(s.dir, ".ob1-pid"), "utf8")); if (pid > 1) process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
 }
 
+export function formatManagedStatus(status: ManagedStatus): string {
+  const proxy = status.proxyUp ? "proxy running" : "proxy stopped";
+  const anon = status.anonymousModelsUsable === null
+    ? "anonymous models unknown"
+    : status.anonymousModelsUsable
+      ? "anonymous models usable"
+      : "anonymous models unavailable";
+  const keys = status.providerKeys === null
+    ? "provider keys unknown"
+    : `${status.providerKeys} provider key${status.providerKeys === 1 ? "" : "s"}`;
+  return `${proxy} · ${anon} · ${keys}`;
+}
+
 // ── dashboard auth + unified key (HTTP — tested against a mock) ────────────────
-/** First-run dashboard account creation; falls back to login if setup is already done. Returns the
- *  dashboard SESSION token (gates /api/*), or null on failure. */
-export async function dashboardSetup(url: string, email: string, password: string, fetchFn: typeof fetch = fetch): Promise<string | null> {
+export type DashboardSetupResult =
+  | { ok: true; token: string; existing: boolean }
+  | { ok: false; existing: boolean; status?: number; message: string };
+
+async function setupError(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
+  try {
+    const body = JSON.parse(text);
+    return body?.error?.message ?? body?.error?.type ?? body?.error ?? body?.message ?? `HTTP ${res.status}`;
+  } catch {
+    return text.trim().slice(0, 300) || `HTTP ${res.status}`;
+  }
+}
+
+async function tokenFromResponse(res: Response): Promise<string | null> {
+  const body = await res.json().catch(() => ({})) as { token?: string };
+  return body.token ?? null;
+}
+
+/** First-run dashboard account creation; falls back to login only when setup is already done. */
+export async function dashboardSetupDetailed(url: string, email: string, password: string, fetchFn: typeof fetch = fetch): Promise<DashboardSetupResult> {
   const post = (path: string) => fetchFn(`${url}${path}`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, password }),
     signal: AbortSignal.timeout(10000),
   });
   try {
-    let res = await post("/api/auth/setup");
-    if (res.status === 409) res = await post("/api/auth/login"); // already set up → log in
-    if (!res.ok) return null;
-    const body = await res.json() as { token?: string };
-    return body.token ?? null;
-  } catch { return null; }
+    const setup = await post("/api/auth/setup");
+    if (setup.ok) {
+      const token = await tokenFromResponse(setup);
+      return token
+        ? { ok: true, token, existing: false }
+        : { ok: false, existing: false, status: setup.status, message: "setup response did not include a session token" };
+    }
+    if (setup.status !== 409) {
+      return { ok: false, existing: false, status: setup.status, message: await setupError(setup) };
+    }
+
+    const login = await post("/api/auth/login");
+    if (!login.ok) return { ok: false, existing: true, status: login.status, message: await setupError(login) };
+    const token = await tokenFromResponse(login);
+    return token
+      ? { ok: true, token, existing: true }
+      : { ok: false, existing: true, status: login.status, message: "login response did not include a session token" };
+  } catch (e) {
+    return { ok: false, existing: false, message: (e as Error).message };
+  }
+}
+
+/** Back-compat helper: returns the dashboard SESSION token (gates /api/*), or null on failure. */
+export async function dashboardSetup(url: string, email: string, password: string, fetchFn: typeof fetch = fetch): Promise<string | null> {
+  const result = await dashboardSetupDetailed(url, email, password, fetchFn);
+  return result.ok ? result.token : null;
 }
 
 /** Fetch the proxy's unified API key (gates /v1) using the dashboard session. */
@@ -230,4 +362,21 @@ export async function providerKeyCount(url: string, sessionToken: string, fetchF
     const arr = Array.isArray(body) ? body : ((body as any)?.keys ?? (body as any)?.data);
     return Array.isArray(arr) ? arr.length : -1;
   } catch { return -1; }
+}
+
+export async function probeManagedStatus(s: ManagedState, fetchFn: typeof fetch = fetch): Promise<ManagedStatus> {
+  const proxyUp = await isUp(s.url, fetchFn);
+  if (!proxyUp) return { proxyUp, anonymousModelsUsable: null, providerKeys: s.providerKeys ?? null };
+
+  const session = s.sessionToken;
+  if (!session) return { proxyUp, anonymousModelsUsable: null, providerKeys: s.providerKeys ?? null };
+
+  const unifiedKey = await fetchUnifiedKey(s.url, session, fetchFn);
+  const anonymousModelsUsable = unifiedKey ? await isUsable(s.url, unifiedKey, fetchFn) : null;
+  const count = await providerKeyCount(s.url, session, fetchFn);
+  return {
+    proxyUp,
+    anonymousModelsUsable,
+    providerKeys: count >= 0 ? count : (s.providerKeys ?? null),
+  };
 }

@@ -23,8 +23,8 @@ import { listEpisodes, listPromotionCandidates, loadAgentsMemory, promoteCandida
 import { ensureOb1GitExclude } from "./context/git-exclude.ts";
 import { listSkills, readSkill, deleteSkill } from "./skills/registry.ts";
 import { maybeLearnSkill } from "./skills/learn.ts";
-import { approxTokens, totalChars, budgetChars, compactNow, summaryPrompt } from "./agent/context.ts";
-import { newSessionId, saveSession, listSessions, loadSession, deriveTitle, relTime, type SessionFile } from "./agent/session.ts";
+import { approxTokens, budgetChars, compactNow, summaryPrompt } from "./agent/context.ts";
+import { newSessionId, saveSession, listSessions, loadSession, deriveTitle, relTime } from "./agent/session.ts";
 import { expandMentions } from "./context/mentions.ts";
 import { runCurator, readUsage } from "./skills/usage.ts";
 import { buildTools, ReadCache, type Tool, type AskUserFn, type AskUserRequest } from "./agent/tools.ts";
@@ -54,11 +54,12 @@ import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
 import type { Message, Usage } from "./providers/types.ts";
 import { callModel } from "./providers/gateway.ts";
 import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning, contextWindowFor } from "./providers/models.ts";
-import { FREELLMAPI, CUSTOM, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
+import { FREELLMAPI, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
+import { CLI_VERSION } from "./version.ts";
+import { startUpdateCheck } from "./update.ts";
 
-const CLI_VERSION = "0.1.3";
 const SHELL_HELP = `OB-1 ${CLI_VERSION}
 
 Usage:
@@ -98,8 +99,8 @@ Inside OB-1, use /help for interactive commands.`;
   }
 }
 
-// First-run onboarding (soft + skippable): sign in → pick a provider → for the free path, set up and
-// auto-wire the managed FreeLLMAPI proxy. Runs BEFORE loadConfig so the new token/provider are picked
+// First-run onboarding: start free → own endpoint/env → hosted frontier. For the free path, set up and
+// auto-wire the managed FreeLLMAPI proxy. Runs BEFORE loadConfig so the new provider is picked
 // up by the single resolve below. No-ops on non-TTY (pipes/CI) and once the user has set anything up.
 let onboardingRan = false;
 {
@@ -114,7 +115,7 @@ ensureOb1GitExclude(cfg.cwd, cfg.dataDir);
  *  endpoint (key optional) has no key but is fully usable. Used to gate the model-disabled warning and the
  *  heavier modes so they don't refuse on a working keyless provider. */
 function modelReachable(): boolean {
-  return !!cfg.apiKey || !!cfg.providerProfile;
+  return !!cfg.apiKey || !!cfg.providerProfile || !!cfg.envProviderSource;
 }
 
 // Auth guard: when we rely on the managed OB-1 server but the saved token is missing or REJECTED
@@ -535,8 +536,8 @@ ${c.bold("Commands")}
   ${c.cyan("/agents")} ${c.dim("[cmd]")}         project memory index — show/update/episodes/review/promote/regen ${c.dim("(↑↓ · Enter)")}
 
 ${c.bold("Account")} ${c.dim("(shell)")}
-  ${c.bold("ob1 onboard")}           guided setup: sign in + connect a model provider (Free LLM API)
-  ${c.bold("ob1 login")}             sign in to the managed OB-1 server (free models; web search on the paid plan)
+  ${c.bold("ob1 onboard")}           guided setup: start free, use your endpoint, or hosted frontier
+  ${c.bold("ob1 login")}             sign in for the hosted frontier convenience tier
   ${c.bold("ob1 logout")}            remove the local token
 
 ${c.bold("Inline")} ${c.dim("(type at the prompt)")}
@@ -867,19 +868,17 @@ async function pickFreeModel(): Promise<void> {
 }
 
 /** The single model/provider entry point (/models · /model · the Settings "model" row). Level one is
- *  the frontier models themselves (Claude, GPT, Gemini, …) PLUS one "Free LLM API ▸" sibling that
- *  expands into the free proxy's own catalog. Frontier models are served by the managed OB-1 server on
- *  the user's subscription credits — no provider/key to configure, and OpenRouter is never surfaced (the
- *  server proxies it). A SUBSCRIBED user picks a frontier model and it just switches the active model on
- *  the managed server. A FREE user still SEES every frontier model (locked) — picking one opens pricing.
- *  Picking Free LLM API drills into the proxy router (auto); ← from that subgroup returns here. */
+ *  the frontier models themselves (Claude, GPT, Gemini, …) PLUS provider profile siblings. FreeLLMAPI
+ *  expands into the free proxy's own catalog. Other named profiles (OpenRouter, Ollama, LM Studio,
+ *  llama.cpp, vLLM, Groq, Custom) open a focused connection form over the existing OpenAI-compatible
+ *  wire. Frontier models are served by the managed OB-1 server on subscription credits. */
 async function pickModel(): Promise<void> {
   if (!ui.pick) return;
   const plan = await fetchPlan();
   const subscribed = isSubscribed(plan);
   while (true) {
     const onFree = cfg.providerProfile === FREELLMAPI.id;
-    const onCustom = cfg.providerProfile === CUSTOM.id;
+    const activeProfile = cfg.providerProfile ? profileById(cfg.providerProfile) : undefined;
     const items: { label: string; hint?: string; value: string }[] = MODELS.map((m) => ({
       label: m.label + (m.notes === "default" ? " (default)" : "") + (subscribed ? "" : "  🔒"),
       hint: subscribed
@@ -887,16 +886,37 @@ async function pickModel(): Promise<void> {
         : "frontier model — subscribe to unlock",
       value: m.id ?? m.label,
     }));
-    items.push({ label: "Free LLM API ▸", hint: "free · ~16 providers via the proxy router (auto)", value: "__free__" });
-    items.push({ label: "Custom endpoint ▸", hint: onCustom ? `connected · ${cfg.model || "no model"} · ${cfg.baseUrl}` : "your own OpenAI-compatible server — local/LAN (Ollama, llama.cpp, vLLM…); key optional", value: "__custom__" });
+    items.push({ label: "Start free with FreeLLMAPI ▸", hint: "free out of the box · bootstrap routes · add keys for reliability", value: "__free__" });
+    for (const prof of PROFILES.filter((p) => p.id !== FREELLMAPI.id && p.id !== CUSTOM.id)) {
+      const active = cfg.providerProfile === prof.id;
+      items.push({
+        label: `${prof.name}${active ? " (connected)" : ""}`,
+        hint: active ? `${cfg.model || prof.defaultModel || "model"} · ${cfg.baseUrl}` : prof.tagline,
+        value: `__profile:${prof.id}`,
+      });
+    }
+    items.push({
+      label: "Custom endpoint ▸",
+      hint: activeProfile?.id === CUSTOM.id
+        ? `connected · ${cfg.model || "no model"} · ${cfg.baseUrl}`
+        : "any OpenAI-compatible server — local/LAN/cloud; key optional",
+      value: "__custom__",
+    });
     const title = subscribed
       ? "Select a model  ↑↓ · Enter · Esc"
       : "Select a model  ↑↓ · Enter · Esc  ·  🔒 = subscribe to unlock";
-    const initial = onCustom ? "__custom__" : (onFree || (!cfg.apiKey && !subscribed)) ? "__free__" : cfg.model;
+    const initial = activeProfile?.id === CUSTOM.id ? "__custom__"
+      : activeProfile && activeProfile.id !== FREELLMAPI.id ? `__profile:${activeProfile.id}`
+        : (onFree || (!cfg.apiKey && !subscribed)) ? "__free__" : cfg.model;
     const picked = await ui.pick(title, items, initial);
     if (picked == null) return;
     if (picked === "__free__") { await pickFreeModel(); if (ui.pickReason?.() === "back") continue; return; }
     if (picked === "__custom__") { await setupProvider(CUSTOM); return; } // collects URL + model id (+ optional key)
+    if (picked.startsWith("__profile:")) {
+      const prof = profileById(picked.slice("__profile:".length));
+      if (prof) await setupProvider(prof);
+      return;
+    }
     // A frontier model.
     if (!subscribed) {
       // Free (or signed-out) user — frontier models are gated. Take them to pricing instead of selecting.
@@ -1110,10 +1130,9 @@ function rememberTurn(task: string, startLen: number, mode: string): void {
   }
 }
 
-/** Run the managed FreeLLMAPI setup (clone → run proxy → dashboard account → auto-wire) INLINE — using
- *  the inline text-prompt for email/password — so it works from inside the live TUI without dropping to
- *  the shell. Same pipeline as `ob1 onboard`'s free path (shared freeLLMSetupFlow); available to free and
- *  paid users alike. */
+/** Run the managed FreeLLMAPI setup (clone → run proxy → dashboard account → auto-wire) INLINE so it
+ *  works from inside the live TUI without dropping to the shell. Same pipeline as `ob1 onboard`'s free
+ *  path (shared freeLLMSetupFlow); available to free and paid users alike. */
 async function runManagedFreeLLMSetup(): Promise<void> {
   if (!ui.prompt) { console.log(c.dim("  run `ob1 onboard` in your shell to set up the managed Free LLM API proxy")); return; }
   const ask = ui.prompt;
@@ -1143,12 +1162,12 @@ async function pickFreeLLM(): Promise<void> {
     else if (a === "setup") await runManagedFreeLLMSetup();
     return;
   }
-  const up = await flm.isUp(st.url);
-  const nKeys = st.providerKeys ?? 0;
-  const status = up ? `running · ${nKeys} provider key${nKeys === 1 ? "" : "s"}` : "stopped";
+  const probe = await flm.probeManagedStatus(st);
+  if (probe.providerKeys !== null && probe.providerKeys !== st.providerKeys) flm.saveManaged({ ...st, providerKeys: probe.providerKeys });
+  const status = flm.formatManagedStatus(probe);
   const a = await ui.pick(`Free LLM API (${status})`, [
     { label: "open dashboard", hint: `${st.url} — add provider keys here`, value: "open" },
-    { label: up ? "restart" : "start", hint: "(re)start the local proxy", value: "restart" },
+    { label: probe.proxyUp ? "restart" : "start", hint: "(re)start the local proxy", value: "restart" },
     { label: "stop", hint: "stop the local proxy", value: "stop" },
     { label: "connect manually", hint: "switch to a manual URL + key instead", value: "manual" },
     { label: "unmanage", hint: "OB-1 stops managing it (won't auto-start)", value: "off" },
@@ -1156,7 +1175,7 @@ async function pickFreeLLM(): Promise<void> {
   if (a === "open") { openBrowser(st.url); console.log(c.dim(`  opened ${st.url}`)); }
   else if (a === "restart") {
     console.log(c.dim("  restarting the proxy…"));
-    if (up) flm.stop(st);
+    if (probe.proxyUp) flm.stop(st);
     const ok = flm.start(st.dir, st.runtime, st.port) && await flm.waitReady(st.url, fetch, 20000);
     console.log(ok ? c.dim("  ✓ proxy running") : c.yellow("  ✗ couldn't start it — try `ob1 onboard`"));
   } else if (a === "stop") { flm.stop(st); console.log(c.dim("  stopped the proxy")); }
@@ -1597,9 +1616,15 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     case "freellm": case "free-llm": {
       if (ui.pick) { await pickFreeLLM(); break; } // managed setup / manage on a TTY
-      const { loadManaged } = await import("./cli/freellm-manage.ts");
+      const { formatManagedStatus, loadManaged, probeManagedStatus, saveManaged } = await import("./cli/freellm-manage.ts");
       const st = loadManaged();
-      console.log(st?.managed ? `  Free LLM API: managed · ${st.runtime} · ${st.url}` : c.dim("  Free LLM API: not set up — run `ob1 onboard`, or /models on a TTY"));
+      if (st?.managed) {
+        const probe = await probeManagedStatus(st);
+        if (probe.providerKeys !== null && probe.providerKeys !== st.providerKeys) saveManaged({ ...st, providerKeys: probe.providerKeys });
+        console.log(`  Free LLM API: managed · ${st.runtime} · ${st.url} · ${formatManagedStatus(probe)}`);
+      } else {
+        console.log(c.dim("  Free LLM API: not set up — run `ob1 onboard`, or /models on a TTY"));
+      }
       break;
     }
     case "permission": {
@@ -2040,6 +2065,7 @@ async function runRepl(startup: string[]): Promise<void> {
     },
   };
   for (const s of startup) console.log(s);
+  startUpdateCheck(CLI_VERSION, (msg) => console.log(c.dim("  " + msg)));
   console.log("");
   while (!closed) {
     stdout.write(promptStr());
@@ -2136,6 +2162,7 @@ async function runTui(startup: string[]): Promise<void> {
     },
   };
   for (const s of startup) ctrl.pushLine(s);
+  startUpdateCheck(CLI_VERSION, (msg) => ctrl?.pushLine(c.dim("  " + msg)));
   // Submitting while a turn runs QUEUES the prompt; one drain loop runs the queue in order so the
   // next prompt fires automatically when the current finishes.
   let draining = false;
@@ -2204,6 +2231,13 @@ startup.push(banner());
   } else if (cfg.providerProfile === "custom") {
     const host = (() => { try { return new URL(cfg.baseUrl).host; } catch { return ""; } })();
     accessLine = `Custom endpoint${host ? ` · ${host}` : ""}`;
+  } else if (cfg.providerProfile) {
+    const prof = profileById(cfg.providerProfile);
+    const host = (() => { try { return new URL(cfg.baseUrl).host; } catch { return ""; } })();
+    accessLine = `${prof?.name ?? "Provider"}${host ? ` · ${host}` : ""}`;
+  } else if (cfg.envProviderSource) {
+    const host = (() => { try { return new URL(cfg.baseUrl).host; } catch { return ""; } })();
+    accessLine = `${cfg.envProviderSource}${host ? ` · ${host}` : ""}`;
   } else {
     accessLine = "Configured model endpoint";
   }
@@ -2281,7 +2315,7 @@ deferredMcp = new Map(mcp.tools.map((t) => [t.def.name, t]));
 if (deferredMcp.size) tools.set("load_mcp_tool", makeMcpLoaderTool(tools, deferredMcp));
 for (const line of mcp.summary) startup.push(c.dim("  " + line));
 if (deferredMcp.size) startup.push(c.dim(`  ${deferredMcp.size} MCP tool(s) deferred — loaded on demand via load_mcp_tool`));
-if (!modelReachable()) startup.push(c.yellow("  ⚠ not signed in — model disabled; memory + /commands still work. Run `ob1 login` to sign in to the managed server, or /models to connect FreeLLMAPI or Custom API."));
+if (!modelReachable()) startup.push(c.yellow("  ⚠ no model route configured — memory + /commands still work. Run `ob1 onboard` to start free, or /models to connect an endpoint."));
 // Surface the sandbox state at startup so env-configured (OB1_SANDBOX) sessions see a LOUD warning
 // when the requested sandbox can't be enforced — not only when /sandbox is run interactively.
 if (cfg.sandbox !== "off") {

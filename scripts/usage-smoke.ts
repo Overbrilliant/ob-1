@@ -3,7 +3,7 @@
 // day/model/mode, cache-aware cost (cache-read 0.1× / cache-write 1.25× of input, reusing the model
 // price table), and that the cost reconciles (Σ buckets == total). Fixed timestamps keep it exact.
 // Usage: bun run scripts/usage-smoke.ts
-import { mkdtempSync, writeFileSync, appendFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendUsage, loadUsage, parseLines, aggregate, formatUsage, costForUsage, CACHE_READ_MULT, CACHE_WRITE_MULT, type UsageEntry } from "../src/usage/log.ts";

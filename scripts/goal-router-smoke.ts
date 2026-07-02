@@ -12,7 +12,6 @@ const check = (name: string, ok: boolean, extra = "") => {
   if (!ok) fail = true;
 };
 
-const dec = new TextDecoder();
 const enc = new TextEncoder();
 const scriptDir = dirname(Bun.fileURLToPath(import.meta.url));
 const root = join(scriptDir, "..");
@@ -65,8 +64,11 @@ try {
   const env = { ...process.env };
   for (const key of [
     "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
+    "OB1_API_KEY",
     "OB1_BASE_URL",
     "OB1_MODEL",
     "OB1_PROVIDER",

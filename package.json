@@ -30,6 +30,7 @@
     "access": "public"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.2",
     "@types/bun": "latest",
     "@types/react": "^19.2.17",
     "ink-testing-library": "^4.0.0",
@@ -43,7 +44,10 @@
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
     "smoke": "bun run scripts/smoke.ts",
-    "typecheck": "tsc --noEmit",
+    "lint": "biome lint src scripts",
+    "format:check": "biome format src scripts --write=false",
+    "typecheck": "bun run scripts/generate-version.ts --check && tsc --noEmit",
+    "version:sync": "bun run scripts/generate-version.ts",
     "build:bin": "bun run scripts/build-bin.ts",
     "setup": "bash scripts/install.sh"
   },
@@ -51,10 +55,12 @@
   "dependencies": {
     "ink": "^7.1.0",
     "ink-text-input": "^6.0.0",
-    "playwright": "^1.61.0",
     "react": "^19.2.7",
     "sqlite-vec": "^0.1.9",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "0.20.8"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.61.0"
   }
 }

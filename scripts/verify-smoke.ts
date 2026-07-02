@@ -5,7 +5,7 @@
 //   • runTurn integration — after a file-changing turn, a failing check feeds back and the model
 //     self-corrects until green; the round budget is respected; a no-edit turn never verifies
 // Usage: bun run scripts/verify-smoke.ts
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { detectChecks, selectChecks, parseScope, runVerification, type Exec } from "../src/agent/verify.ts";
