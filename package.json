@@ -4,13 +4,13 @@
   "description": "OB-1, the CLI coding agent for Overbrilliant",
   "license": "Apache-2.0",
   "author": "Neu Software LLC",
-  "homepage": "https://github.com/overbrilliant/ob-1#readme",
+  "homepage": "https://github.com/Overbrilliant/ob-1#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/overbrilliant/ob-1.git"
+    "url": "git+https://github.com/Overbrilliant/ob-1.git"
   },
   "bugs": {
-    "url": "https://github.com/overbrilliant/ob-1/issues"
+    "url": "https://github.com/Overbrilliant/ob-1/issues"
   },
   "keywords": [
     "ai",
