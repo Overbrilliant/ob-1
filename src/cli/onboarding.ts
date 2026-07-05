@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { detectEnvProvider, envRouteIsExplicitOverride, globalSettingsDir, loadAuthToken, persistActiveProvider, persistedSettings, persistSubscription, ob1ServerUrl } from "../config.ts";
-import { runLogin, openBrowser } from "./login.ts";
+import { runLogin, openBrowser, CLI_SOURCE, withSource } from "./login.ts";
 import { banner, c } from "./ui.ts";
 import { normalizeBaseUrl } from "../providers/profiles.ts";
 import * as flm from "./freellm-manage.ts";
@@ -129,6 +129,8 @@ export interface SubscribeDeps {
   out: (s?: string) => void;
   pollMs?: number;
   maxPolls?: number;
+  /** Attribution tag for the checkout URL opened in the browser (defaults to `${CLI_SOURCE}_upgrade`). */
+  source?: string;
 }
 
 /** Forward the user to the server's pricing page — which owns cadence/tier selection and Stripe checkout
@@ -144,16 +146,20 @@ export async function subscribeFlow(d: SubscribeDeps): Promise<SubscribeResult> 
   // the browser shares the same account. Then "Choose a plan" goes straight to Stripe (no login detour)
   // and the subscription attaches to this account automatically. Fall back to plain /pricing if the
   // handoff isn't available (older server) — the page will just prompt for sign-in.
+  const source = d.source ?? `${CLI_SOURCE}_upgrade`;
   let pricingUrl = `${d.server}/pricing`;
   try {
     const r = await d.fetchFn(`${d.server}/v1/web-login`, {
       method: "POST",
       headers: { authorization: `Bearer ${d.token}`, "content-type": "application/json" },
-      body: JSON.stringify({ next: "/pricing" }),
+      body: JSON.stringify({ next: "/pricing", source }),
     });
     const b = await r.json().catch(() => ({})) as { url?: string };
     if (r.ok && b.url) pricingUrl = b.url;
   } catch { /* fall back to the plain pricing page */ }
+  // Ensure the attribution tag is on the FINAL opened URL regardless of which branch produced it (the
+  // server handoff or the plain fallback), so the checkout is always attributed to the CLI.
+  pricingUrl = withSource(pricingUrl, source);
 
   d.out("\n  Opening the plans page in your browser — pick a plan and check out securely via Stripe.");
   d.out(`    ${pricingUrl}`);
@@ -200,8 +206,8 @@ async function runHostedSetup(out: (s?: string) => void): Promise<boolean> {
       "Create account",
       "Log in   (I already have one)",
     ]);
-    if (choice === 0) await runLogin({ mode: "signup" });
-    else if (choice === 1) await runLogin({ mode: "login" });
+    if (choice === 0) await runLogin({ mode: "signup", source: `${CLI_SOURCE}_onboarding` });
+    else if (choice === 1) await runLogin({ mode: "login", source: `${CLI_SOURCE}_onboarding` });
     else if (choice === "abort") {
       abortOnboarding(out);
     } else {

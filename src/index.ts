@@ -687,20 +687,24 @@ function formatPlanUsage(p: PlanStatus | null): string[] {
  *  back to the plain /pricing page. Shared by the model picker (free user picks a frontier model) and the
  *  footer upsell. */
 async function openPricingPage(next = "/pricing"): Promise<void> {
-  const { openBrowser } = await import("./cli/login.ts");
+  const { openBrowser, CLI_SOURCE, withSource } = await import("./cli/login.ts");
   const server = ob1ServerUrl();
+  const source = `${CLI_SOURCE}_upgrade`;
   let url = `${server}${next}`;
   const token = loadAuthToken();
   if (token) {
     try {
       const r = await fetch(`${server}/v1/web-login`, {
         method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({ next }),
+        body: JSON.stringify({ next, source }),
       });
       const b = await r.json().catch(() => ({})) as { url?: string };
       if (r.ok && b.url) url = b.url;
     } catch { /* fall back to the plain pricing page */ }
   }
+  // Attribution on the FINAL opened URL (server handoff or plain fallback), so the CLI-initiated checkout
+  // is attributed to the CLI (paired with server-side capture).
+  url = withSource(url, source);
   openBrowser(url);
   (ctrl?.pushLine ?? ((s: string) => console.log(s)))(c.dim(`  ↗ opening pricing in your browser — ${server}${next}`));
 }

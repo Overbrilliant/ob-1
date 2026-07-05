@@ -9,6 +9,21 @@ import { ob1ServerUrl, globalSettingsDir } from "../config.ts";
 
 function authFile(): string { return join(globalSettingsDir(), "auth.json"); }
 
+// ── attribution ────────────────────────────────────────────────────────────────
+/** The SINGLE source of truth for the `source` attribution tag added to every browser-opened auth /
+ *  checkout URL, so the managed server can attribute the new account / checkout to the CLI (paired with
+ *  server-side capture). Callers pass a more specific variant built from this base (e.g.
+ *  `${CLI_SOURCE}_onboarding`, `${CLI_SOURCE}_upgrade`). */
+export const CLI_SOURCE = "cli";
+
+/** Append the `source` attribution param to a URL WITHOUT clobbering existing query params (idempotent —
+ *  a repeated call just overwrites the same key). Used for URLs we build AND ones the server hands back
+ *  from the web-login handoff, so attribution is present no matter which branch produced the URL. */
+export function withSource(url: string, source: string = CLI_SOURCE): string {
+  try { const u = new URL(url); u.searchParams.set("source", source); return u.toString(); }
+  catch { return url + (url.includes("?") ? "&" : "?") + "source=" + encodeURIComponent(source); }
+}
+
 export function writeAuthToken(token: string): void {
   const dir = globalSettingsDir();
   mkdirSync(dir, { recursive: true });
@@ -45,9 +60,10 @@ const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes to finish in the browser
  *  one-shot loopback HTTP listener; once the user authenticates, the server redirects the browser to that
  *  listener with a freshly-minted token, which we save. mode:"signup" just preselects the Create-account
  *  tab. No credentials are entered in the terminal. */
-export async function runLogin(opts: { mode?: "signup" | "login" } = {}): Promise<void> {
+export async function runLogin(opts: { mode?: "signup" | "login"; source?: string } = {}): Promise<void> {
   const server = ob1ServerUrl();
   const mode = opts.mode ?? "login";
+  const source = opts.source ?? CLI_SOURCE;
   const state = crypto.randomUUID();
 
   let resolveToken!: (t: string | null) => void;
@@ -77,7 +93,7 @@ export async function runLogin(opts: { mode?: "signup" | "login" } = {}): Promis
     return;
   }
 
-  const url = `${server}/activate?port=${srv.port}&state=${encodeURIComponent(state)}&mode=${mode}`;
+  const url = `${server}/activate?port=${srv.port}&state=${encodeURIComponent(state)}&mode=${mode}&source=${encodeURIComponent(source)}`;
   console.log(`\n  ${mode === "signup" ? "Create your account" : "Sign in"} in your browser to connect the CLI.`);
   console.log(`  If it doesn’t open automatically, visit:\n\n    ${url}\n`);
   openBrowser(url);
