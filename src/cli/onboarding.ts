@@ -24,7 +24,7 @@ type ArrowSelection = number | "skip" | "abort";
 
 /** A minimal up/down arrow selector for the pre-TUI onboarding (the Ink pickers aren't mounted yet).
  *  Returns the chosen index, "skip" for Esc, or "abort" for Ctrl-C. TTY-only (onboarding is). */
-function arrowSelect(title: string, options: string[]): Promise<ArrowSelection> {
+function arrowSelect(title: string, options: string[], opts: { escHint?: string } = {}): Promise<ArrowSelection> {
   return new Promise((resolve) => {
     let idx = 0;
     const draw = (first: boolean) => {
@@ -34,7 +34,9 @@ function arrowSelect(title: string, options: string[]): Promise<ArrowSelection> 
         stdout.write(`\r\x1b[2K  ${sel ? c.cyan("❯ ") + c.bold(options[i]) : "  " + c.dim(options[i])}\n`);
       }
     };
-    stdout.write(`\n  ${c.bold(title)}  ${c.dim("(↑/↓ · Enter · Esc skips · Ctrl-C aborts)")}\n`);
+    // Esc's meaning differs by picker: the FIRST-RUN picker selects the free default (escHint), the
+    // sub-pickers (hosted account / fallback) truly skip. Keep the hint honest per caller.
+    stdout.write(`\n  ${c.bold(title)}  ${c.dim(`(↑/↓ · Enter · ${opts.escHint ?? "Esc skips"} · Ctrl-C aborts)`)}\n`);
     draw(true);
     const prevRaw = stdin.isRaw;
     stdin.setRawMode?.(true);
@@ -91,28 +93,27 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
         ? `Use ${envRoute.source} — ${envRoute.label}; runtime-only, no settings write`
         : "Use my endpoint — OpenAI-compatible URL/key, Ollama, LM Studio, llama.cpp, vLLM, LAN GPU",
       "Hosted frontier  — sign in + subscribe for Claude/GPT/Gemini/Qwen with one bill",
-    ]);
+    ], { escHint: "Esc starts free" });
     if (p === "abort") {
       abortOnboarding(out);
-    } else if (p === "skip") {
-      out("\n  Setup skipped. Run `ob1 onboard` anytime.");
-      completed = true;
-    } else if (p === 0) {
-      // The free local path needs Docker or Node 20+. Detect the missing prereq UP FRONT: if neither is
-      // present, don't dead-end the user with no model — say so and fall through to the other two routes
-      // so onboarding always ends with a next action.
-      if (!flm.detectRuntime()) {
-        out("\n  ⚠ The free local path needs Docker or Node.js 20+, and neither was found.");
-        out("    Install one (https://nodejs.org or https://docs.docker.com/get-docker/) to use it later —");
-        out("    for now, let's get you a working model another way:");
-        completed = await offerFallback(out, envRoute);
-      } else {
-        completed = await runFreeLLMSetup(out);
-      }
     } else if (p === 1) {
       completed = await runOwnEndpointSetup(out, envRoute);
     } else if (p === 2) {
       completed = await runHostedSetup(out);
+    } else {
+      // p === 0 (Start free) OR p === "skip" (Esc): Esc SELECTS the default free path so the first-run
+      // picker always ends with a working setup instead of a skipped-then-confusing-401 state (README:
+      // "Pressing Esc at the first picker starts the free path"). The free path needs Docker/Node 20+; if
+      // neither is present, fall through to the other two routes (offerFallback) rather than dead-ending.
+      if (p === "skip") out("\n  Starting the free path (Ctrl-C to abort setup).");
+      if (flm.detectRuntime()) {
+        completed = await runFreeLLMSetup(out);
+      } else {
+        out("\n  ⚠ The free local path needs Docker or Node.js 20+, and neither was found.");
+        out("    Install one (https://nodejs.org or https://docs.docker.com/get-docker/) to use it later —");
+        out("    for now, let's get you a working model another way:");
+        completed = await offerFallback(out, envRoute);
+      }
     }
   } catch (e) {
     out(`  Onboarding error: ${(e as Error).message} — you can finish setup later via /models.`);
