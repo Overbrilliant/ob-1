@@ -178,6 +178,10 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
   // strict server. Managed server and keyed FreeLLMAPI/Custom endpoints carry a key.
   const headers: Record<string, string> = { "content-type": "application/json", accept: "text/event-stream", "X-Title": "OB-1" };
   if (opts.apiKey) headers.authorization = `Bearer ${opts.apiKey}`;
+  // Money-path retry safety: send the gateway's per-logical-call idempotency key so the managed server's
+  // replay cache can dedupe a retried request that already billed. Sent to EVERY endpoint — third-party
+  // OpenAI-compatible servers (Ollama, LM Studio, OpenRouter) ignore unknown headers, so it's harmless.
+  if (opts.idempotencyKey) headers["Idempotency-Key"] = opts.idempotencyKey;
 
   for await (const ev of streamSSE({
     url: `${opts.baseUrl}/chat/completions`,

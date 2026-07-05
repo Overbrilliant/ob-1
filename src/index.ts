@@ -448,7 +448,7 @@ async function autoVerify(): Promise<{ ran: boolean; ok: boolean; report: string
 
 function turnDeps(overrides?: { canEscalate?: boolean; canSpawn?: boolean; canSpawnWrite?: boolean }) {
   return {
-    cfg, tools, store, readCache, approve: ui.approve, log: ui.log, gap: ui.gap, onText: ui.onText, endText: ui.endText,
+    cfg, tools, store, readCache, approve: ui.approve, interactive: Boolean(stdin.isTTY), log: ui.log, gap: ui.gap, onText: ui.onText, endText: ui.endText,
     onReasoning: ui.onReasoning, endReasoning: ui.endReasoning, onUsage: ui.onUsage, onResolvedModel: ui.onResolvedModel, onErrorAction: ui.onErrorAction,
     onMutate: () => { turnMutated = true; }, signal: activeAbort?.signal,
     // Auto-verify + self-correct after a file-changing turn — ALWAYS on (not a setting). Suppressed only
@@ -2294,7 +2294,15 @@ if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restor
   if (!gateOff && (gateStrict || !cfg.permissionModeExplicit)) {
     const trusted = isTrusted(cfg.cwd, loadTrust(cfg.settingsDir));
     const eff = effectivePermissionMode(cfg.permissionMode, trusted);
-    if (eff.downgraded) { cfg.permissionMode = "ask"; startup.push(c.yellow("  ⚠ new/untrusted folder — starting in ask mode (each edit/command asks first). Run /trust to enable autopilot here, or /autopilot to switch now.")); }
+    if (eff.downgraded) {
+      cfg.permissionMode = "ask";
+      // Non-interactive (piped / non-TTY stdin) can't show an approval prompt, so ask mode would silently
+      // auto-deny EVERY mutating tool with no explanation. Say so up front, and point at the fixes that
+      // actually apply without a TTY (autopilot env, or run interactively) — the /trust · /autopilot
+      // slash-command advice below is useless with no interactive prompt.
+      if (!stdin.isTTY) startup.push(c.yellow("  ⚠ Non-interactive session in an untrusted folder: edits/commands will be auto-denied (no way to approve). Set OB1_PERMISSION=autopilot or run interactively to approve."));
+      else startup.push(c.yellow("  ⚠ new/untrusted folder — starting in ask mode (each edit/command asks first). Run /trust to enable autopilot here, or /autopilot to switch now."));
+    }
   }
   if (policy.rules.length) startup.push(c.dim(`  policy: ${policy.rules.length} rule(s) from .ob1/policy.json`));
   if (policy.errors.length) startup.push(c.yellow(`  ⚠ ${policy.errors.length} invalid policy rule(s) ignored — ${policy.errors[0]}`));

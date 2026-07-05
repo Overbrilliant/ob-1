@@ -92,4 +92,9 @@ export interface CallOpts {
   /** Invoked before each retry of a failed upstream call (network / 429 / 5xx / idle timeout), so the
    *  UI can tell the user it's retrying rather than hanging. attempt is 1-based; delayMs is the wait. */
   onRetry?: (info: { attempt: number; max: number; delayMs: number; error: string }) => void;
+  /** Idempotency key for the money path. ONE uuid per LOGICAL model call, held stable across that
+   *  call's internal retries (set by the gateway's callModel), so a server-side replay cache can dedupe
+   *  a retried request that already billed instead of double-charging. Sent as the `Idempotency-Key`
+   *  request header; unknown headers are harmlessly ignored by third-party OpenAI-compatible endpoints. */
+  idempotencyKey?: string;
 }

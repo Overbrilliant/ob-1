@@ -50,6 +50,10 @@ export interface Tool {
   def: ToolDef;
   mutating: boolean;     // requires approval + blocked in Plan mode
   destructive?: boolean; // tagged [destructive] in the approval prompt (in "ask" mode)
+  /** Always require explicit confirmation, even in autopilot — for an OUTWARD-FACING side effect
+   *  (e.g. opening a PUBLIC tunnel with expose_port). In a non-interactive session this means the call
+   *  is always denied (there's no way to confirm), which is the safe outcome for public exposure. */
+  forceAsk?: boolean;
   run(input: any, ctx?: ToolRunCtx): Promise<ToolOutput> | ToolOutput;
 }
 
@@ -1253,6 +1257,9 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
     },
     mutating: true,
     destructive: false,
+    // Opening a PUBLIC tunnel is outward-facing risk — always confirm, even in autopilot (and thus always
+    // denied in a non-interactive session, which is the correct, safe default for public exposure).
+    forceAsk: true,
     run: ({ port, provider }, ctx) => exposePort(Number(port), { cwd: cfg.cwd, procs, signal: ctx?.signal }, provider),
   });
 

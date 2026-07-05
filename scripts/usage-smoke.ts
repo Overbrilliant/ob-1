@@ -58,5 +58,18 @@ const report = formatUsage(agg);
 check("report shows the headline + sections", report.includes("USAGE") && report.includes("by day") && report.includes("by model") && report.includes("by mode"));
 check("report renders a positive total cost", /\$\d/.test(report), report.split("\n")[0]);
 
+// 6. honesty: an unknown-priced (custom/LAN) model reads as "n/a", not a misleading $0.00, and its
+// calls are excluded from — and annotated on — the dollar total.
+{
+  const lan = "ornith"; // not in the price table → estimateCost is 0 (unpriceable, not free)
+  const lanRep = formatUsage(aggregate([mk({ model: lan, costUsd: costForUsage(lan, 1000, 200, 0, 0) })]));
+  check("unknown-priced model shows n/a, never $0.00", lanRep.includes("n/a") && !lanRep.includes("$0.00"), lanRep.split("\n").find((l) => l.includes(lan)) ?? "");
+  check("total annotates the excluded unknown-pricing calls", /excludes 1 call with unknown pricing/.test(lanRep));
+  const mixed = aggregate([mk({}), mk({ model: lan, costUsd: costForUsage(lan, 1000, 200, 0, 0) })]);
+  check("aggregate counts unknown-priced calls separately", mixed.total.unknownCalls === 1 && mixed.total.calls === 2);
+  const mixedRep = formatUsage(mixed);
+  check("mixed total keeps the known-priced dollar cost + excludes note", /\$\d/.test(mixedRep) && /excludes 1 call/.test(mixedRep));
+}
+
 console.log(fail ? "\nFAIL" : "\nPASS");
 process.exit(fail ? 1 : 0);

@@ -226,6 +226,9 @@ check("extract returns null when absent", extractTunnelUrl("cloudflared", "start
 {
   const t = buildTools({ cwd: dir } as any, {} as any);
   check("expose_port registered + mutating", !!t.get("expose_port") && t.get("expose_port")!.mutating === true);
+  // Public exposure is outward-facing risk: it must confirm even in autopilot (forceAsk), so it can't
+  // auto-open a tunnel unattended and is always denied in a non-interactive session.
+  check("expose_port forces confirmation even in autopilot (forceAsk)", t.get("expose_port")!.forceAsk === true);
 }
 
 rmSync(dir, { recursive: true, force: true });

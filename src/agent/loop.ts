@@ -34,6 +34,10 @@ export interface TurnDeps {
    *  on every context eviction so a dedup pointer can never reference content no longer in history. */
   readCache?: ReadCache;
   approve: (desc: string) => Promise<boolean>;
+  /** Whether an interactive approval prompt is actually possible (a TTY). FALSE for a piped / non-TTY
+   *  session, where `approve` can't prompt and so returns false at stdin EOF — used to explain a denial
+   *  as "auto-denied, can't prompt" rather than a misleading "user denied". Undefined ⇒ assume interactive. */
+  interactive?: boolean;
   log: (s: string) => void;
   /** Emit a single deduped blank line between stream blocks (response · tool call) for even spacing. */
   gap?: () => void;
@@ -939,12 +943,25 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       // Read-only calls change nothing, so they are never gated and never mark the turn mutated. A policy
       // "allow" or a token also skips the interactive prompt.
       const destructive = tool.destructive || isDestructiveCall(tu.name, tu.input);
-      if (mutatingCall && !preApproved && cfg.permissionMode !== "autopilot") {
+      // `forceAsk` tools (e.g. expose_port — a PUBLIC tunnel) always require explicit confirmation, even
+      // in autopilot, because the side effect is outward-facing. Everything else is gated only outside
+      // autopilot. A policy `allow` / an /allow token (preApproved) is an explicit grant and still counts.
+      const forceAsk = tool.forceAsk === true;
+      if (mutatingCall && !preApproved && (forceAsk || cfg.permissionMode !== "autopilot")) {
         const ok = await approve(describe(tu.name, tu.input) + (destructive ? c.red("  [destructive]") : "") + policyNote);
         if (!ok) {
-          log(c.yellow(`  ✗ denied: ${tu.name}`));
-          quality?.recordTool(tu.name, tu.input, false, "User denied this action", false); quality?.save();
-          results.push({ type: "tool_result", tool_use_id: tu.id, content: "User denied this action.", is_error: true });
+          // Distinguish a real "no" from a non-interactive session that COULDN'T prompt (piped / non-TTY
+          // stdin → approve returns false at EOF), so the model and the user understand the actual reason
+          // instead of a misleading "user denied".
+          const nonInteractive = deps.interactive === false;
+          const reason = nonInteractive
+            ? (forceAsk
+                ? `Auto-denied: ${tu.name} always requires explicit confirmation (even in autopilot), but this session is non-interactive (piped / non-TTY stdin) so it can't be confirmed. Re-run interactively to approve.`
+                : `Auto-denied: this action needs approval, but this session is non-interactive (piped / non-TTY stdin) so it can't prompt. Re-run interactively to approve, or enable autopilot (OB1_PERMISSION=autopilot, and /trust this folder) to run edits and commands without prompting.`)
+            : "User denied this action.";
+          log(c.yellow(`  ✗ denied: ${tu.name}${nonInteractive ? " (non-interactive — can't prompt)" : ""}`));
+          quality?.recordTool(tu.name, tu.input, false, nonInteractive ? "Auto-denied: non-interactive session can't prompt" : "User denied this action", false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: reason, is_error: true });
           continue;
         }
       }

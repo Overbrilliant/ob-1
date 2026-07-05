@@ -15,7 +15,7 @@
 // Sources: github.com/ryoppippi/ccusage · braintrust.dev "how to track llm token usage".
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
-import { estimateCost } from "../providers/models.ts";
+import { estimateCost, hasKnownPricing } from "../providers/models.ts";
 
 export interface UsageEntry {
   ts: string;        // ISO-8601 timestamp (stamped by the caller — keeps this module's core Date-free)
@@ -68,7 +68,7 @@ export function loadUsage(path: string): UsageEntry[] {
   return parseLines(readFileSync(path, "utf8"));
 }
 
-export interface Bucket { in: number; out: number; cacheRead: number; cacheWrite: number; costUsd: number; calls: number; }
+export interface Bucket { in: number; out: number; cacheRead: number; cacheWrite: number; costUsd: number; calls: number; unknownCalls: number; }
 export interface UsageAgg {
   total: Bucket;
   byDay: Record<string, Bucket>;
@@ -76,10 +76,13 @@ export interface UsageAgg {
   byMode: Record<string, Bucket>;
 }
 
-function emptyBucket(): Bucket { return { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, calls: 0 }; }
+function emptyBucket(): Bucket { return { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, costUsd: 0, calls: 0, unknownCalls: 0 }; }
 function add(b: Bucket, e: UsageEntry): void {
   b.in += e.in || 0; b.out += e.out || 0; b.cacheRead += e.cacheRead || 0;
   b.cacheWrite += e.cacheWrite || 0; b.costUsd += e.costUsd || 0; b.calls += 1;
+  // A call whose model isn't in the price table contributes $0 to costUsd — track it so the report can
+  // show "n/a" (not a misleading $0.00) and annotate how many calls are excluded from the dollar total.
+  if (!hasKnownPricing(e.model || "")) b.unknownCalls += 1;
 }
 function into(rec: Record<string, Bucket>, key: string, e: UsageEntry): void {
   (rec[key] ??= emptyBucket()); add(rec[key], e);
@@ -100,19 +103,27 @@ export function aggregate(entries: UsageEntry[]): UsageAgg {
 const fmtTok = (n: number): string => (n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n));
 const fmtUsd = (n: number): string => (n > 0 && n < 0.01 ? "<$0.01" : "$" + n.toFixed(2));
 
+/** Cost cell for a bucket: "n/a" when EVERY call in it is an unknown-priced (custom/LAN) model — its $0
+ *  isn't "free", it's unpriceable, so don't print a misleading $0.00. Otherwise the (known-priced) cost. */
+const costCell = (b: Bucket): string => (b.unknownCalls === b.calls ? "n/a" : fmtUsd(b.costUsd));
+
 /** Render an aggregate as a plain-text report (the `/usage` output). */
 export function formatUsage(agg: UsageAgg): string {
   const t = agg.total;
   if (t.calls === 0) return "  no usage recorded yet (run a turn, then try /usage)";
   const row = (label: string, b: Bucket): string =>
     `    ${label.padEnd(22)} ${fmtTok(b.in).padStart(7)} in ${fmtTok(b.out).padStart(7)} out ` +
-    `${fmtTok(b.cacheRead).padStart(7)} cache-r  ${fmtUsd(b.costUsd).padStart(7)}  ${b.calls} calls`;
+    `${fmtTok(b.cacheRead).padStart(7)} cache-r  ${costCell(b).padStart(7)}  ${b.calls} calls`;
   const section = (title: string, rec: Record<string, Bucket>, sortByCost = true): string[] => {
     const keys = Object.keys(rec).sort((a, b) => (sortByCost ? rec[b].costUsd - rec[a].costUsd : a < b ? 1 : -1));
     return [`  ${title}`, ...keys.map((k) => row(k, rec[k]))];
   };
   const lines: string[] = [];
-  lines.push(`  USAGE — ${t.calls} model calls · ${fmtTok(t.in)} in / ${fmtTok(t.out)} out · ${fmtTok(t.cacheRead)} cache-read · total ${fmtUsd(t.costUsd)}`);
+  // The dollar total already excludes unknown-priced calls (they cost $0); annotate how many so a big
+  // custom/LAN session doesn't silently read as $0.00 = free.
+  const totalCost = costCell(t);
+  const excl = t.unknownCalls > 0 ? `  (excludes ${t.unknownCalls} call${t.unknownCalls === 1 ? "" : "s"} with unknown pricing)` : "";
+  lines.push(`  USAGE — ${t.calls} model calls · ${fmtTok(t.in)} in / ${fmtTok(t.out)} out · ${fmtTok(t.cacheRead)} cache-read · total ${totalCost}${excl}`);
   lines.push("");
   lines.push(...section("by day", agg.byDay, false));
   lines.push("");

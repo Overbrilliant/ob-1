@@ -32,6 +32,18 @@ try {
     check("onRetry fired once per retry with attempt/max", notices.length === 2 && notices[0].attempt === 1 && notices[0].max === 5 && notices[1].attempt === 2);
   }
 
+  // ── idempotency key: ONE per logical call, STABLE across that call's retries, FRESH per new call ──
+  // (the money-path guard so a retried request that already billed can be deduped by the server).
+  {
+    const seen: (string | undefined)[] = [];
+    await callModel(baseOpts(), async (o: any) => { seen.push(o.idempotencyKey); if (seen.length < 3) throw new Error("API 503"); return { ok: true } as any; });
+    const key = seen[0];
+    check("idempotency key present + stable across a call's retries", seen.length === 3 && !!key && /^[0-9a-f-]{36}$/i.test(key) && seen.every((k) => k === key));
+    const seen2: (string | undefined)[] = [];
+    await callModel(baseOpts(), async (o: any) => { seen2.push(o.idempotencyKey); return { ok: true } as any; });
+    check("a NEW logical call gets a fresh idempotency key", !!seen2[0] && seen2[0] !== key);
+  }
+
   // ── client error (400) → throw immediately, no retry ──
   {
     let calls = 0, retries = 0, threw = false;

@@ -39,9 +39,14 @@ export async function callModel(
     return callOpenAI(o);
   });
   const max = maxAttempts();
+  // One idempotency key per LOGICAL call, generated ONCE here so it stays stable across this call's
+  // internal retries below (each new callModel invocation gets a fresh one). Threaded into the request
+  // headers as `Idempotency-Key` so the server's replay cache can dedupe a retried request that already
+  // billed — the money-path guard against a double-charge when we resend after a transient failure.
+  const idempotencyKey = crypto.randomUUID();
   let produced = false;
   const tap = (fn?: (d: string) => void) => (fn ? (d: string) => { produced = true; fn(d); } : undefined);
-  const inner: CallOpts = { ...opts, onText: tap(opts.onText), onReasoning: tap(opts.onReasoning) };
+  const inner: CallOpts = { ...opts, idempotencyKey, onText: tap(opts.onText), onReasoning: tap(opts.onReasoning) };
 
   let lastErr: Error | undefined;
   for (let attempt = 1; attempt <= max; attempt++) {

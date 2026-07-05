@@ -119,6 +119,14 @@ export function estimateCost(id: string, inTok: number, outTok: number): number 
   return (inTok / 1_000_000) * s.inPrice + (outTok / 1_000_000) * s.outPrice;
 }
 
+/** Whether the price table has a real USD rate for this model. When false, estimateCost() returns 0 —
+ *  NOT because the run was free but because we can't price a custom/LAN/unknown model. Lets /usage show
+ *  "n/a" instead of a misleading $0.00 for those rows. */
+export function hasKnownPricing(id: string): boolean {
+  const s = modelSpec(id);
+  return !!(s?.inPrice && s.outPrice);
+}
+
 // NOTE: the description does NOT lead with the model id — every caller already prints the id
 // separately (e.g. `model: ${id} — ${describeModel(id)}`), so repeating it here produced the
 // "auto — auto — …" stutter. Return only the descriptive part.

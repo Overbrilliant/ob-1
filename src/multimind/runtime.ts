@@ -120,6 +120,12 @@ export async function runWorker(opts: {
         opts.onEvent?.({ label, phase: "tool", tool: tu.name, input: tu.input }); // surface each tool call
         const tool = tools.get(tu.name);
         if (!tool) { results.push({ type: "tool_result", tool_use_id: tu.id, content: `unknown tool: ${tu.name}`, is_error: true }); continue; }
+        // A `forceAsk` tool (e.g. expose_port — a PUBLIC tunnel) must NEVER run unattended. When no approve
+        // callback is wired (autopilot worker) there's no way to confirm, so deny it with a clear reason
+        // rather than silently opening it to the internet.
+        if (tool.forceAsk && !opts.approve) {
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: `${tu.name} always requires explicit confirmation and can't run unattended in this mode.`, is_error: true }); continue;
+        }
         // Capability is set by the tools map the caller passed; here we only gate a mutating call when an
         // `approve` callback is wired (Council writing the real tree). No callback ⇒ runs (Fusion copy).
         if (toolCallMutates(tool, tu.name, tu.input) && opts.approve && !(await opts.approve(actionDesc(tu.name, tu.input)))) {
