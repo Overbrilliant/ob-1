@@ -6,6 +6,7 @@
 // transport-agnostic and lives in JsonRpcMcpClient; each transport only implements how a message
 // is sent and how incoming messages reach dispatch().
 import type { Subprocess } from "bun";
+import { CLI_VERSION } from "../version.ts";
 
 export interface McpServerConfig {
   /** Transport. Defaults to "stdio" when `command` is set, otherwise inferred from `url`. */
@@ -95,7 +96,7 @@ export abstract class JsonRpcMcpClient implements McpClient {
     await this.request("initialize", {
       protocolVersion,
       capabilities: {},
-      clientInfo: { name: "ob1", version: "0.1.3" },
+      clientInfo: { name: "ob1", version: CLI_VERSION },
     }, timeoutMs);
     this.notify("notifications/initialized", {});
   }
