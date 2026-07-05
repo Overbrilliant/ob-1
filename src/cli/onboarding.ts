@@ -98,7 +98,17 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
       out("\n  Setup skipped. Run `ob1 onboard` anytime.");
       completed = true;
     } else if (p === 0) {
-      completed = await runFreeLLMSetup(out);
+      // The free local path needs Docker or Node 20+. Detect the missing prereq UP FRONT: if neither is
+      // present, don't dead-end the user with no model — say so and fall through to the other two routes
+      // so onboarding always ends with a next action.
+      if (!flm.detectRuntime()) {
+        out("\n  ⚠ The free local path needs Docker or Node.js 20+, and neither was found.");
+        out("    Install one (https://nodejs.org or https://docs.docker.com/get-docker/) to use it later —");
+        out("    for now, let's get you a working model another way:");
+        completed = await offerFallback(out, envRoute);
+      } else {
+        completed = await runFreeLLMSetup(out);
+      }
     } else if (p === 1) {
       completed = await runOwnEndpointSetup(out, envRoute);
     } else if (p === 2) {
@@ -110,6 +120,24 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
     if (completed) markOnboarded();
     out("");
   }
+}
+
+/** Keep onboarding from dead-ending: when the free local path can't run (no Docker/Node) — or the user
+ *  declines it — offer the two remaining routes so they ALWAYS leave with a working next action instead of
+ *  no model at all. Returns true once a route is configured; false if the user skips (re-runnable via
+ *  `ob1 onboard`). */
+async function offerFallback(out: (s?: string) => void, envRoute = detectEnvProvider()): Promise<boolean> {
+  const choice = await arrowSelect("How would you like to run models instead?", [
+    envRoute
+      ? `Use ${envRoute.source} — ${envRoute.label}; runtime-only, no settings write`
+      : "Use my endpoint — OpenAI-compatible URL/key, Ollama, LM Studio, llama.cpp, vLLM, LAN GPU",
+    "Hosted frontier  — sign in + subscribe for Claude/GPT/Gemini/Qwen with one bill",
+  ]);
+  if (choice === "abort") abortOnboarding(out);
+  if (choice === 0) return runOwnEndpointSetup(out, envRoute);
+  if (choice === 1) return runHostedSetup(out);
+  out("\n  Setup skipped — run `ob1 onboard` anytime to finish.");
+  return false;
 }
 
 // ── subscription (paid intelligent models via the managed server + Stripe) ────
