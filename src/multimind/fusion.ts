@@ -16,6 +16,7 @@ import { createWorktree, createWorkspaceCopy, isGitRepo, type Worktree } from ".
 import { wrapCommand } from "../safety/sandbox.ts";
 import type { Config } from "../config.ts";
 import type { Tool } from "../agent/tools.ts";
+import type { ProcRegistry } from "../agent/procs.ts";
 
 export interface CandidateScore {
   ok: boolean;
@@ -198,6 +199,8 @@ export async function runFusion(opts: {
    *  runs with the FULL toolset inside its OWN writable copy of the workspace, so the parallel candidates
    *  can edit/run/test without ever overwriting each other's work. Omitted ⇒ read-only in the shared cwd. */
   mkTools?: (cwd: string) => Map<string, Tool>;
+  procs?: ProcRegistry;   // when wired, reap any background proc a candidate left in its throwaway copy
+                          // (kill-by-cwd) BEFORE the copy is torn down, so it never orphans
   planMode?: boolean;     // read-only investigation only — no writable copies (mirrors Solo Plan mode)
   onEvent?: (ev: WorkerEvent) => void; // live per-worker progress (candidates / synthesizer) for the UI
   signal?: AbortSignal;                // external cancellation (ESC) — propagated to every worker
@@ -281,7 +284,9 @@ export async function runFusion(opts: {
       );
     }
   } finally {
-    for (const w of copies) w?.cleanup(); // always remove the throwaway candidate copies
+    // Reap any background proc a candidate left running INSIDE its copy (kill-by-cwd) BEFORE removing the
+    // dir, so a dev server/watcher started in a throwaway workspace copy never orphans. Then remove the copy.
+    for (const w of copies) { if (w) { opts.procs?.killByCwd(w.path); w.cleanup(); } }
   }
 
   // 2. Auto-score each candidate against an objective signal. Under worktree mode, derive one

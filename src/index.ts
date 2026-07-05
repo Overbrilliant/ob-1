@@ -1837,7 +1837,7 @@ async function fusionTurn(task: string): Promise<string | undefined> {
   console.log(c.dim(`  budget (declared up front): ~${nCand + 1 + (moa ? nCand : 0)} model calls ≈ ${nCand + 1 + (moa ? nCand : 0)}× a Solo pass`));
   const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy each";
   console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) + auto-score → synthesizer merges the best parts${models?.length ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}${worktree ? ` + worktree real-test (${testCmd ?? "bun test"})` : ""}…`));
-  const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, mkTools, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
+  const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
   if (activeAbort?.signal.aborted) return undefined; // ESC: don't render a partial result or apply it
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
   for (const cnd of r.candidates) {

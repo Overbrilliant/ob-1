@@ -79,20 +79,37 @@ export class ProcRegistry {
 
   /** Hard-kill every tracked process immediately (SIGKILL) with no state change or emit — safe to call
    *  synchronously from a process 'exit' handler so a background dev server/watcher never outlives the
-   *  harness. Background procs are detached (own group), so their kill fn signals the whole subtree. */
+   *  harness. Procs are detached (own group), so their kill fn signals the whole subtree. */
   reapAll(): void {
     for (const p of this.procs.values()) { try { p.kill("SIGKILL"); } catch { /* already gone */ } }
   }
+
+  /** Kill (SIGKILL) and drop every tracked process launched AT or UNDER `dir`, matched by its registered
+   *  cwd. Used to reap procs a torn-down worktree / workspace copy left running — e.g. a background server a
+   *  multimind candidate started inside its throwaway copy — so they don't orphan when the dir is removed.
+   *  Best-effort; returns how many were reaped. Group-aware killers signal the whole subtree. */
+  killByCwd(dir: string): number {
+    const prefix = dir.endsWith("/") ? dir : dir + "/";
+    let n = 0;
+    for (const [id, p] of this.procs) {
+      const cwd = p.info.cwd;
+      if (!cwd || (cwd !== dir && !cwd.startsWith(prefix))) continue;
+      try { p.kill("SIGKILL"); } catch { /* already gone */ }
+      this.procs.delete(id); n++;
+    }
+    if (n) this.emit();
+    return n;
+  }
 }
 
-/** Build the KillFn for a tracked process. Background procs are spawned DETACHED (their own process
- *  group), so we signal the whole GROUP (negative pid) to take down the `bash -lc` wrapper AND its
- *  descendants (e.g. `npm run dev` → node) — otherwise killing only the wrapper orphans the real
- *  server. Foreground procs share our group, so we just signal the process. Falls back to the raw
- *  per-process kill if the group signal can't be delivered (no pid / not a group leader). */
-export function makeProcKiller(pid: number | undefined, rawKill: KillFn, background: boolean): KillFn {
+/** Build the KillFn for a tracked process. When `groupKill` is set the process was spawned DETACHED (its
+ *  OWN process group), so we signal the whole GROUP (negative pid) to take down the `bash -lc` wrapper AND
+ *  its descendants (e.g. `npm run dev` → node, or a `cmd & ` grandchild) — otherwise killing only the
+ *  wrapper orphans them. Both background AND foreground run_bash procs are detached now, so both group-kill.
+ *  Falls back to the raw per-process kill if the group signal can't be delivered (no pid / not a leader). */
+export function makeProcKiller(pid: number | undefined, rawKill: KillFn, groupKill: boolean): KillFn {
   return (signal) => {
-    if (background && typeof pid === "number" && pid > 1) {
+    if (groupKill && typeof pid === "number" && pid > 1) {
       try { process.kill(-pid, (signal ?? "SIGTERM") as NodeJS.Signals); return; } catch { /* group gone / not a leader → fall back */ }
     }
     try { rawKill(signal); } catch { /* already gone */ }

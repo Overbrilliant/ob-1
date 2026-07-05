@@ -535,13 +535,17 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
 
       // Foreground: spawn inline and await with a timeout below. Explicit env (see launchBackground) so
       // request_secret values reach the shell — Bun.spawn ignores runtime process.env mutations otherwise.
+      // DETACHED (own process group) so a kill signals the whole GROUP — the `bash -lc` wrapper AND any
+      // grandchildren it spawned (a subshell, a `cmd &` job) — instead of orphaning them. stdin is ignored,
+      // so being outside the terminal's foreground group can't trigger SIGTTIN.
       const argv = wrapCommand(cfg.sandbox, cfg.cwd, command);
-      const proc = Bun.spawn(argv, { cwd: workdir, env: { ...process.env }, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-      const id = procs?.add(command, makeProcKiller(proc.pid, (sig) => proc.kill(sig as any), false), proc.pid, false, workdir);
-      // ESC: kill this foreground command directly. procs.killAll() (from the cancel handler) already
+      const proc = Bun.spawn(argv, { cwd: workdir, env: { ...process.env }, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
+      const killGroup = makeProcKiller(proc.pid, (sig) => proc.kill(sig as any), true);
+      const id = procs?.add(command, killGroup, proc.pid, false, workdir);
+      // ESC: group-kill this foreground command directly. procs.killAll() (from the cancel handler) already
       // covers the wired TUI/REPL case; this also handles contexts with no process registry (subagents),
       // so a long foreground command always dies on abort. The `finally` removes it from procs either way.
-      const onAbort = () => { try { proc.kill(); } catch { /* already gone */ } };
+      const onAbort = () => { try { killGroup("SIGTERM"); } catch { /* already gone */ } };
       if (ctx?.signal) { if (ctx.signal.aborted) onAbort(); else ctx.signal.addEventListener("abort", onAbort, { once: true }); }
 
       // Drain incrementally into buffers so we keep partial output even if the process is killed.
@@ -565,9 +569,9 @@ export function buildTools(cfg: Config, store: MemoryStore, askUser?: AskUserFn,
         clearTimeout(timer);
 
         if (outcome === "timeout") {
-          // Kill the stuck command (SIGTERM, then SIGKILL if it clings on), keep whatever it printed.
-          try { proc.kill(); } catch { /* already gone */ }
-          const sigkill = setTimeout(() => { try { proc.kill(9); } catch { /* already gone */ } }, 2_000);
+          // Group-kill the stuck command (SIGTERM, then SIGKILL if it clings on), keep whatever it printed.
+          try { killGroup("SIGTERM"); } catch { /* already gone */ }
+          const sigkill = setTimeout(() => { try { killGroup("SIGKILL"); } catch { /* already gone */ } }, 2_000);
           (sigkill as any).unref?.(); // don't keep the event loop alive just for the fallback kill
           await Promise.race([drained, new Promise((r) => setTimeout(r, 200))]);
           const secs = Math.round(timeoutMs / 1_000);
