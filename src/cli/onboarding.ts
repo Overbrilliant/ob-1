@@ -108,6 +108,12 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
       if (p === "skip") out("\n  Starting the free path (Ctrl-C to abort setup).");
       if (flm.detectRuntime()) {
         completed = await runFreeLLMSetup(out);
+        if (!completed) {
+          // FreeLLM setup didn't complete (clone/install/build/start/dashboard failure). Don't strand the
+          // user in the TUI with no model route — offer BYOK/hosted, same as the no-runtime path below.
+          out("\n  The free local setup didn't finish — let's get you a working model another way:");
+          completed = await offerFallback(out, envRoute);
+        }
       } else {
         out("\n  ⚠ The free local path needs Docker or Node.js 20+, and neither was found.");
         out("    Install one (https://nodejs.org or https://docs.docker.com/get-docker/) to use it later —");
