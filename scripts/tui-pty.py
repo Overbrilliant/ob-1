@@ -186,22 +186,26 @@ try:
 
     # 3b) Settings are no longer one menu — the old /settings picker was removed and every setting is now
     #     a first-class command. /settings just prints a redirect to those commands; /permission opens the
-    #     interactive ask/autopilot picker. Assert both: the redirect text, then drive the /permission
-    #     picker to "ask" via arrow nav (no typing). The picker opens highlighted on the autopilot DEFAULT,
-    #     so one ↑ moves to ask. "use with care" is the autopilot hint — unique to this picker, so matching
-    #     it (not "autopilot", which the earlier /help list already printed) confirms the picker rendered.
+    #     interactive ask/autopilot picker. Assert the redirect text, then drive the /permission picker via
+    #     arrow nav (no typing). The trust gate (on by default) starts this fresh, UNTRUSTED temp folder in
+    #     ASK, so the picker opens highlighted on "ask" (index 0); one ↓ moves to autopilot and selecting it
+    #     flips the mode — proving the picker both renders and mutates state. "use with care" is the autopilot
+    #     hint, unique to this picker, so matching it confirms it rendered.
     submit("/settings")
     redirect_ok = wait_for(["individual commands"], timeout=8.0)
     check("/settings redirects to the individual setting commands", redirect_ok)
 
+    # The trust gate downgrades an implicit autopilot → ask in an untrusted folder; a fresh `ob1` in a real
+    # repo must not run autopilot unasked. This is the launch-safety default, so assert it fired at boot.
+    check("trust gate: a fresh untrusted folder starts in ask mode", "starting in ask mode" in text())
     submit("/permission")
     perm_open = wait_for(["use with care"], timeout=8.0)
     check("/permission opens the ask/autopilot picker", perm_open)
-    send("\x1b[A")                                   # autopilot (default highlight) → ask
+    send("\x1b[B")                                   # ask (trust-gate default highlight) → autopilot
     pump(0.4)
-    send("\r")                                       # select ask
-    autop = wait_for(["permission → ask"], timeout=6.0)
-    check("/permission set to ask via the picker", autop)
+    send("\r")                                       # select autopilot
+    autop = wait_for(["permission → autopilot"], timeout=6.0)
+    check("/permission set to autopilot via the picker", autop)
     pump(0.5)
 
     # 3c) /models opens an interactive picker; arrow + Enter acts on the highlighted model. This PTY
