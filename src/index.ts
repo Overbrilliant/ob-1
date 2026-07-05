@@ -188,6 +188,24 @@ for (const sig of Object.keys(SIGNAL_EXIT_CODE)) {
     process.exit(SIGNAL_EXIT_CODE[sig]);
   });
 }
+// Last-resort crash guards. A stray rejected promise or thrown error must NEVER dump a raw stack trace
+// over the TUI on launch day. Render it through the SAME friendly formatter the transcript uses, run the
+// existing process-reaping cleanup + close MCP/store (mirrors the signal path above), then exit non-zero.
+// Registered once so we don't double-handle; Ink installs its OWN teardown via its exit hook, which still
+// runs on our process.exit(). The try/catch around `mcp` also absorbs a TDZ ref if a crash lands before
+// `mcp` is assigned below.
+let _crashed = false;
+const onFatal = (err: unknown): void => {
+  if (_crashed) return; _crashed = true;
+  try { process.stderr.write("\n" + renderFriendly(explainError(err instanceof Error ? err.message : String(err))) + "\n"); }
+  catch { /* the crash handler itself must never re-throw */ }
+  reapProcs();
+  try { for (const cl of mcp.clients) cl.close(); } catch { /* not loaded yet / already closed */ }
+  try { store.close(); } catch { /* best-effort */ }
+  process.exit(1);
+};
+process.on("unhandledRejection", (reason) => onFatal(reason));
+process.on("uncaughtException", (err) => onFatal(err));
 // Live subagents spawned by spawn_subagents — shown in the TUI footer so the user can track each one.
 const agentReg = new AgentRegistry();
 // The agent's TODO list (update_tasks tool) — rendered above the input; persists across turns.
