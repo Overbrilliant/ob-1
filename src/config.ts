@@ -169,8 +169,14 @@ export interface Config {
   mode: Mode;
   /** true = read-only Plan mode; false = Act mode (R6 — Cline plan/act). */
   planMode: boolean;
-  /** "autopilot" (default) never prompts (executes mutating tools freely); "ask" prompts before each one. */
+  /** "autopilot" never prompts (executes mutating tools freely); "ask" prompts before each one. The
+   *  built-in default is autopilot, but a FIRST-RUN session in an UNTRUSTED folder is downgraded to "ask"
+   *  by the trust gate (index.ts) — see permissionModeExplicit. */
   permissionMode: PermissionMode;
+  /** Whether permissionMode was set EXPLICITLY (OB1_PERMISSION env, or any saved settings value) rather
+   *  than left at the built-in default. The trust gate downgrades only an IMPLICIT autopilot in an
+   *  untrusted folder, so a user who explicitly chose autopilot keeps it. Runtime-only (never persisted). */
+  permissionModeExplicit: boolean;
   /** Solo auto-routing. ON → a Solo turn may escalate to a deeper mode (Fusion/Council), but ONLY when
    *  the task warrants deeper analysis (suggestMode) AND Solo fails the objective check. OFF (default) →
    *  every Solo turn stays pure Solo; nothing auto-escalates. Env override: OB1_AUTO_ROUTE=on|off. */
@@ -455,6 +461,10 @@ export function loadConfig(): Config {
   const model = process.env.OB1_MODEL ? p.model : (sameProvider && saved.model ? saved.model : p.model);
   const effortRaw = (process.env.OB1_EFFORT as Effort | undefined) ?? saved.effort;
   const envPerm = process.env.OB1_PERMISSION === "autopilot" ? "autopilot" : process.env.OB1_PERMISSION === "ask" ? "ask" : undefined;
+  // Explicit = the user chose the permission mode (env, or any previously-saved value); implicit = the
+  // built-in default. A fresh install has no saved permissionMode → implicit → the trust gate may downgrade
+  // it to "ask" in an untrusted folder (index.ts), so a first `ob1` in a real repo never runs autopilot unasked.
+  const permissionModeExplicit = envPerm !== undefined || saved.permissionMode != null;
   const envAutoRoute = /^(1|true|on)$/i.test(process.env.OB1_AUTO_ROUTE ?? "") ? true
     : /^(0|false|off)$/i.test(process.env.OB1_AUTO_ROUTE ?? "") ? false : undefined;
   const envSubagents = /^(1|true|on)$/i.test(process.env.OB1_SUBAGENTS ?? "") ? true
@@ -507,6 +517,7 @@ export function loadConfig(): Config {
     skillLearn: envSkillLearn ?? saved.skillLearn ?? false,
     qualityMode: envQualityMode ?? (saved.qualityMode && QUALITY_MODES.includes(saved.qualityMode) ? saved.qualityMode : "normal"),
     permissionMode: envPerm ?? (saved.permissionMode === "ask" ? "ask" : "autopilot"),
+    permissionModeExplicit,
     sandbox: envSandbox ?? (saved.sandbox && SANDBOXES.includes(saved.sandbox) ? saved.sandbox : "off"),
     checkpoint: envCheckpoint ?? saved.checkpoint ?? true,
     // Default: route web_search through the managed OB-1 server (Bearer-authenticated; the paid-tier

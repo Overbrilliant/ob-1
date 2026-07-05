@@ -1441,7 +1441,15 @@ async function handleCommand(line: string): Promise<boolean> {
     }
     case "trust": {
       saveTrust(cfg.settingsDir, recordTrust(cfg.cwd, loadTrust(cfg.settingsDir)));
-      console.log(c.green(`  ✓ trusted this workspace (${cfg.cwd}) — autopilot is now allowed here.`));
+      // If the trust gate downgraded an IMPLICIT autopilot to ask this session, trusting the folder should
+      // take effect NOW — restore autopilot (but never override a user who explicitly chose ask).
+      if (cfg.permissionMode === "ask" && !cfg.permissionModeExplicit) {
+        cfg.permissionMode = "autopilot";
+        ctrl?.setStatus({ autopilot: true });
+        console.log(c.green(`  ✓ trusted this workspace (${cfg.cwd}) — autopilot enabled here.`));
+      } else {
+        console.log(c.green(`  ✓ trusted this workspace (${cfg.cwd}) — autopilot is now allowed here.`));
+      }
       break;
     }
     case "allow": {
@@ -2273,14 +2281,20 @@ if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restor
   const health = settingsHealth(cfg.settingsDir);
   if (health.errors.length) startup.push(c.yellow(`  ⚠ ignored invalid settings (using defaults):\n${formatSettingsIssues({ ...health, warnings: [] })}`));
 }
-// Folder trust: running an UNFAMILIAR project unattended is the classic foot-gun. The downgrade
-// (autopilot→ask in an untrusted folder) is OPT-IN via OB1_TRUST_GATE so it never adds friction to
-// normal/dev use; when enabled, an untrusted folder downgrades until the user runs `/trust`.
+// Folder trust: running an UNFAMILIAR project unattended is the classic foot-gun ("the agent I installed
+// edited files and ran shell with no prompt"). The trust gate is now ON BY DEFAULT: in an UNTRUSTED folder
+// we downgrade autopilot → ask so a first `ob1` in a real repo asks before each change. It only touches an
+// IMPLICIT autopilot (the built-in default) — a user who EXPLICITLY chose autopilot (OB1_PERMISSION, or a
+// saved settings value) keeps it, and a trusted folder (/trust) keeps it. Escape hatches: OB1_TRUST_GATE=0
+// disables the gate entirely; OB1_TRUST_GATE=1 forces STRICT (downgrade even an explicit autopilot).
 {
-  if (/^(1|true|on)$/i.test(process.env.OB1_TRUST_GATE ?? "")) {
+  const gateEnv = process.env.OB1_TRUST_GATE ?? "";
+  const gateOff = /^(0|false|off)$/i.test(gateEnv);
+  const gateStrict = /^(1|true|on)$/i.test(gateEnv); // force downgrade even for an explicit autopilot choice
+  if (!gateOff && (gateStrict || !cfg.permissionModeExplicit)) {
     const trusted = isTrusted(cfg.cwd, loadTrust(cfg.settingsDir));
     const eff = effectivePermissionMode(cfg.permissionMode, trusted);
-    if (eff.downgraded) { cfg.permissionMode = "ask"; startup.push(c.yellow("  ⚠ untrusted folder — autopilot downgraded to ask. Run /trust to trust this workspace.")); }
+    if (eff.downgraded) { cfg.permissionMode = "ask"; startup.push(c.yellow("  ⚠ new/untrusted folder — starting in ask mode (each edit/command asks first). Run /trust to enable autopilot here, or /autopilot to switch now.")); }
   }
   if (policy.rules.length) startup.push(c.dim(`  policy: ${policy.rules.length} rule(s) from .ob1/policy.json`));
   if (policy.errors.length) startup.push(c.yellow(`  ⚠ ${policy.errors.length} invalid policy rule(s) ignored — ${policy.errors[0]}`));
