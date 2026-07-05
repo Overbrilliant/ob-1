@@ -214,9 +214,11 @@ export interface Config {
    *  SHADOW git repo (separate git dir; never touches your real .git), so /rewind can revert code and/or
    *  conversation to an earlier prompt. Cheap + local. OFF → no snapshots. Env override: OB1_CHECKPOINT=on|off. */
   checkpoint: boolean;
-  /** Web-search backend (SearXNG JSON API). Defaults to the shared baked-in endpoint so `web_search`
-   *  works out of the box; the key is sent as the `X-API-Key` header. Override with OB1_SEARXNG_URL /
-   *  OB1_SEARXNG_KEY, or set OB1_SEARXNG_URL="" to disable web_search. */
+  /** Web-search backend. By DEFAULT `web_search` routes through the MANAGED OB-1 server
+   *  (`${ob1ServerUrl()}/v1/search`), authenticated with the signed-in Bearer token — the paid-tier gate
+   *  lives server-side (nothing is baked into the client). Point OB1_SEARXNG_URL at your OWN SearXNG
+   *  instance to hit it directly (authenticated with the `X-API-Key` header from OB1_SEARXNG_KEY); set
+   *  OB1_SEARXNG_URL="" to disable web_search. See searxngBearer for which auth header is used. */
   searxngUrl?: string;
   searxngKey?: string;
   /** true → the search backend is the managed OB-1 server (authenticate with Bearer <token>);

@@ -785,7 +785,7 @@ async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolea
     keyOptional: prof.keyOptional,
     collectModel: prof.needsModel,
     initialModel,
-    modelPlaceholder: prof.needsModel ? "e.g. ornith, llama3.1, qwen2.5-coder" : undefined,
+    modelPlaceholder: prof.needsModel ? "e.g. auto, llama3.1, qwen2.5-coder" : undefined,
     initialUrl: (active ? cfg.baseUrl : remembered?.url ?? "") || prof.defaultLocalUrl,
     initialKey: active ? (cfg.apiKey ?? "") : (remembered?.key ?? ""),
     onTest: async (url, key) => {
