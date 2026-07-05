@@ -78,7 +78,7 @@ check("named env keys are offered during onboarding, not treated as already conf
     openUrl: (u) => opened.push(u), persist: () => {}, out: () => {}, pollMs: 1, maxPolls: 10,
   });
   check("subscribe → still activates without the web-login handoff", res === "activated");
-  check("subscribe → falls back to plain /pricing when handoff is unavailable", opened.length === 1 && opened[0] === "http://x/pricing");
+  check("subscribe → falls back to /pricing (with CLI attribution) when handoff is unavailable", opened.length === 1 && opened[0].startsWith("http://x/pricing") && opened[0].includes("source=cli_upgrade"));
 }
 {
   const m = mockServer({ statusSeq: ["free", "free", "free"] });
