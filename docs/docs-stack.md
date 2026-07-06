@@ -16,7 +16,7 @@ docs.overbrilliant.com/
   getting-started/
     quickstart
     install
-    freellmapi
+    free-models
   concepts/
     sessions
     permissions

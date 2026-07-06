@@ -9,25 +9,45 @@ import type { PersistedSettings } from "./config.ts";
 import { PROFILES } from "./providers/profiles.ts";
 
 const ENUMS: Record<string, readonly string[]> = {
-  provider: ["openai"],
+  provider: ["openai", "free"],
   mode: ["solo", "fusion", "council", "personas", "adaptive"],
   permissionMode: ["ask", "autopilot"],
   sandbox: ["off", "read-only", "workspace-write"],
   effort: ["low", "medium", "high"],
   qualityMode: ["off", "normal", "strict"],
+  freeStrategy: ["priority", "balanced", "smartest", "fastest", "reliable"],
 };
-const BOOLS = ["planMode", "autoRoute", "subagents", "repoMap", "memEvolve", "memReflect", "memAutolink", "skillLearn", "checkpoint"] as const;
+const BOOLS = [
+  "planMode",
+  "autoRoute",
+  "subagents",
+  "repoMap",
+  "memEvolve",
+  "memReflect",
+  "memAutolink",
+  "skillLearn",
+  "checkpoint",
+] as const;
 const STRINGS = ["model", "providerUrl", "providerKey"] as const;
 const PROVIDER_PROFILES = PROFILES.map((p) => p.id);
+// Legacy providerProfile ids that no longer exist in PROFILES but must still VALIDATE (not be dropped) so
+// loadPersisted's one-time migration can see and rewrite them. Critical ordering: validateSettings runs
+// BEFORE migrateFreellmapiToFree — without this alias a legacy "freellmapi" value would be stripped here
+// and the migration would never fire, silently un-onboarding the user. See migrateFreellmapiToFree (config.ts).
+const LEGACY_PROVIDER_PROFILES = ["freellmapi"];
+const ACCEPTED_PROVIDER_PROFILES = [...PROVIDER_PROFILES, ...LEGACY_PROVIDER_PROFILES];
 const KNOWN = new Set<string>([...Object.keys(ENUMS), ...BOOLS, ...STRINGS, "providerCreds"]);
 KNOWN.add("providerProfile");
 
-export interface SettingsIssue { field: string; message: string }
+export interface SettingsIssue {
+  field: string;
+  message: string;
+}
 export interface ValidationReport {
-  ok: boolean;                 // true when there were no ERRORS (warnings don't flip this)
-  value: PersistedSettings;    // sanitized: only valid fields survive
-  errors: SettingsIssue[];     // invalid values that were dropped
-  warnings: SettingsIssue[];   // unknown keys (ignored) + soft issues
+  ok: boolean; // true when there were no ERRORS (warnings don't flip this)
+  value: PersistedSettings; // sanitized: only valid fields survive
+  errors: SettingsIssue[]; // invalid values that were dropped
+  warnings: SettingsIssue[]; // unknown keys (ignored) + soft issues
 }
 
 function isPlainObject(x: unknown): x is Record<string, unknown> {
@@ -47,7 +67,11 @@ export function validateSettings(raw: unknown): ValidationReport {
     if (val === undefined || val === null) continue; // absent → default, not an error
     if (key in ENUMS) {
       if (typeof val === "string" && ENUMS[key].includes(val)) value[key] = val;
-      else errors.push({ field: key, message: `invalid ${key}: ${JSON.stringify(val)} — expected one of ${ENUMS[key].join(" | ")}` });
+      else
+        errors.push({
+          field: key,
+          message: `invalid ${key}: ${JSON.stringify(val)} — expected one of ${ENUMS[key].join(" | ")}`,
+        });
     } else if ((BOOLS as readonly string[]).includes(key)) {
       if (typeof val === "boolean") value[key] = val;
       else errors.push({ field: key, message: `invalid ${key}: ${JSON.stringify(val)} — expected a boolean` });
@@ -55,8 +79,14 @@ export function validateSettings(raw: unknown): ValidationReport {
       if (typeof val === "string") value[key] = val;
       else errors.push({ field: key, message: `invalid ${key}: ${JSON.stringify(val)} — expected a string` });
     } else if (key === "providerProfile") {
-      if (typeof val === "string" && PROVIDER_PROFILES.includes(val)) value[key] = val;
-      else errors.push({ field: key, message: `invalid providerProfile: ${JSON.stringify(val)} — expected one of ${PROVIDER_PROFILES.join(" | ")}` });
+      // Accept legacy aliases (e.g. "freellmapi") so the value survives validation for the migration to
+      // rewrite it; the error message still lists only the CURRENT profiles.
+      if (typeof val === "string" && ACCEPTED_PROVIDER_PROFILES.includes(val)) value[key] = val;
+      else
+        errors.push({
+          field: key,
+          message: `invalid providerProfile: ${JSON.stringify(val)} — expected one of ${PROVIDER_PROFILES.join(" | ")}`,
+        });
     } else if (key === "providerCreds") {
       if (isPlainObject(val)) {
         const creds: Record<string, { url: string; key: string }> = {};
@@ -65,8 +95,10 @@ export function validateSettings(raw: unknown): ValidationReport {
             warnings.push({ field: `providerCreds.${pid}`, message: `unknown provider profile "${pid}" (ignored)` });
             continue;
           }
-          if (isPlainObject(entry) && typeof entry.url === "string" && typeof entry.key === "string") creds[pid] = { url: entry.url, key: entry.key };
-          else errors.push({ field: `providerCreds.${pid}`, message: "each entry must be { url: string, key: string }" });
+          if (isPlainObject(entry) && typeof entry.url === "string" && typeof entry.key === "string")
+            creds[pid] = { url: entry.url, key: entry.key };
+          else
+            errors.push({ field: `providerCreds.${pid}`, message: "each entry must be { url: string, key: string }" });
         }
         if (Object.keys(creds).length) value.providerCreds = creds;
       } else errors.push({ field: "providerCreds", message: "expected an object of { url, key } entries" });

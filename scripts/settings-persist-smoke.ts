@@ -152,6 +152,29 @@ try {
   const subKept = JSON.parse(readFileSync(join(gdir2, "settings.json"), "utf8"));
   check("subscribed (profile-less) global is NOT clobbered by a legacy profile", subKept.providerProfile === undefined, JSON.stringify(subKept.providerProfile));
   check("subscribed config keeps the managed-server provider (no legacy profile)", subCfg.providerProfile === undefined, String(subCfg.providerProfile));
+
+  // 10) freeStrategy (embedded free-models router) round-trips across save/reload.
+  const gdirFS = join(tmp, "global-fs");
+  mkdirSync(gdirFS, { recursive: true });
+  process.env.OB1_SETTINGS_DIR = gdirFS;
+  const fsCfg = loadConfig();
+  check("freeStrategy defaults to balanced", fsCfg.freeStrategy === "balanced", fsCfg.freeStrategy);
+  fsCfg.freeStrategy = "smartest";
+  saveSettings(fsCfg);
+  check("freeStrategy survives a save/reload", loadConfig().freeStrategy === "smartest", loadConfig().freeStrategy);
+
+  // 11) legacy migration: a GLOBAL settings.json with providerProfile "freellmapi" loads as the embedded
+  //     "free" router (model "auto") and the rewrite is persisted. Guards the config-validate ORDERING bug:
+  //     validateSettings must accept the legacy alias so migrateFreellmapiToFree can rewrite it (otherwise the
+  //     value is stripped first and the user is silently un-onboarded).
+  const gdirMig = join(tmp, "global-mig");
+  mkdirSync(gdirMig, { recursive: true });
+  writeFileSync(join(gdirMig, "settings.json"), JSON.stringify({ provider: "openai", providerProfile: "freellmapi", providerUrl: "http://localhost:3001/v1", providerKey: "k", model: "kimi" }));
+  process.env.OB1_SETTINGS_DIR = gdirMig;
+  const migFree = loadConfig();
+  check("legacy freellmapi profile migrates to the embedded free router", migFree.providerProfile === "free" && migFree.provider === "free" && migFree.model === "auto", `${migFree.providerProfile}/${migFree.provider}/${migFree.model}`);
+  const migPersisted = JSON.parse(readFileSync(join(gdirMig, "settings.json"), "utf8"));
+  check("migration is persisted to disk (freellmapi → free / auto)", migPersisted.providerProfile === "free" && migPersisted.model === "auto", JSON.stringify(migPersisted.providerProfile));
 } finally {
   process.chdir(origCwd);
   rmSync(tmp, { recursive: true, force: true });
@@ -160,5 +183,5 @@ try {
 }
 
 if (fail) { console.error("\n✗ settings-persist smoke FAILED"); process.exit(1); }
-console.log("\n✓ settings-persist smoke passed (global round-trip · env precedence · provider guard · corrupt fallback · adaptive + legacy→global migration + subscription not clobbered by legacy profile)");
+console.log("\n✓ settings-persist smoke passed (global round-trip · env precedence · provider guard · corrupt fallback · adaptive + legacy→global migration + subscription not clobbered · freeStrategy round-trip · freellmapi→free migration)");
 process.exit(0);

@@ -579,7 +579,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   let stepsWithTools = 0;        // steps that emitted ≥1 tool call — for degenerate-no-op detection
   let noopRetries = 0;           // one-time retry when a turn ends having taken no action + given no answer
   const autofixMax = deps.autofixMax ?? 3;
-  // Consecutive mid-stream model failures (e.g. the FreeLLMAPI router falling back to another model
+  // Consecutive mid-stream model failures (e.g. the free router falling back to another model
   // after we'd already streamed output — which the gateway can't safely retry). Resets on any success;
   // when it trips we re-issue the step instead of killing the whole turn. OB1_STEP_RETRIES overrides.
   let stepRetries = 0;

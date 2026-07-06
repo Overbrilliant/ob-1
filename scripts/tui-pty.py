@@ -52,7 +52,7 @@ tmp = tempfile.mkdtemp(prefix="ob1-tui-pty-")
 # static model PICKER rather than the provider-setup tab (which is what /models does when nothing is
 # configured).
 # OB1_MODEL pins the highlight to the FIRST registry entry so one ↓ lands on a real model, not the
-# appended "Connect FreeLLMAPI" row. NO inherited CI flag.
+# appended "Free models ▸" row. NO inherited CI flag.
 env = {
     "PATH": os.environ.get("PATH", ""),
     "HOME": tmp,

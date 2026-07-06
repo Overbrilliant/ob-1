@@ -1,22 +1,23 @@
 // First-run onboarding (soft, pre-TUI). Runs once when the user has no configured model route:
-// Start free (FreeLLMAPI) → own endpoint/env → hosted frontier. For the free path, OB-1 sets up and
-// auto-wires the user's FreeLLMAPI proxy (see freellm-manage.ts). Plain readline prompts (same style as
-// login.ts) so it works before the Ink TUI takes raw-mode stdin. Re-runnable via `ob1 onboard`.
+// Start free (embedded free-models router) → own endpoint/env → hosted frontier. The free path activates
+// the in-process router (src/providers/free) — keyless providers work with zero setup — and offers to open
+// the keys file so the user can unlock the bigger pools. Plain readline prompts (same style as login.ts) so
+// it works before the Ink TUI takes raw-mode stdin. Re-runnable via `ob1 onboard`.
 import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
-import { randomBytes } from "node:crypto";
 import { detectEnvProvider, envRouteIsExplicitOverride, globalSettingsDir, loadAuthToken, persistActiveProvider, persistedSettings, persistSubscription, ob1ServerUrl } from "../config.ts";
+import { ensureKeysFile, freeStatus, runFreeHealthCheck } from "../providers/free/index.ts";
 import { runLogin, openBrowser, CLI_SOURCE, withSource } from "./login.ts";
 import { banner, c } from "./ui.ts";
 import { normalizeBaseUrl } from "../providers/profiles.ts";
-import * as flm from "./freellm-manage.ts";
 
 // ── decision helpers (pure — unit-tested) ─────────────────────────────────────
 export interface OnboardState { tty: boolean; onboarded: boolean; hasProvider: boolean; hasEnvProvider: boolean }
 /** Onboard interactively, once, only when there is no usable model route yet. The default route is the
- *  local FreeLLMAPI setup; hosted sign-in is now a deliberate paid-tier choice. */
+ *  embedded free-models router; hosted sign-in is now a deliberate paid-tier choice. */
 export function decideOnboard(s: OnboardState): boolean {
   return s.tty && !s.onboarded && !s.hasProvider && !s.hasEnvProvider;
 }
@@ -88,7 +89,7 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
   try {
     const envRoute = detectEnvProvider();
     const p = await arrowSelect("How do you want to run models?", [
-      "Start free       — OB-1 sets up FreeLLMAPI locally; anonymous bootstrap models + your keys",
+      "Start free       — 150+ free models from 20+ providers; works instantly, add keys for more",
       envRoute
         ? `Use ${envRoute.source} — ${envRoute.label}; runtime-only, no settings write`
         : "Use my endpoint — OpenAI-compatible URL/key, Ollama, LM Studio, llama.cpp, vLLM, LAN GPU",
@@ -101,25 +102,13 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
     } else if (p === 2) {
       completed = await runHostedSetup(out);
     } else {
-      // p === 0 (Start free) OR p === "skip" (Esc): Esc SELECTS the default free path so the first-run
-      // picker always ends with a working setup instead of a skipped-then-confusing-401 state (README:
-      // "Pressing Esc at the first picker starts the free path"). The free path needs Docker/Node 20+; if
-      // neither is present, fall through to the other two routes (offerFallback) rather than dead-ending.
-      if (p === "skip") out("\n  Starting the free path (Ctrl-C to abort setup).");
-      if (flm.detectRuntime()) {
-        completed = await runFreeLLMSetup(out);
-        if (!completed) {
-          // FreeLLM setup didn't complete (clone/install/build/start/dashboard failure). Don't strand the
-          // user in the TUI with no model route — offer BYOK/hosted, same as the no-runtime path below.
-          out("\n  The free local setup didn't finish — let's get you a working model another way:");
-          completed = await offerFallback(out, envRoute);
-        }
-      } else {
-        out("\n  ⚠ The free local path needs Docker or Node.js 20+, and neither was found.");
-        out("    Install one (https://nodejs.org or https://docs.docker.com/get-docker/) to use it later —");
-        out("    for now, let's get you a working model another way:");
-        completed = await offerFallback(out, envRoute);
-      }
+      // p === 0 (Start free) OR p === "skip" (Esc): Esc SELECTS the free default so the first-run picker
+      // always ends with a working setup instead of a skipped-then-confusing state (README: "Pressing Esc at
+      // the first picker starts the free path"). The embedded router has NO runtime dependency — no Docker,
+      // no Node, no second process — so this path can't fail for lack of one: it activates immediately and
+      // serves on keyless providers with zero keys.
+      if (p === "skip") out("\n  Starting free (Ctrl-C to abort setup).");
+      completed = await runFreeSetup(out);
     }
   } catch (e) {
     out(`  Onboarding error: ${(e as Error).message} — you can finish setup later via /models.`);
@@ -129,22 +118,77 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
   }
 }
 
-/** Keep onboarding from dead-ending: when the free local path can't run (no Docker/Node) — or the user
- *  declines it — offer the two remaining routes so they ALWAYS leave with a working next action instead of
- *  no model at all. Returns true once a route is configured; false if the user skips (re-runnable via
- *  `ob1 onboard`). */
-async function offerFallback(out: (s?: string) => void, envRoute = detectEnvProvider()): Promise<boolean> {
-  const choice = await arrowSelect("How would you like to run models instead?", [
-    envRoute
-      ? `Use ${envRoute.source} — ${envRoute.label}; runtime-only, no settings write`
-      : "Use my endpoint — OpenAI-compatible URL/key, Ollama, LM Studio, llama.cpp, vLLM, LAN GPU",
-    "Hosted frontier  — sign in + subscribe for Claude/GPT/Gemini/Qwen with one bill",
+// ── the free path (embedded router — no runtime dependency) ───────────────────
+const sleepFree = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Open the keys file for editing during pre-TUI onboarding. Prefers the user's terminal editor
+ *  ($VISUAL/$EDITOR, run synchronously with inherited stdio — safe HERE because the Ink TUI isn't mounted
+ *  yet, so a full-screen terminal editor won't fight the raw-mode UI); else the OS "open with default app"
+ *  (macOS `open -t`, Linux `xdg-open`); else just prints the path. Best-effort — never throws. */
+function openKeysFile(path: string, out: (s?: string) => void): void {
+  const editor = (process.env.VISUAL || process.env.EDITOR || "").trim();
+  try {
+    if (editor) {
+      const [bin, ...args] = editor.split(/\s+/); // honor e.g. `EDITOR="code -w"`
+      out(`\n  Opening ${path} in ${bin}…`);
+      spawnSync(bin, [...args, path], { stdio: "inherit" });
+      return;
+    }
+    if (process.platform === "darwin") {
+      spawnSync("open", ["-t", path]);
+      out(`\n  Opened ${path} in your default text editor.`);
+      return;
+    }
+    if (process.platform === "linux") {
+      spawnSync("xdg-open", [path]);
+      out(`\n  Opened ${path}.`);
+      return;
+    }
+  } catch {
+    /* fall through to just printing the path */
+  }
+  out(`\n  Add your keys here: ${path}`);
+}
+
+/** The embedded free-models onboarding path. Activates the in-process router IMMEDIATELY (keyless providers
+ *  serve with zero setup — no key, no account, no second process), creates the keys file, and OFFERS to open
+ *  it so the user can paste free provider keys for the bigger pools. Always returns true: the router is live
+ *  the moment the profile is persisted, so there is nothing to fail. */
+async function runFreeSetup(out: (s?: string) => void): Promise<boolean> {
+  // 1. Activate the embedded router now — keyless providers (Kilo, Pollinations, OVH, LLM7) need nothing.
+  persistActiveProvider(globalSettingsDir(), "free", "", "", "auto");
+  out("\n  ✓ Free models are on — 150+ free models across 20+ providers, routed automatically for you.");
+  out("    Works out of the box on keyless providers; adding free API keys unlocks the big pools");
+  out("    (Google, Groq, OpenRouter, …).");
+
+  // 2. Create the keys file and offer to open it now.
+  const path = ensureKeysFile();
+  const choice = await arrowSelect("Add your free API keys now?", [
+    "Open the keys file now (recommended)",
+    "Skip — I'll add keys later",
   ]);
   if (choice === "abort") abortOnboarding(out);
-  if (choice === 0) return runOwnEndpointSetup(out, envRoute);
-  if (choice === 1) return runHostedSetup(out);
-  out("\n  Setup skipped — run `ob1 onboard` anytime to finish.");
-  return false;
+  if (choice === 0) {
+    openKeysFile(path, out);
+    const rl = readline.createInterface({ input: stdin, output: stdout });
+    try {
+      await rl.question("\n  Press Enter once you've saved (or Enter to continue) ");
+    } finally {
+      rl.close();
+    }
+  }
+
+  // 3. Kick a best-effort background health check (bounded — health is non-blocking by contract) and print a
+  //    compact activation summary from the freshly reloaded status.
+  await Promise.race([runFreeHealthCheck(true), sleepFree(4000)]).catch(() => {});
+  const st = freeStatus();
+  const keyed = st.providers.filter((p) => p.hasKey).length;
+  const keyless = st.providers.filter((p) => p.keyless).length;
+  out(
+    `\n  ✓ ${keyed} provider${keyed === 1 ? "" : "s"} keyed · ${keyless} keyless — ${st.availableModels} of ${st.totalModels} models active`,
+  );
+  out(`    Add keys anytime: ${path} (or /free in the session).`);
+  return true;
 }
 
 // ── subscription (paid intelligent models via the managed server + Stripe) ────
@@ -288,127 +332,3 @@ async function runOwnEndpointSetup(out: (s?: string) => void, envRoute = detectE
   }
 }
 
-/** I/O for the managed FreeLLMAPI setup, injected so the SAME pipeline runs under readline (onboarding,
- *  pre-TUI) and inside the Ink TUI (/freellm). `ask` is only used if an existing FreeLLMAPI dashboard
- *  account needs reconnecting; `waitForDone` resolves when the user signals they've finished adding keys
- *  on the dashboard (Enter), letting us do a final key count. */
-export interface FreeLLMSetupDeps {
-  ask: (question: string, opts?: { mask?: boolean }) => Promise<string>;
-  out: (s?: string) => void;
-  openUrl: (url: string) => void;
-  waitForDone: () => Promise<void>;
-}
-
-export function generatedDashboardCredentials(): { email: string; password: string } {
-  const suffix = randomBytes(5).toString("hex");
-  const password = randomBytes(18).toString("base64url");
-  // Real TLD required: FreeLLMAPI's dashboard validates the email format and rejects invented TLDs
-  // (`.ob1` → 400 "A valid email is required", which stalls first-run setup at the reconnect prompt).
-  // The account is local-only and never emailed, so any well-formed domain we control works.
-  return { email: `ob1-local-${suffix}@local.overbrilliant.com`, password };
-}
-
-/** The managed FreeLLMAPI pipeline: clone → run → dashboard account → auto-wire URL+unified key → open
- *  the dashboard for the user to add provider keys → wait → count. Best-effort + visibly narrated.
- *  Returns true once the proxy is connected (regardless of how many provider keys were added). */
-export async function freeLLMSetupFlow(d: FreeLLMSetupDeps): Promise<boolean> {
-  const runtime = flm.detectRuntime();
-  if (!runtime) {
-    d.out("  ⚠ Need Docker or Node.js (20+) to run Free LLM API locally. Install one and try again,");
-    d.out("    or connect a provider manually via /models.");
-    return false;
-  }
-  d.out(`  Using ${runtime === "docker" ? "Docker" : "Node.js"} to run the proxy.`);
-
-  const dir = flm.installDir();
-  d.out("  Downloading FreeLLMAPI…");
-  if (!flm.ensureCloned(dir)) { d.out("  ✗ Couldn't download it (need git + network). Try again later."); return false; }
-
-  const generated = generatedDashboardCredentials();
-  d.out("\n  Creating a local FreeLLMAPI dashboard login for you.");
-  d.out(`    Email: ${generated.email}`);
-  d.out(`    Password: ${generated.password}`);
-  d.out("    Use these if the dashboard asks you to sign in; change them later in the dashboard.");
-
-  const port = await flm.freePort(3001);
-  flm.ensureEnv(dir, port);
-  const url = `http://localhost:${port}`;
-  if (!flm.start(dir, runtime, port, flm.realRunner, (m) => d.out(`  ${m}`))) { d.out("  ✗ Failed to start the proxy. Check Docker/Node and try again."); return false; }
-  d.out("  Waiting for the proxy to come up…");
-  if (!(await flm.waitReady(url))) { d.out("  ✗ The proxy didn't come up in time. Try again."); return false; }
-
-  let email = generated.email;
-  let dashboardPassword = generated.password;
-  let setup = await flm.dashboardSetupDetailed(url, generated.email, generated.password);
-  let session = setup.ok ? setup.token : null;
-  if (!setup.ok && setup.existing) {
-    d.out("\n  An existing FreeLLMAPI dashboard account is already set up. Enter it to reconnect:");
-    email = (await d.ask("Email")).trim();
-    const password = (await d.ask("Password", { mask: true })).trim();
-    if (!email || !password) { d.out("  ✗ Need the existing dashboard email and password. Try again."); return false; }
-    dashboardPassword = password;
-    setup = await flm.dashboardSetupDetailed(url, email, password);
-    if (!setup.ok) {
-      d.out(`  ✗ Couldn't sign in to the existing dashboard account: ${setup.message}. Try again.`);
-      return false;
-    }
-    session = setup.token;
-  } else if (!setup.ok) {
-    d.out(`  ✗ Couldn't create the dashboard account: ${setup.message}. Try again.`);
-    return false;
-  }
-  if (!session) { d.out("  ✗ Couldn't create the dashboard account: setup response did not include a session token. Try again."); return false; }
-  const key = await flm.fetchUnifiedKey(url, session);
-  if (!key) { d.out("  ✗ Couldn't read the proxy's API key. Try again."); return false; }
-
-  // AUTO-WIRE: no manual URL/key entry — OB-1 knows both because it manages the proxy.
-  persistActiveProvider(globalSettingsDir(), "freellmapi", `${url}/v1`, key);
-  flm.saveManaged({ managed: true, dir, runtime, port, url, email, dashboardPassword, sessionToken: session, providerKeys: 0 });
-  d.out(`  ✓ Connected OB-1 to your local proxy at ${url}/v1 (no key entry needed).`);
-  d.out("    Anonymous bootstrap models may work right away; add your own provider keys for reliable capacity.");
-
-  d.out("\n  Opening the dashboard — add your provider keys on the Keys page, then come back here.");
-  d.openUrl(url);
-  d.out("  Press Enter when you've added a provider key (or to skip — you can add them anytime)…");
-  await d.waitForDone();
-  let keys = 0;
-  try { keys = await flm.providerKeyCount(url, session); } catch { keys = 0; }
-  const st = flm.loadManaged();
-  if (st) flm.saveManaged({ ...st, providerKeys: Math.max(0, keys) });
-  d.out(keys > 0
-    ? `  ✓ ${keys} provider key${keys === 1 ? "" : "s"} added — you're all set.`
-    : "  No provider key added yet — anonymous bootstrap models are available when public pools have capacity. Add keys anytime; OB-1 picks them up. Manage with /freellm.");
-  return true;
-}
-
-/** Onboarding (pre-TUI) entry: drive freeLLMSetupFlow with a plain readline (raw-mode arrow selectors
- *  above are closed by here, so a fresh rl is safe). */
-async function runFreeLLMSetup(out: (s?: string) => void): Promise<boolean> {
-  const rl = readline.createInterface({ input: stdin, output: stdout });
-  // Masked prompt: readline still does the line editing, we just suppress the terminal ECHO so a password
-  // isn't printed in cleartext (and left in scrollback). Without this, `{ mask: true }` was silently
-  // ignored on the readline path. Falls back to a normal prompt if the echo hook isn't interceptable.
-  const askMasked = async (q: string): Promise<string> => {
-    const query = `    ${q}: `;
-    const rlAny = rl as any;
-    const orig = typeof rlAny._writeToOutput === "function" ? rlAny._writeToOutput.bind(rlAny) : (s: string) => stdout.write(s);
-    let promptShown = false;
-    rlAny._writeToOutput = (s: string) => {
-      if (!promptShown) { orig(s); promptShown = true; return; } // show the prompt once
-      if (s.includes("\n") || s.includes("\r")) orig("\n");      // keep the terminating newline
-      // otherwise: swallow the echoed keystrokes (the value is still captured by readline)
-    };
-    try { return (await rl.question(query)).trim(); }
-    finally { rlAny._writeToOutput = orig; }
-  };
-  try {
-    return await freeLLMSetupFlow({
-      ask: async (q, opts) => opts?.mask ? askMasked(q) : (await rl.question(`    ${q}: `)).trim(),
-      out,
-      openUrl: openBrowser,
-      waitForDone: () => rl.question("").then(() => {}),
-    });
-  } finally {
-    rl.close();
-  }
-}

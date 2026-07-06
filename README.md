@@ -15,7 +15,7 @@
 
 ![OB-1 start-free demo](docs/media/start-free.gif)
 
-*Start free: `ob1` sets up FreeLLMAPI locally — no account or card. Anonymous bootstrap routes can start you; add your own free provider keys for reliable capacity.*
+*Start free: OB-1 works instantly with 150+ free models across 20+ providers — no account or card. Keyless providers work out of the box; add your own free provider keys to `~/.ob1/keys.env` for more.*
 
 ![OB-1 completing a task](docs/media/first-task.gif)
 
@@ -29,10 +29,10 @@ OB-1 is a free, open-source CLI coding agent with persistent project memory. Run
 repository and it can read the codebase, build a repo map, edit files, run checks, inspect memory, and
 coordinate deeper multi-agent passes when the task deserves more compute.
 
-The default path is free out of the box: OB-1 sets up
-[FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi), a local OpenAI-compatible gateway, and can
-use anonymous bootstrap routes before you add keys. No API key, card, or account is required to start;
-add your own free provider keys for predictable capacity.
+The default path is free out of the box: OB-1 has an embedded free-models router built into the CLI
+process — no server, no clone, no Docker/Node dependency — pooling free tiers across 20+ cloud
+providers. Keyless providers answer your first message with no setup. No API key, card, or account is
+required to start; add your own free provider keys to `~/.ob1/keys.env` for predictable capacity.
 
 ## What You Get
 
@@ -46,8 +46,8 @@ add your own free provider keys for predictable capacity.
   approvals with `OB1_PERMISSION=ask`, and confine writes/network with `OB1_SANDBOX=workspace-write` or
   `read-only` (or set `permissionMode` / `sandbox` in `settings.json`). Even in autopilot, catastrophic
   commands (e.g. `rm -rf /`) are hard-blocked and destructive actions are flagged.
-- **Free out of the box.** Start with FreeLLMAPI's anonymous bootstrap routes when public pools have
-  capacity, then add free provider keys for better models and predictable monthly capacity.
+- **Free out of the box.** Start instantly on keyless cloud free tiers, then add your own free provider
+  keys to `~/.ob1/keys.env` for better models and predictable monthly capacity.
 - **Provider-neutral routing.** Use your own OpenAI-compatible endpoint, OpenRouter, OpenAI, Gemini,
   Groq, Ollama, LM Studio, llama.cpp, vLLM, or a LAN GPU box.
 - **Release paths people can test.** Homebrew, npm, native archives, checksums, attestations, and
@@ -115,10 +115,9 @@ On first run, choose a model route. Pressing Esc at the first picker starts the 
 | **Your endpoint** | Export `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, or set `OB1_BASE_URL` / `OB1_API_KEY`; or use `/models` | Your key or local model | No |
 | **Hosted frontier** | `ob1 login` or choose **Hosted frontier** | Paid subscription | Yes |
 
-Free setup downloads, runs, and wires [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) for
-you. Anonymous providers are a bootstrap path with variable quality and shared limits. Add provider
-keys in the local dashboard for stronger free-tier coverage; OB-1 keeps using the single local `/v1`
-endpoint.
+Free setup has nothing to install or run — the embedded free-models router is already part of the CLI.
+Keyless providers are a bootstrap path with variable quality and shared limits. Add your own free
+provider keys to `~/.ob1/keys.env` for stronger free-tier coverage; manage the pool with `/free`.
 
 BYOK env routes are runtime-only and are never persisted. For Gemini:
 
@@ -138,12 +137,12 @@ ob1 onboard
 You can change the route later:
 
 ```text
-/models       choose FreeLLMAPI or a subscription-backed model
-/freellm      set up or manage the local FreeLLMAPI proxy
+/models       choose Free models or a subscription-backed model
+/free         manage the free-models pool (keys, routing strategy, health)
 /upgrade      subscribe or manage your plan
 ```
 
-Full launch docs are in [docs/](docs/): quickstart, install, FreeLLMAPI, providers, core concepts,
+Full launch docs are in [docs/](docs/): quickstart, install, free models, providers, core concepts,
 commands, troubleshooting, architecture, distribution, extensions, privacy, and eval notes.
 
 Useful commands:
@@ -165,7 +164,7 @@ Update checks are non-blocking and skip CI. Set `OB1_NO_UPDATE_CHECK=1` to disab
 | Capability | OB-1 | Claude Code | opencode | aider |
 | --- | --- | --- | --- | --- |
 | License | Apache-2.0 | Proprietary | Open source | Open source |
-| Works with no API key | Yes, via FreeLLMAPI | No | No | No |
+| Works with no API key | Yes, via the embedded free-models router (keyless providers) | No | No | No |
 | Local/LAN models | Yes | Limited | Yes | Yes |
 | Persistent visible memory | SQLite + graph inspector | No | No | No |
 | Multi-agent modes | Fusion, Council, Personas | No | No | No |

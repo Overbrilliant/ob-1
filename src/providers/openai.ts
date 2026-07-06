@@ -1,7 +1,15 @@
 // OpenAI-compatible Chat Completions provider (OpenRouter, OpenAI, local servers, etc.).
 // Translates OB-1's internal message/tool blocks to OpenAI format and back.
 // Streams the response (idle-timeout + retry via http.ts), assembling tool-call deltas by index.
-import { toSystemBlocks, type CallOpts, type ContentBlock, type ImageSource, type ModelResponse, type SystemInput, type Usage } from "./types.ts";
+import {
+  toSystemBlocks,
+  type CallOpts,
+  type ContentBlock,
+  type ImageSource,
+  type ModelResponse,
+  type SystemInput,
+  type Usage,
+} from "./types.ts";
 import { visionEnabled } from "./models.ts";
 import { streamSSE } from "./http.ts";
 
@@ -15,8 +23,13 @@ type OAContentPart = OATextPart | OAImagePart;
 /** Split a tool_result's content into its text and any image sources. A plain string → text only. */
 function splitToolResult(content: string | ContentBlock[]): { text: string; images: ImageSource[] } {
   if (typeof content === "string") return { text: content, images: [] };
-  const text = content.filter((b) => b.type === "text").map((b: any) => b.text).join("\n");
-  const images = content.filter((b): b is Extract<ContentBlock, { type: "image" }> => b.type === "image").map((b) => b.source);
+  const text = content
+    .filter((b) => b.type === "text")
+    .map((b: any) => b.text)
+    .join("\n");
+  const images = content
+    .filter((b): b is Extract<ContentBlock, { type: "image" }> => b.type === "image")
+    .map((b) => b.source);
   return { text, images };
 }
 
@@ -50,7 +63,10 @@ function systemMessage(system: SystemInput, cache: boolean): OAMessage {
   }
   return {
     role: "system",
-    content: blocks.map((b): OAContentPart => (b.cache ? { type: "text", text: b.text, cache_control: EPHEMERAL } : { type: "text", text: b.text })),
+    content: blocks.map(
+      (b): OAContentPart =>
+        b.cache ? { type: "text", text: b.text, cache_control: EPHEMERAL } : { type: "text", text: b.text },
+    ),
   };
 }
 
@@ -58,7 +74,8 @@ function systemMessage(system: SystemInput, cache: boolean): OAMessage {
  *  string content — typically the latest tool result or user turn). Caches the whole prefix up to here
  *  so the next step is a cache READ instead of a full re-send of the growing history. OpenRouter only. */
 function markConversationCache(out: OAMessage[]): void {
-  for (let i = out.length - 1; i >= 1; i--) { // skip i=0 (system, already handled)
+  for (let i = out.length - 1; i >= 1; i--) {
+    // skip i=0 (system, already handled)
     const m = out[i];
     if (typeof m.content === "string" && m.content.length > 0) {
       m.content = [{ type: "text", text: m.content, cache_control: EPHEMERAL }];
@@ -67,7 +84,12 @@ function markConversationCache(out: OAMessage[]): void {
   }
 }
 
-export function toOpenAIMessages(system: SystemInput, messages: CallOpts["messages"], cache = false, vision = false): OAMessage[] {
+export function toOpenAIMessages(
+  system: SystemInput,
+  messages: CallOpts["messages"],
+  cache = false,
+  vision = false,
+): OAMessage[] {
   const out: OAMessage[] = [systemMessage(system, cache)];
   for (const m of messages) {
     if (typeof m.content === "string") {
@@ -75,10 +97,17 @@ export function toOpenAIMessages(system: SystemInput, messages: CallOpts["messag
       continue;
     }
     if (m.role === "assistant") {
-      const text = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("");
+      const text = m.content
+        .filter((b) => b.type === "text")
+        .map((b: any) => b.text)
+        .join("");
       const toolCalls = m.content
         .filter((b) => b.type === "tool_use")
-        .map((b: any) => ({ id: b.id, type: "function" as const, function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) } }));
+        .map((b: any) => ({
+          id: b.id,
+          type: "function" as const,
+          function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+        }));
       const msg: OAMessage = { role: "assistant", content: text }; // "" for a tool-only turn — never null
       if (toolCalls.length) msg.tool_calls = toolCalls;
       out.push(msg);
@@ -91,16 +120,20 @@ export function toOpenAIMessages(system: SystemInput, messages: CallOpts["messag
       for (const b of m.content) {
         if (b.type === "tool_result") {
           const { text, images } = splitToolResult(b.content);
-          const content = images.length && !vision
-            ? (text ? text + "\n" : "") + "[screenshot omitted — the current model can't view images]"
-            : text;
+          const content =
+            images.length && !vision
+              ? (text ? text + "\n" : "") + "[screenshot omitted — the current model can't view images]"
+              : text;
           out.push({ role: "tool", tool_call_id: b.tool_use_id, content }); // never null — "" is fine
           if (vision) for (const im of images) pendingImages.push(imagePart(im));
         } else if (b.type === "image") {
           if (vision) pendingImages.push(imagePart(b.source));
         }
       }
-      const texts = m.content.filter((b) => b.type === "text").map((b: any) => b.text).join("");
+      const texts = m.content
+        .filter((b) => b.type === "text")
+        .map((b: any) => b.text)
+        .join("");
       if (pendingImages.length) {
         const parts: OAContentPart[] = [];
         if (texts) parts.push({ type: "text", text: texts });
@@ -119,7 +152,10 @@ export function toOpenAIMessages(system: SystemInput, messages: CallOpts["messag
 /** Build the Chat Completions request body. max_tokens is OMITTED when unset, so the model/provider
  *  governs output length (no arbitrary cap). Exported for deterministic testing. */
 export function openAIBody(opts: CallOpts): Record<string, unknown> {
-  const tools = opts.tools?.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } }));
+  const tools = opts.tools?.map((t) => ({
+    type: "function",
+    function: { name: t.name, description: t.description, parameters: t.input_schema },
+  }));
   const body: Record<string, unknown> = {
     model: opts.model,
     // Emit cache_control breakpoints only on OpenRouter (it honors them for Anthropic/Gemini and
@@ -139,7 +175,10 @@ export function openAIBody(opts: CallOpts): Record<string, unknown> {
     if (opts.openrouter) body.reasoning = { effort: opts.effort };
     else body.reasoning_effort = opts.effort;
   }
-  if (tools && tools.length) { body.tools = tools; body.tool_choice = "auto"; }
+  if (tools && tools.length) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
   return body;
 }
 
@@ -156,9 +195,17 @@ export function extractDelta(delta: any): { text?: string; reasoning?: string } 
  *  matches the chars/4 heuristic the live loader already uses, so the meter stays consistent. */
 function estimateUsage(opts: CallOpts, outText: string, toolArgsChars: number): Usage {
   const sysChars = toSystemBlocks(opts.system).reduce((n, b) => n + b.text.length, 0);
-  const inChars = sysChars + opts.messages.reduce(
-    (n, m) => n + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length), 0);
-  return { input_tokens: Math.ceil(inChars / 4), output_tokens: Math.ceil((outText.length + toolArgsChars) / 4), estimated: true };
+  const inChars =
+    sysChars +
+    opts.messages.reduce(
+      (n, m) => n + (typeof m.content === "string" ? m.content.length : JSON.stringify(m.content).length),
+      0,
+    );
+  return {
+    input_tokens: Math.ceil(inChars / 4),
+    output_tokens: Math.ceil((outText.length + toolArgsChars) / 4),
+    estimated: true,
+  };
 }
 
 /** The Python/JS null reprs a buggy proxy sometimes sends as the literal text content of a tool-calling
@@ -176,7 +223,15 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
   // Authorization is sent only when there IS a key. A keyless local/LAN endpoint (the Custom-endpoint
   // profile — Ollama, llama.cpp, …) needs no auth, and sending `Bearer undefined`/`Bearer ` can trip a
   // strict server. Managed server and keyed FreeLLMAPI/Custom endpoints carry a key.
-  const headers: Record<string, string> = { "content-type": "application/json", accept: "text/event-stream", "X-Title": "OB-1" };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "text/event-stream",
+    "X-Title": "OB-1",
+  };
+  // Per-call extra headers (the free router's per-provider headers: OpenRouter attribution, a browser-like
+  // UA for Cloudflare-fronted providers, …). Merged AFTER the defaults so a provider can override X-Title,
+  // but BEFORE auth so it can never clobber the Authorization header below.
+  if (opts.extraHeaders) Object.assign(headers, opts.extraHeaders);
   if (opts.apiKey) headers.authorization = `Bearer ${opts.apiKey}`;
   // Money-path retry safety: send the gateway's per-logical-call idempotency key so the managed server's
   // replay cache can dedupe a retried request that already billed. Sent to EVERY endpoint — third-party
@@ -214,8 +269,13 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
       if (!text && !heldNull && NULL_ARTIFACT.test(d.text.trim())) {
         heldNull = d.text; // first text is exactly "None"/"null" → hold it; it may be a null-content artifact
       } else {
-        if (heldNull) { text += heldNull; opts.onText?.(heldNull); heldNull = ""; } // real text followed → it was legit
-        text += d.text; opts.onText?.(d.text);
+        if (heldNull) {
+          text += heldNull;
+          opts.onText?.(heldNull);
+          heldNull = "";
+        } // real text followed → it was legit
+        text += d.text;
+        opts.onText?.(d.text);
       }
     }
     if (d.reasoning) opts.onReasoning?.(d.reasoning);
@@ -233,21 +293,32 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
   // A held bare-null leading delta: keep it ONLY if it stands alone as the answer (no tool calls) — then
   // it's a legitimate one-word reply. With tool calls it's the proxy's null-content artifact → drop it
   // (never streamed, never stored), which is what produced the stray "None" line in scrollback.
-  if (heldNull && !hasTools) { text += heldNull; opts.onText?.(heldNull); }
+  if (heldNull && !hasTools) {
+    text += heldNull;
+    opts.onText?.(heldNull);
+  }
 
   const content: ContentBlock[] = [];
   if (text) content.push({ type: "text", text });
   for (const tc of toolAcc) {
     if (!tc.id && !tc.name) continue;
     let input: any = {};
-    try { input = JSON.parse(tc.args || "{}"); } catch { input = {}; }
+    try {
+      input = JSON.parse(tc.args || "{}");
+    } catch {
+      input = {};
+    }
     content.push({ type: "tool_use", id: tc.id, name: tc.name, input });
   }
   const stop_reason = content.some((b) => b.type === "tool_use") || finish === "tool_calls" ? "tool_use" : "end_turn";
   // Proxy quirk: some OpenAI-compatible endpoints (e.g. FreeLLMAPI's `auto` router) send no usage chunk,
   // or send all-zeros. Fall back to a local char-based estimate so the meter never reads a misleading 0.
   if (!usage || (usage.input_tokens === 0 && usage.output_tokens === 0)) {
-    usage = estimateUsage(opts, text, toolAcc.reduce((n, t) => n + t.name.length + t.args.length, 0));
+    usage = estimateUsage(
+      opts,
+      text,
+      toolAcc.reduce((n, t) => n + t.name.length + t.args.length, 0),
+    );
   }
   return { stop_reason, content, usage, model: resolvedModel };
 }

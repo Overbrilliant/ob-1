@@ -10,7 +10,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 const cfg = loadConfig();
-if (!cfg.apiKey && !cfg.providerProfile) { console.error("need a configured model route: sign in, or use /models for FreeLLMAPI or Custom API"); process.exit(1); }
+if (!cfg.apiKey && !cfg.providerProfile) { console.error("need a configured model route: sign in, or use /models for Free models or Custom API"); process.exit(1); }
 const store = new MemoryStore(cfg.dbPath, makeEmbedder());
 const tools = new Map(); // pure design task — no codebase tools needed
 // Single model across ALL four modes → the only variable is the topology, not the model (R5/plan).

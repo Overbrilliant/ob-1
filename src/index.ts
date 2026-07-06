@@ -5,7 +5,7 @@ import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, saveSettings, savedProviderCreds, bakedProviderCreds, hasPersistedSettings, persistedSettings, settingsHealth, ob1ServerUrl, loadAuthToken, persistSubscription, isOpenRouterEndpoint, type Mode, type SandboxMode, type PermissionMode, type Effort, type QualityMode } from "./config.ts";
+import { loadConfig, saveSettings, savedProviderCreds, hasPersistedSettings, persistedSettings, settingsHealth, ob1ServerUrl, loadAuthToken, persistSubscription, persistActiveProvider, isOpenRouterEndpoint, type Mode, type SandboxMode, type PermissionMode, type Effort, type QualityMode, type FreeStrategy } from "./config.ts";
 import { formatSettingsIssues } from "./config-validate.ts";
 import { loadPolicy, loadTrust, saveTrust, recordTrust, isTrusted, effectivePermissionMode } from "./safety/policy.ts";
 import { readGitState, analyzeBranch } from "./context/git-state.ts";
@@ -54,7 +54,9 @@ import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
 import type { Message, Usage } from "./providers/types.ts";
 import { callModel } from "./providers/gateway.ts";
 import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning, contextWindowFor } from "./providers/models.ts";
-import { FREELLMAPI, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
+import { FREE, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
+import { listFreeModels, freeStatus, ensureKeysFile, runFreeHealthCheck, STRATEGIES, type FreeStatus } from "./providers/free/index.ts";
+import { spawn } from "node:child_process";
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
 import { CLI_VERSION } from "./version.ts";
@@ -99,9 +101,9 @@ Inside OB-1, use /help for interactive commands.`;
   }
 }
 
-// First-run onboarding: start free → own endpoint/env → hosted frontier. For the free path, set up and
-// auto-wire the managed FreeLLMAPI proxy. Runs BEFORE loadConfig so the new provider is picked
-// up by the single resolve below. No-ops on non-TTY (pipes/CI) and once the user has set anything up.
+// First-run onboarding: start free → own endpoint/env → hosted frontier. The free path activates the
+// embedded free-models router (no server, no second process). Runs BEFORE loadConfig so the new provider is
+// picked up by the single resolve below. No-ops on non-TTY (pipes/CI) and once the user has set anything up.
 let onboardingRan = false;
 {
   const { shouldOnboard, runOnboarding } = await import("./cli/onboarding.ts");
@@ -120,7 +122,7 @@ function modelReachable(): boolean {
 
 // Auth guard: when we rely on the managed OB-1 server but the saved token is missing or REJECTED
 // (expired, or the account was reset), (re)authenticate before doing anything — otherwise the first
-// request dies with a confusing 401. Interactive TTY only; FreeLLMAPI / Custom / OB1_TOKEN users skip it.
+// request dies with a confusing 401. Interactive TTY only; Free / Custom / OB1_TOKEN users skip it.
 if (stdin.isTTY && !process.env.OB1_TOKEN) {
   const onManaged = !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
   if (onManaged) {
@@ -308,7 +310,6 @@ function renderTranscript(h: Message[]): string {
 
 /** /goal loop: keep running turns toward `goal` until the model emits GOAL_MET or the cap is hit. ESC stops. */
 async function runGoalLoop(goal: string): Promise<void> {
-  await ensureProxyHealthy();
   const maxIters = Number(process.env.OB1_GOAL_MAX_ITERS) > 0 ? Number(process.env.OB1_GOAL_MAX_ITERS) : 10;
   for (let i = 0; i < maxIters && activeGoal === goal; i++) {
     const prompt = i === 0
@@ -357,8 +358,8 @@ interface UI {
   // Provider setup tab (opened from /models): collects a proxy URL + key (TUI form / REPL prompts), with a live
   // connection test. Returns the entered {url, key} or null if cancelled.
   providerSetup?: (opts: ProviderSetupOpts) => Promise<ProviderSetupResult>;
-  // Inline single-field text prompt (TUI modal / REPL line). Used by the managed Free LLM API setup from
-  // /freellm for email/password (mask hides the value). Returns the text, or null if cancelled (Esc).
+  // Inline single-field text prompt (TUI modal / REPL line). Used e.g. to collect a secret mid-turn
+  // (mask hides the value). Returns the text, or null if cancelled (Esc).
   prompt?: (opts: { title: string; question: string; mask?: boolean; placeholder?: string }) => Promise<string | null>;
 }
 let ui: UI;                            // set by runRepl()/runTui() before any turn runs
@@ -499,14 +500,14 @@ ${c.bold("Commands")}
   ${c.cyan("/exit")} ${c.dim("|")} ${c.cyan("/quit")}          exit the session
 
   ${c.bold("Model & mode")}
-  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("FreeLLMAPI")} gives free/local models, frontier models need a subscription
+  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} give 150+ free models across 20+ providers, frontier models need a subscription
   ${c.cyan("/mode")} ${c.dim("[m]")}             pick a mode ${c.dim("(↑↓ · Enter)")} or /mode solo|fusion|council|personas ${c.dim("— heavy modes stay on (sticky); /solo exits")}
   ${c.cyan("/solo")}                 exit a heavy mode (fusion/council/personas) → back to Solo
   ${c.cyan("/plan")} ${c.dim("|")} ${c.cyan("/act")}           toggle read-only Plan vs Act mode
   ${c.cyan("/effort")} ${c.dim("[low|medium|high]")}  reasoning effort ${c.dim("(↑↓ · Enter)")} — thinking budget for models that support it ${c.dim("(default medium)")}
 
   ${c.bold("Provider & plan")}
-  ${c.cyan("/freellm")}              set up / manage the Free LLM API proxy ${c.dim("(↑↓ · Enter)")} — OB-1 can download, run + wire it for you
+  ${c.cyan("/free")}                 manage the free-models pool ${c.dim("(↑↓ · Enter)")} — keys file, routing strategy, provider health
   ${c.cyan("/upgrade")}              subscribe or manage your plan — opens pricing already signed in to your account
 
   ${c.bold("Permissions & safety")}
@@ -751,7 +752,7 @@ function watchForSubscription(): void {
 }
 
 /** Point the CLI at the managed OB-1 server (the subscription path) with `model`, switching back from a
- *  FreeLLMAPI/other profile if needed. The server proxies every frontier model on the user's credits, so
+ *  free/other profile if needed. The server proxies every frontier model on the user's credits, so
  *  there's no key to enter. Mirrors persistSubscription on disk (clears the active profile, keeps the
  *  per-provider cred memory) and updates the live config + status. */
 function switchToManaged(model: string): void {
@@ -767,11 +768,12 @@ function switchToManaged(model: string): void {
   console.log(`  model → ${c.cyan(model)}  ${c.dim(describeModel(model))}`);
 }
 
-/** Set up a provider profile (FreeLLMAPI = free proxy): the setup "tab" prompts
+/** Set up a URL+key provider profile (OpenRouter, Ollama, Custom, …): the setup "tab" prompts
  *  for the URL + key, tests the connection live, then configures + persists it (global
  *  ~/.ob1/settings.json). Switching keeps the OTHER provider's creds remembered, so you can flip
- *  free⇄paid without re-entry. Returns true on success. Reached from the /models group menu. */
-async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolean> {
+ *  between providers without re-entry. Returns true on success. Reached from the /models group menu.
+ *  NOT used for the embedded Free models router — that has no URL/key to enter (see activateFree). */
+async function setupProvider(prof: ProviderProfile = CUSTOM): Promise<boolean> {
   if (!ui.providerSetup) { console.log(c.yellow("  provider setup needs an interactive session")); return false; }
   const active = cfg.providerProfile === prof.id;
   const remembered = savedProviderCreds(cfg.settingsDir)[prof.id]; // last key entered for THIS provider
@@ -809,97 +811,181 @@ async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolea
   cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false }); // new provider → drop stale resolution/est marker
   console.log(`  provider → ${c.cyan(prof.name)}  ${c.dim(url)}`);
   saveSettings(cfg); // persist active provider + per-provider creds + model (global ~/.ob1/settings.json — shared across folders)
-  const note = prof.id === "freellmapi" ? " (auto = the proxy picks the best free model)"
-    : prof.id === "custom" && !cfg.apiKey ? " (no key — sent without auth)" : "";
+  const note = prof.id === "custom" && !cfg.apiKey ? " (no key — sent without auth)" : "";
   console.log(c.green(`  ✓ ${prof.name} connected — model: ${c.bold(cfg.model || "(none set)")}${note}. Saved to ~/.ob1/settings.json (shared across every folder).`));
   return true;
 }
 
-/** Make `prof` the active provider, switching from another if needed. Uses creds remembered from a
- *  previous setup. Providers with no saved creds fall through to the setup form.
- *  Returns false if that setup was cancelled. The model is left at the profile's default after a switch
- *  — the caller's picker sets the real one next. */
-async function ensureProvider(prof: ProviderProfile): Promise<boolean> {
-  if (cfg.providerProfile === prof.id && (cfg.apiKey || prof.keyOptional)) return true; // already active
-  const creds = savedProviderCreds(cfg.settingsDir)[prof.id] ?? bakedProviderCreds(prof.id);
-  // Activate remembered creds when there's a key OR the profile allows none (a keyless Custom/LAN endpoint
-  // is remembered with an empty key, which still pins its URL). The key-optional path also needs a URL.
-  if (creds && (creds.key || (prof.keyOptional && creds.url))) {
-    cacheWarn();
-    cfg.provider = prof.wire;
-    cfg.baseUrl = creds.url || prof.defaultLocalUrl;
-    cfg.apiKey = creds.key || undefined;
-    cfg.providerProfile = prof.id;
-    cfg.model = prof.defaultModel; // sensible default for the new provider; the picker sets the real model next
-    cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false });
-    saveSettings(cfg);
-    console.log(`  provider → ${c.cyan(prof.name)}  ${c.dim(cfg.baseUrl)}`);
-    return true;
-  }
-  return await setupProvider(prof); // never configured + no baked key → prompt for it
+// ── Free models: the EMBEDDED in-process router (src/providers/free) ───────────
+// One-line hints for each routing strategy (shown in /free + the strategy picker).
+const FREE_STRATEGY_HINTS: Record<string, string> = {
+  priority: "catalog order",
+  balanced: "default blend",
+  smartest: "quality first",
+  fastest: "throughput first",
+  reliable: "fewest failures",
+};
+const HEALTH_GLYPH: Record<string, string> = { healthy: "●", invalid: "✗", error: "✗", disabled: "⊘", unknown: "○" };
+
+/** How the current model reads for the free profile: "free · auto (balanced)" for router routing, or
+ *  "free · <pin>" for a pinned model. Non-free profiles just show the raw model id. */
+function freeModelLabel(model: string): string {
+  const isAuto = !model || /^(auto|router|default)$/i.test(model);
+  return isAuto ? `free · auto (${cfg.freeStrategy})` : `free · ${model}`;
+}
+/** The model label shown in the footer/status — free-aware, so the footer reads "free · auto (balanced)"
+ *  instead of a bare "auto". Non-free profiles are unchanged. */
+function modelStatusLabel(): string {
+  return cfg.providerProfile === "free" ? freeModelLabel(cfg.model) : cfg.model;
 }
 
-/** Make FreeLLMAPI the active provider, OFFERING the managed setup first when nothing is configured yet.
- *  This is the difference from the bare ensureProvider(): reached from the model picker (/models →
- *  → Free LLM API), a first-time user should be offered "OB-1 downloads + runs + wires the proxy for you"
- *  (clone→run→auto-wire from the repo) — not dropped straight onto a manual URL/key form. Once a proxy is
- *  managed or creds are remembered, it just activates them (via ensureProvider). Returns true when active. */
-async function ensureFreeLLM(): Promise<boolean> {
-  if (cfg.providerProfile === FREELLMAPI.id && cfg.apiKey) return true; // already connected
-  const { loadManaged } = await import("./cli/freellm-manage.ts");
-  const haveCreds = !!(savedProviderCreds(cfg.settingsDir)[FREELLMAPI.id]?.key ?? bakedProviderCreds(FREELLMAPI.id)?.key);
-  // First time, and OB-1 isn't already running a managed proxy → offer managed (default) vs manual.
-  if (!loadManaged()?.managed && !haveCreds && ui.pick) {
-    const a = await ui.pick("Free LLM API — not set up yet", [
-      { label: "set up (managed)", hint: "OB-1 downloads, runs + wires the proxy for you — right here", value: "setup" },
-      { label: "connect manually", hint: "enter a URL + key yourself", value: "manual" },
-    ]);
-    if (a == null) return false;                              // cancelled — leave the provider unchanged
-    if (a === "manual") return await setupProvider(FREELLMAPI);
-    await runManagedFreeLLMSetup();                           // clone → run → auto-wire (persists creds on success)
-    // Proceed only if setup actually wired creds; on failure it already explained why and we stop here.
-    if (!savedProviderCreds(cfg.settingsDir)[FREELLMAPI.id]?.key) return false;
-  }
-  return await ensureProvider(FREELLMAPI); // activate the (now-)remembered creds into the live session
+/** Make the embedded free-models router the active provider (no URL/key — it routes in-process across the
+ *  free tiers). Persists the "free" profile + model so it's restored next launch, and updates the footer. */
+function activateFree(model = "auto"): void {
+  cacheWarn();
+  cfg.provider = "free";
+  cfg.baseUrl = "";
+  cfg.apiKey = undefined;
+  cfg.providerProfile = "free";
+  cfg.model = model;
+  cfg.resolvedModel = undefined;
+  persistActiveProvider(cfg.settingsDir, "free", "", "", model);
+  ctrl?.setStatus({ model: freeModelLabel(model), resolvedModel: undefined, estTok: false });
 }
 
-/** FREE source: the FreeLLMAPI proxy's LIVE catalog (auto = the proxy's router), plus a reconnect row.
- *  Switches to FreeLLMAPI first if a different provider is active. No typing — arrow-key selection. */
-async function pickFreeModel(): Promise<void> {
-  if (!ui.pick) return;
-  if (!(await ensureFreeLLM())) return;
-  const conn = await fetchModels(cfg.baseUrl, cfg.apiKey ?? "");
-  const items: { label: string; hint?: string; value: string }[] = [];
-  if (conn.ok) {
-    for (const m of conn.models.filter((x) => x.available !== false)) {
-      const hint = `${m.name ?? ""}${m.contextWindow ? `${m.name ? " · " : ""}${(m.contextWindow / 1000).toFixed(0)}k ctx` : ""}`.trim();
-      items.push({ label: m.id + (m.id === FREELLMAPI.defaultModel ? " (default · router)" : ""), hint: hint || undefined, value: m.id });
+/** Open the keys file from a RUNNING session — non-blocking (GUI "open with default app", else print the
+ *  path). Never spawns a terminal editor here: the Ink TUI owns raw-mode stdin, so a full-screen $EDITOR
+ *  would corrupt the display (onboarding, which is pre-TUI, uses a blocking editor instead). */
+function openKeysFileInSession(path: string): void {
+  const argv =
+    process.platform === "darwin" ? ["open", "-t", path] : process.platform === "linux" ? ["xdg-open", path] : null;
+  if (argv) {
+    try {
+      spawn(argv[0], argv.slice(1), { stdio: "ignore", detached: true }).unref(); // fire-and-forget; never blocks the TUI
+      console.log(c.dim(`  opened ${path}`));
+    } catch {
+      console.log(c.dim(`  add your keys here: ${path}`));
     }
   } else {
-    console.log(c.yellow(`  ⚠ couldn't list models (${conn.error ?? "offline"}) — keeping "${cfg.model}".`));
-    items.push({ label: FREELLMAPI.defaultModel + " (default · router)", hint: "the proxy picks the best available model", value: FREELLMAPI.defaultModel });
+    console.log(c.dim(`  add your keys here: ${path}`));
   }
-  items.push({ label: "↻ change connection (URL / key)…", value: "__reconnect__" });
-  const picked = await ui.pick(`${FREELLMAPI.name} — pick a model  ↑↓ · Enter · ← back · Esc  ·  auto = proxy router`, items, cfg.model);
+  console.log(c.dim("  Saved keys are picked up automatically — next message uses them."));
+}
+
+/** One-line-per-entry summary of the free pool (for /free status and the picker header). */
+function freeSummaryLines(st: FreeStatus): string[] {
+  const keyed = st.providers.filter((p) => p.hasKey).length;
+  const keyless = st.providers.filter((p) => p.keyless).length;
+  const lines = [
+    `  ${c.bold("Free models")} ${c.dim(`· strategy: ${st.strategy} (${FREE_STRATEGY_HINTS[st.strategy] ?? ""})`)}`,
+    `  ${keyed} keyed · ${keyless} keyless — ${c.cyan(`${st.availableModels}/${st.totalModels}`)} models active`,
+    c.dim(`  keys: ${st.keysPath} · catalog ${st.catalogVersion}`),
+  ];
+  if (cfg.providerProfile !== "free")
+    lines.push(c.dim(`  (active profile: ${cfg.providerProfile ?? "hosted"} — /free manages the shared free pool; /models → Free models to use it)`));
+  if (st.unknownKeys.length) lines.push(c.yellow(`  ⚠ unrecognized key name(s) in the file: ${st.unknownKeys.join(", ")}`));
+  return lines;
+}
+
+/** Read-only provider list: signup URL + key status + model counts per provider. */
+async function pickFreeProviders(): Promise<void> {
+  if (!ui.pick) return;
+  const st = freeStatus();
+  const items = st.providers.map((p) => ({
+    label: `${HEALTH_GLYPH[p.health] ?? "○"} ${p.name}${p.keyless ? c.dim(" (keyless)") : p.hasKey ? c.dim(" (keyed)") : ""}`,
+    hint: `${p.availableCount}/${p.modelCount} models · ${p.signupUrl}`,
+    value: p.id,
+  }));
+  const a = await ui.pick("Free providers  ↑↓ · Enter · ← back · Esc", items);
+  if (a == null) return;
+  const p = st.providers.find((x) => x.id === a);
+  if (p) {
+    const key = p.keyless ? "no key needed (keyless)" : p.hasKey ? `keyed · health ${p.health}` : "no key yet";
+    console.log(`  ${c.bold(p.name)} — ${key} · ${p.availableCount}/${p.modelCount} models available`);
+    console.log(c.dim(`    ${p.keyless ? "signup (optional): " : "get a free key: "}${p.signupUrl}`));
+  }
+}
+
+/** Routing-strategy picker: persist cfg.freeStrategy + save. */
+async function pickFreeStrategy(): Promise<void> {
+  if (!ui.pick) return;
+  const items = STRATEGIES.map((s) => ({
+    label: s + (s === cfg.freeStrategy ? c.dim(" (current)") : ""),
+    hint: FREE_STRATEGY_HINTS[s],
+    value: s,
+  }));
+  const a = await ui.pick("Routing strategy  ↑↓ · Enter · ← back · Esc", items, cfg.freeStrategy);
+  if (a == null || !(STRATEGIES as readonly string[]).includes(a)) return;
+  cfg.freeStrategy = a as FreeStrategy;
+  saveSettings(cfg);
+  if (cfg.providerProfile === "free") ctrl?.setStatus({ model: freeModelLabel(cfg.model) }); // refresh the "(strategy)" suffix
+  console.log(`  routing strategy → ${c.cyan(a)}  ${c.dim(FREE_STRATEGY_HINTS[a])}`);
+}
+
+/** /free — a small picker over the free pool: open keys, browse providers, pick strategy, re-check health.
+ *  Works regardless of the active profile (it manages the SHARED pool); it just notes when the active
+ *  profile isn't "free". */
+async function pickFree(): Promise<void> {
+  if (!ui.pick) return;
+  while (true) {
+    for (const l of freeSummaryLines(freeStatus())) console.log(l);
+    const a = await ui.pick("Free models  ↑↓ · Enter · Esc", [
+      { label: "Open keys file", hint: "add free provider keys to unlock more models", value: "keys" },
+      { label: "Providers…", hint: "signup URLs + key status + model counts", value: "providers" },
+      { label: `Routing strategy… (${cfg.freeStrategy})`, hint: FREE_STRATEGY_HINTS[cfg.freeStrategy], value: "strategy" },
+      { label: "Re-check provider health", hint: "probe keyed providers now", value: "health" },
+    ]);
+    if (a == null) return;
+    if (a === "keys") { openKeysFileInSession(ensureKeysFile()); return; }
+    if (a === "providers") { await pickFreeProviders(); if (ui.pickReason?.() === "back") continue; return; }
+    if (a === "strategy") { await pickFreeStrategy(); if (ui.pickReason?.() === "back") continue; return; }
+    if (a === "health") { console.log(c.dim("  re-checking free provider health…")); await runFreeHealthCheck(true); console.log(c.dim("  ✓ health refreshed")); return; }
+  }
+}
+
+/** FREE source (from /models → Free models): a LOCAL, in-memory picker over the embedded router's catalog —
+ *  "auto" (strategy routing) first, then every model available-first then smartest-first. Pinning sets
+ *  cfg.model to a "platform/modelId"; "auto" = router routing. No network, no setup form. */
+async function pickFreeModel(): Promise<void> {
+  if (!ui.pick) return;
+  const models = listFreeModels()
+    .slice()
+    .sort((a, b) => Number(b.available) - Number(a.available) || a.intelligenceRank - b.intelligenceRank);
+  const items: { label: string; hint?: string; value: string }[] = [
+    { label: "auto — best available (recommended)", hint: `router · strategy ${cfg.freeStrategy}`, value: "auto" },
+  ];
+  for (const m of models) {
+    const glyphs = [m.supportsTools ? "⚒" : "", m.supportsVision ? "👁" : ""].filter(Boolean).join(" ");
+    const bits = [m.providerName, m.sizeLabel, glyphs, m.available ? "" : c.dim(`unavailable: ${m.unavailableReason}`)]
+      .filter(Boolean)
+      .join(" · ");
+    items.push({ label: m.displayName + (m.available ? "" : c.dim(" (gated)")), hint: bits || undefined, value: m.id });
+  }
+  const picked = await ui.pick(
+    `Free models — pick a model  ↑↓ · Enter · ← back · Esc  ·  auto = router (${cfg.freeStrategy})`,
+    items,
+    cfg.providerProfile === "free" ? cfg.model : "auto",
+  );
   if (picked == null) return;
-  if (picked === "__reconnect__") { await setupProvider(FREELLMAPI); return; }
-  if (picked === cfg.model) { console.log(c.dim(`  model unchanged (${cfg.model})`)); return; }
-  cacheWarn();
-  cfg.model = picked; ctrl?.setStatus({ model: picked, resolvedModel: undefined, estTok: false });
-  console.log(`  model → ${c.cyan(picked)}`);
+  if (cfg.providerProfile === "free" && picked === cfg.model) {
+    console.log(c.dim(`  model unchanged (${freeModelLabel(cfg.model)})`));
+    return;
+  }
+  activateFree(picked);
+  console.log(`  model → ${c.cyan(freeModelLabel(picked))}`);
 }
 
 /** The single model/provider entry point (/models · /model · the Settings "model" row). Level one is
- *  the frontier models themselves (Claude, GPT, Gemini, …) PLUS provider profile siblings. FreeLLMAPI
- *  expands into the free proxy's own catalog. Other named profiles (OpenRouter, Ollama, LM Studio,
- *  llama.cpp, vLLM, Groq, Custom) open a focused connection form over the existing OpenAI-compatible
+ *  the frontier models themselves (Claude, GPT, Gemini, …) PLUS provider profile siblings. "Free models"
+ *  expands into the embedded router's catalog (auto-routed). Other named profiles (OpenRouter, Ollama, LM
+ *  Studio, llama.cpp, vLLM, Groq, Custom) open a focused connection form over the existing OpenAI-compatible
  *  wire. Frontier models are served by the managed OB-1 server on subscription credits. */
 async function pickModel(): Promise<void> {
   if (!ui.pick) return;
   const plan = await fetchPlan();
   const subscribed = isSubscribed(plan);
   while (true) {
-    const onFree = cfg.providerProfile === FREELLMAPI.id;
+    const onFree = cfg.providerProfile === FREE.id;
     const activeProfile = cfg.providerProfile ? profileById(cfg.providerProfile) : undefined;
     const items: { label: string; hint?: string; value: string }[] = MODELS.map((m) => ({
       label: m.label + (m.notes === "default" ? " (default)" : "") + (subscribed ? "" : "  🔒"),
@@ -908,8 +994,8 @@ async function pickModel(): Promise<void> {
         : "frontier model — subscribe to unlock",
       value: m.id ?? m.label,
     }));
-    items.push({ label: "Start free with FreeLLMAPI ▸", hint: "free out of the box · bootstrap routes · add keys for reliability", value: "__free__" });
-    for (const prof of PROFILES.filter((p) => p.id !== FREELLMAPI.id && p.id !== CUSTOM.id)) {
+    items.push({ label: "Free models ▸ — 150+ models, auto-routed", hint: onFree ? `connected · ${freeModelLabel(cfg.model)}` : "free tiers of 20+ providers · works instantly · add keys for more", value: "__free__" });
+    for (const prof of PROFILES.filter((p) => p.id !== FREE.id && p.id !== CUSTOM.id)) {
       const active = cfg.providerProfile === prof.id;
       items.push({
         label: `${prof.name}${active ? " (connected)" : ""}`,
@@ -928,7 +1014,7 @@ async function pickModel(): Promise<void> {
       ? "Select a model  ↑↓ · Enter · Esc"
       : "Select a model  ↑↓ · Enter · Esc  ·  🔒 = subscribe to unlock";
     const initial = activeProfile?.id === CUSTOM.id ? "__custom__"
-      : activeProfile && activeProfile.id !== FREELLMAPI.id ? `__profile:${activeProfile.id}`
+      : activeProfile && activeProfile.id !== FREE.id ? `__profile:${activeProfile.id}`
         : (onFree || (!cfg.apiKey && !subscribed)) ? "__free__" : cfg.model;
     const picked = await ui.pick(title, items, initial);
     if (picked == null) return;
@@ -947,7 +1033,7 @@ async function pickModel(): Promise<void> {
       return;
     }
     // Subscribed → served by the managed OB-1 server. Make it the active provider (switch back from a
-    // FreeLLMAPI profile if needed), then set the model. No key prompt, no OpenRouter.
+    // free/other profile if needed), then set the model. No key prompt, no OpenRouter.
     const onManaged = !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
     if (onManaged && picked === cfg.model) { console.log(c.dim(`  model unchanged (${cfg.model})`)); return; }
     switchToManaged(picked);
@@ -1151,60 +1237,6 @@ function rememberTurn(task: string, startLen: number, mode: string): void {
     /* project memory must never break a turn */
   }
 }
-
-/** Run the managed FreeLLMAPI setup (clone → run proxy → dashboard account → auto-wire) INLINE so it
- *  works from inside the live TUI without dropping to the shell. Same pipeline as `ob1 onboard`'s free
- *  path (shared freeLLMSetupFlow); available to free and paid users alike. */
-async function runManagedFreeLLMSetup(): Promise<void> {
-  if (!ui.prompt) { console.log(c.dim("  run `ob1 onboard` in your shell to set up the managed Free LLM API proxy")); return; }
-  const ask = ui.prompt;
-  const { freeLLMSetupFlow } = await import("./cli/onboarding.ts");
-  const { openBrowser } = await import("./cli/login.ts");
-  await freeLLMSetupFlow({
-    ask: async (q, opts) => (await ask({ title: "Set up Free LLM API", question: q, mask: opts?.mask })) ?? "",
-    out: (s = "") => console.log(s),
-    openUrl: openBrowser,
-    waitForDone: async () => { await ask({ title: "Free LLM API", question: "Press Enter when you've added your keys (or to skip)", placeholder: "" }); },
-  });
-}
-
-/** Manage the OB-1-managed local FreeLLMAPI proxy (status + start/stop/restart/open/manual/unmanage).
- *  Setup runs inline via runManagedFreeLLMSetup (works inside the TUI). */
-async function pickFreeLLM(): Promise<void> {
-  if (!ui.pick) return;
-  const flm = await import("./cli/freellm-manage.ts");
-  const { openBrowser } = await import("./cli/login.ts");
-  const st = flm.loadManaged();
-  if (!st?.managed) {
-    const a = await ui.pick("Free LLM API", [
-      { label: "set up (managed)", hint: "OB-1 downloads, runs + wires the proxy for you — right here", value: "setup" },
-      { label: "connect manually", hint: "enter a URL + key yourself", value: "manual" },
-    ]);
-    if (a === "manual") await setupProvider(FREELLMAPI);
-    else if (a === "setup") await runManagedFreeLLMSetup();
-    return;
-  }
-  const probe = await flm.probeManagedStatus(st);
-  if (probe.providerKeys !== null && probe.providerKeys !== st.providerKeys) flm.saveManaged({ ...st, providerKeys: probe.providerKeys });
-  const status = flm.formatManagedStatus(probe);
-  const a = await ui.pick(`Free LLM API (${status})`, [
-    { label: "open dashboard", hint: `${st.url} — add provider keys here`, value: "open" },
-    { label: probe.proxyUp ? "restart" : "start", hint: "(re)start the local proxy", value: "restart" },
-    { label: "stop", hint: "stop the local proxy", value: "stop" },
-    { label: "connect manually", hint: "switch to a manual URL + key instead", value: "manual" },
-    { label: "unmanage", hint: "OB-1 stops managing it (won't auto-start)", value: "off" },
-  ]);
-  if (a === "open") { openBrowser(st.url); console.log(c.dim(`  opened ${st.url}`)); }
-  else if (a === "restart") {
-    console.log(c.dim("  restarting the proxy…"));
-    if (probe.proxyUp) flm.stop(st);
-    const ok = flm.start(st.dir, st.runtime, st.port) && await flm.waitReady(st.url, fetch, 20000);
-    console.log(ok ? c.dim("  ✓ proxy running") : c.yellow("  ✗ couldn't start it — try `ob1 onboard`"));
-  } else if (a === "stop") { flm.stop(st); console.log(c.dim("  stopped the proxy")); }
-  else if (a === "manual") await setupProvider(FREELLMAPI);
-  else if (a === "off") { flm.clearManaged(); console.log(c.dim("  OB-1 no longer manages the proxy (the container/files remain)")); }
-}
-
 
 /** Compact relative time for the /rewind list ("3m ago"). */
 function fmtAgo(iso: string): string {
@@ -1617,17 +1649,25 @@ async function handleCommand(line: string): Promise<boolean> {
     case "model":
       if (arg) {
         if (history.length && arg !== cfg.model) console.log(c.yellow("  ⚠ switching model mid-session invalidates the prompt cache (R1) — every cached prefix must be rebuilt; /clear to reset context."));
-        cfg.model = arg; ctrl?.setStatus({ resolvedModel: undefined, estTok: false }); console.log(`  model → ${arg}  ${c.dim(describeModel(arg))}`);
+        cfg.model = arg; ctrl?.setStatus({ model: modelStatusLabel(), resolvedModel: undefined, estTok: false }); console.log(`  model → ${arg}  ${c.dim(describeModel(arg))}`);
       } else if (ui.pick) { await pickModel(); }            // bare /model opens the picker on a TTY
       else console.log(`  model: ${cfg.model}  ${c.dim(describeModel(cfg.model))}`);
       break;
     case "models": {
       if (ui.pick) { await pickModel(); break; } // interactive on a TTY; plain list + prompts under the REPL
-      // REPL (non-TTY): set up the provider if nothing is configured, then list the catalog (pick via /model <id>).
-      if (!cfg.apiKey && !cfg.providerProfile && ui.providerSetup) await setupProvider();
+      // REPL (non-TTY): with nothing configured, activate the embedded free router (zero setup — keyless
+      // providers serve immediately); then list what's available. Pin one with /model <id> ("platform/modelId"
+      // or "auto" for router routing).
+      if (!cfg.apiKey && !cfg.providerProfile) { activateFree(); console.log(c.green("  ✓ Free models activated (auto-routed).")); }
+      if (cfg.providerProfile === "free") {
+        for (const l of freeSummaryLines(freeStatus())) console.log(l);
+        for (const m of listFreeModels().filter((x) => x.available)) console.log(`    ${c.cyan(m.id.padEnd(28))} ${c.dim(`${m.providerName} · ${m.sizeLabel}`)}`);
+        console.log(c.dim("  pin one with /model <id>, or /model auto for router routing"));
+        break;
+      }
       if (cfg.providerProfile) {
         const conn = await fetchModels(cfg.baseUrl, cfg.apiKey ?? "");
-        console.log(`  ${c.bold("current")}: ${cfg.model}  ${c.dim("(auto = the proxy's router picks the best free model)")}`);
+        console.log(`  ${c.bold("current")}: ${cfg.model}`);
         if (conn.ok) for (const m of conn.models.filter((x) => x.available !== false)) console.log(`    ${c.cyan(m.id.padEnd(22))} ${c.dim(`${m.name ?? ""}${m.contextWindow ? `${m.name ? " · " : ""}${(m.contextWindow / 1000).toFixed(0)}k ctx` : ""}`)}`);
         else console.log(c.yellow(`  couldn't list models: ${conn.error}`));
         console.log(c.dim("  set one with /model <id>"));
@@ -1642,19 +1682,26 @@ async function handleCommand(line: string): Promise<boolean> {
       // /settings was a menu that just duplicated the slash commands. It's gone — every setting is now a
       // first-class command. Keep a friendly redirect so old muscle memory isn't a dead "unknown command".
       console.log(c.dim("  settings are now individual commands — press / to browse them:"));
-      console.log(c.dim("    /mode · /model · /effort · /freellm · /permission · /sandbox · /autoroute · /subagents · /repomap · /quality · /trust · /allow"));
+      console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /autoroute · /subagents · /repomap · /quality · /trust · /allow"));
       break;
-    case "freellm": case "free-llm": {
-      if (ui.pick) { await pickFreeLLM(); break; } // managed setup / manage on a TTY
-      const { formatManagedStatus, loadManaged, probeManagedStatus, saveManaged } = await import("./cli/freellm-manage.ts");
-      const st = loadManaged();
-      if (st?.managed) {
-        const probe = await probeManagedStatus(st);
-        if (probe.providerKeys !== null && probe.providerKeys !== st.providerKeys) saveManaged({ ...st, providerKeys: probe.providerKeys });
-        console.log(`  Free LLM API: managed · ${st.runtime} · ${st.url} · ${formatManagedStatus(probe)}`);
-      } else {
-        console.log(c.dim("  Free LLM API: not set up — run `ob1 onboard`, or /models on a TTY"));
+    case "free": {
+      // Manage the shared free-models pool (works regardless of the active profile): keys file, routing
+      // strategy, provider health, and a status summary.
+      const sub = rest[0]?.toLowerCase();
+      if (sub === "keys") { openKeysFileInSession(ensureKeysFile()); break; }
+      if (sub === "strategy") {
+        const name = rest[1]?.toLowerCase();
+        if (name && (STRATEGIES as readonly string[]).includes(name)) {
+          cfg.freeStrategy = name as FreeStrategy; saveSettings(cfg);
+          if (cfg.providerProfile === "free") ctrl?.setStatus({ model: freeModelLabel(cfg.model) });
+          console.log(`  routing strategy → ${c.cyan(name)}  ${c.dim(FREE_STRATEGY_HINTS[name])}`);
+        } else if (!name && ui.pick) await pickFreeStrategy();
+        else console.log(c.red(`  usage: /free strategy ${STRATEGIES.join("|")} (current: ${cfg.freeStrategy})`));
+        break;
       }
+      if (sub === "health") { console.log(c.dim("  re-checking free provider health…")); await runFreeHealthCheck(true); console.log(c.dim("  ✓ health refreshed")); break; }
+      if (sub === "status" || !ui.pick) { for (const l of freeSummaryLines(freeStatus())) console.log(l); break; }
+      await pickFree();
       break;
     }
     case "permission": {
@@ -1785,7 +1832,7 @@ async function handleCommand(line: string): Promise<boolean> {
     }
     case "usage": {
       // Subscription usage first (the managed-server plan: the monthly credit pool), then the local
-      // token+cost analytics. The plan block is omitted for free/self-hosted (FreeLLMAPI) users.
+      // token+cost analytics. The plan block is omitted for free / self-hosted-endpoint users.
       const planLines = formatPlanUsage(await fetchPlan());
       if (planLines.length) { console.log(""); for (const l of planLines) console.log(l); }
       console.log(formatUsage(aggregate(loadUsage(join(cfg.dataDir, "usage.jsonl")))));
@@ -1934,32 +1981,6 @@ async function adaptiveTurn(task: string, hint?: { mode: "fusion" | "council" | 
   await applySolution(task, r.final);
 }
 
-// In-session auto-heal for the OB-1-managed Free LLM API proxy. A Node-run proxy is a detached child,
-// not a service, so it can die mid-session; the boot-time check (see startup block) only revives it at
-// the next launch. This runs before every real prompt: a fast no-op when the proxy is already up, and a
-// throttled respawn when it isn't — so a proxy that won't start (bad .env, missing dist/) can't stall
-// every message with a respawn+timeout. Best-effort: never blocks or breaks a turn.
-let lastProxyHealAt = 0;
-async function ensureProxyHealthy(): Promise<void> {
-  if (cfg.providerProfile !== "freellmapi") return;
-  try {
-    const flm = await import("./cli/freellm-manage.ts");
-    const st = flm.loadManaged();
-    if (!st?.managed) return;
-    if (await flm.isUp(st.url)) return; // healthy — the hot path
-    const now = Date.now();
-    if (now - lastProxyHealAt < 15000) { // crash-loop guard: at most one respawn attempt per 15s
-      console.log(c.yellow("  ⚠ Free LLM API proxy is down — retrying shortly · run /freellm to restart"));
-      return;
-    }
-    lastProxyHealAt = now;
-    console.log(c.dim("  Free LLM API proxy stopped — restarting it locally…"));
-    console.log(await flm.ensureRunning(st)
-      ? c.dim("  ✓ proxy back up")
-      : c.yellow("  ⚠ couldn't restart the Free LLM API proxy — run /freellm to fix"));
-  } catch { /* best-effort — never block a turn on the heal check */ }
-}
-
 // ─── per-line dispatch (shared by REPL + TUI) ───────────────────────────────
 async function processLine(line: string): Promise<boolean> {
   const t = line.trim();
@@ -1977,7 +1998,6 @@ async function processLine(line: string): Promise<boolean> {
     return false;
   }
   if (t.startsWith("/")) return handleCommand(t);
-  await ensureProxyHealthy(); // revive a crashed OB-1-managed Free LLM API proxy before the turn
   // @path mentions — pull referenced files/dirs into the turn so the model sees them without a read_file
   // round-trip. The original typed line (`t`) is kept for checkpoints/recall/skill-learning; only the text
   // SENT to the model carries the attached contents.
@@ -2108,11 +2128,11 @@ async function runRepl(startup: string[]): Promise<void> {
 
 // ─── Ink TUI (interactive TTY) ──────────────────────────────────────────────
 async function runTui(startup: string[]): Promise<void> {
-  ctrl = new TuiController({ model: cfg.model, mode: cfg.mode, plan: cfg.planMode, inTok: 0, outTok: 0, cacheTok: 0, autopilot: cfg.permissionMode === "autopilot", effort: cfg.effort }, procs, agentReg, todos);
-  // "Get Intelligent Models" footer button — shown only on the OB-1-managed Free LLM API provider (free
-  // models only); Enter opens the subscription pricing page in the browser. Read live so switching
-  // providers via /models toggles it. [[no-auto-escalation-to-expensive-modes]]
-  ctrl.upsellEligible = () => cfg.providerProfile === "freellmapi";
+  ctrl = new TuiController({ model: modelStatusLabel(), mode: cfg.mode, plan: cfg.planMode, inTok: 0, outTok: 0, cacheTok: 0, autopilot: cfg.permissionMode === "autopilot", effort: cfg.effort }, procs, agentReg, todos);
+  // "Get Intelligent Models" footer button — shown only on the Free models provider (free tiers only);
+  // Enter opens the subscription pricing page in the browser. Read live so switching providers via /models
+  // toggles it. [[no-auto-escalation-to-expensive-modes]]
+  ctrl.upsellEligible = () => cfg.providerProfile === "free";
   ctrl.onUpsell = () => { void openPricingPage(); };
   // @path autocomplete: complete against the workspace file list (built once, lazily, from the repo map so
   // it respects ignores). Prefix matches first, then substring; capped at 10.
@@ -2223,7 +2243,7 @@ async function runTui(startup: string[]): Promise<void> {
           // forgets the empty-array clear, leaving a stale "✔ tasks (6/6)" above the prompt. Only clear
           // when nothing is pending/in_progress, so a plan that legitimately spans turns still persists.
           if (todos.size > 0 && todos.done === todos.size) todos.clear();
-          ctrl!.setStatus({ model: cfg.model, mode: cfg.mode, plan: cfg.planMode, autopilot: cfg.permissionMode === "autopilot" }); ctrl!.setBusy(false);
+          ctrl!.setStatus({ model: modelStatusLabel(), mode: cfg.mode, plan: cfg.planMode, autopilot: cfg.permissionMode === "autopilot" }); ctrl!.setBusy(false);
           // After a real (model) turn that wasn't interrupted, propose a likely next prompt (Tab accepts).
           // Skip slash-commands (no model exchange to base it on) and the queued case (a next prompt is
           // already waiting). Fire-and-forget — it must not block the drain loop.
@@ -2242,13 +2262,13 @@ async function runTui(startup: string[]): Promise<void> {
 // ─── boot ───────────────────────────────────────────────────────────────────
 const startup: string[] = [];
 startup.push(banner());
-// Access line: show the subscription plan or "Free LLM API" — never the raw wire provider ("openai") or
-// the server/localhost URL (users don't need either; the wire protocol is an implementation detail).
+// Access line: show the subscription plan or "Free models" — never the raw wire provider ("openai"/"free")
+// or the server URL (users don't need either; the wire protocol is an implementation detail).
 {
   const onManaged = !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
   let accessLine: string;
-  if (cfg.providerProfile === "freellmapi") {
-    accessLine = "Free LLM API";
+  if (cfg.providerProfile === "free") {
+    accessLine = "Free models";
   } else if (onManaged) {
     if (!loadAuthToken()) {
       accessLine = "Not signed in — run `ob1 login`";
@@ -2273,7 +2293,10 @@ startup.push(banner());
   }
   startup.push(c.dim(`  ${accessLine}`));
 }
-startup.push(c.dim(`  model: ${cfg.model} — ${describeModel(cfg.model)}${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : " · output governed by model"}`));
+if (cfg.providerProfile === "free")
+  startup.push(c.dim(`  model: ${freeModelLabel(cfg.model)} — 150+ free models across 20+ providers${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : ""}`));
+else
+  startup.push(c.dim(`  model: ${cfg.model} — ${describeModel(cfg.model)}${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : " · output governed by model"}`));
 if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restored (global ~/.ob1/settings.json) — change with /models or individual slash commands"));
 // Settings health: a hand-edited settings.json with a bad value silently fell back to a default — say
 // so, so a typo'd sandbox/mode isn't a silent mystery. Warnings (unknown keys) are shown dimmer.
@@ -2322,18 +2345,9 @@ if (persistedSettings(cfg.settingsDir).mode === "adaptive") {
   startup.push(c.yellow(`  note: 'adaptive' mode is now a Solo auto-route toggle — you're in Solo (auto-route ${cfg.autoRoute ? "on" : "off"}). Change it with /autoroute.`));
   saveSettings(cfg);
 }
-// If the active provider is an OB-1-managed FreeLLMAPI proxy, make sure it's running (Docker persists
-// across restarts; a Node-run proxy died with the last session). Best-effort — fast when already up.
-if (cfg.providerProfile === "freellmapi") {
-  try {
-    const flm = await import("./cli/freellm-manage.ts");
-    const st = flm.loadManaged();
-    if (st?.managed && !(await flm.isUp(st.url))) {
-      startup.push(c.dim("  starting your local Free LLM API proxy…"));
-      if (!(await flm.ensureRunning(st))) startup.push(c.yellow("  ⚠ couldn't auto-start the Free LLM API proxy — run /freellm to restart"));
-    }
-  } catch { /* best-effort */ }
-}
+// The embedded free-models router has no process to start — it routes in-process. Kick a best-effort,
+// non-blocking background health check so keyed providers are probed while the session boots.
+if (cfg.providerProfile === "free") { void runFreeHealthCheck(false); }
 // Load tree-sitter grammars before the repo map / AGENTS.md so symbol extraction uses real parsing
 // (falls back to the regex extractor if unavailable). Best-effort — never blocks startup on failure.
 await initTreeSitter().catch(() => false);

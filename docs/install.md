@@ -73,8 +73,9 @@ Start in any Git repository:
 ob1
 ```
 
-Choose **Start free** on first run. OB-1 provisions FreeLLMAPI locally and wires the endpoint into
-`~/.ob1/settings.json`.
+Choose **Start free** on first run. OB-1 provisions nothing external: the free path runs through the
+embedded free-models router, and keyless cloud providers work out of the box. Add your own free
+provider keys to `~/.ob1/keys.env` for more capacity.
 
 Use these checks when debugging an install:
 

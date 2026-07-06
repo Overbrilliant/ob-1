@@ -14,7 +14,7 @@ import { AgentRegistry } from "../src/agent/agent-registry.ts";
 import type { WorkerEvent } from "../src/multimind/runtime.ts";
 
 const cfg = loadConfig();
-if (!cfg.apiKey && !cfg.providerProfile) { console.error("no configured model route — sign in, or use /models for FreeLLMAPI or Custom API; skipping live test"); process.exit(0); }
+if (!cfg.apiKey && !cfg.providerProfile) { console.error("no configured model route — sign in, or use /models for Free models or Custom API; skipping live test"); process.exit(0); }
 console.log(`provider=${cfg.provider} model=${cfg.model}\n`);
 
 const store = new MemoryStore(":memory:");

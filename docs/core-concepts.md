@@ -16,7 +16,7 @@ OB-1 has three routes:
 
 | Route | Use it when | Account required |
 |---|---|---|
-| FreeLLMAPI | You want the free default with anonymous models first and your own provider keys later. | No |
+| Free models | You want the free default: an embedded router pooling free tiers across 20+ cloud providers, keyless out of the box, with your own provider keys optional for more capacity. | No |
 | Your endpoint | You already have OpenRouter, OpenAI, Gemini, Groq, Ollama, LM Studio, llama.cpp, vLLM, or another OpenAI-compatible URL. | No |
 | Hosted frontier | You want managed frontier models, web search, usage export, and one bill. | Yes |
 

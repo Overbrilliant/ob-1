@@ -2,6 +2,24 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [Unreleased]
+
+- Free models: replaced the external FreeLLMAPI service with an embedded free-models router that runs
+  in-process inside the CLI — no second process, no local server, no git clone, no Docker/Node
+  dependency, and no dashboard to run or sign into.
+- Free models: added one editable keys file at `~/.ob1/keys.env` (owner-only, auto-generated template).
+  Adding or removing a provider key activates or deactivates it on your next message, no restart.
+- Free models: keyless providers (Kilo, Pollinations, OVH, LLM7) work with zero setup, so OB-1 answers
+  the first message with no keys and no account.
+- Added `/free` (status, keys, strategy, health) to manage the free-models pool, and a "Free models ▸"
+  entry under `/models` to pick `auto` or pin a specific model.
+- Added routing strategies for the free-models router: `priority`, `balanced` (default), `smartest`,
+  `fastest`, `reliable` — with automatic failover, rate-limit window tracking, escalating cooldowns after
+  429s, and a reliability score.
+- Migration: existing "freellmapi" setups are automatically migrated to the embedded "free" router
+  (model `auto`) on next launch. No action needed. The external FreeLLMAPI service is no longer needed.
+- Removed `/freellm`.
+
 ## 0.1.5 - 2026-07-05
 
 - Safety: the trust gate is now ON BY DEFAULT — a first run in a new/untrusted folder starts in `ask`

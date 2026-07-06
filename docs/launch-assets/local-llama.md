@@ -2,21 +2,23 @@
 
 Use technical posts with reproducible commands. Avoid marketing language.
 
-## Angle 1: Local Endpoint for Free-Tier Routing
+## Angle 1: An Embedded Router for Free-Tier Model Pooling
 
 Title:
 
 ```text
-I made OB-1 start through a local OpenAI-compatible FreeLLM gateway
+I gave OB-1 an embedded router that pools 20+ free-tier model providers
 ```
 
 Outline:
 
 - Problem: coding agents usually start by asking for a paid key.
-- Design: OB-1 provisions FreeLLMAPI locally and talks to one `/v1` endpoint.
-- Anonymous routes are bootstrap only; serious usage means adding your own provider keys.
+- Design: OB-1 has an in-process free-models router — no server, no clone — that pools free tiers
+  across 20+ cloud providers and picks the best available model per request.
+- Keyless providers (Kilo, Pollinations, OVH, LLM7) work immediately; serious usage means adding your
+  own provider keys to `~/.ob1/keys.env`.
 - The same CLI can switch to Ollama, LM Studio, llama.cpp, vLLM, or a LAN GPU endpoint.
-- Ask: feedback on the local routing model and failure modes.
+- Ask: feedback on the routing model, failover behavior, and failure modes.
 
 Commands:
 
@@ -24,7 +26,7 @@ Commands:
 brew install overbrilliant/tap/ob1
 ob1
 /models
-/freellm
+/free
 ```
 
 ## Angle 2: Persistent Memory Graph

@@ -12,7 +12,7 @@ import { runEval, computeMatched, computeCapability } from "../src/eval/harness.
 import { renderReport, renderCapability } from "../src/eval/report.ts";
 
 const cfg = loadConfig();
-if (!cfg.apiKey && !cfg.providerProfile) { console.error("eval needs a configured model route: sign in for the managed server, or use /models for FreeLLMAPI or Custom API"); process.exit(1); }
+if (!cfg.apiKey && !cfg.providerProfile) { console.error("eval needs a configured model route: sign in for the managed server, or use /models for Free models or Custom API"); process.exit(1); }
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 const picked = requested.filter((m) => (SELECTABLE_MODES as readonly string[]).includes(m));

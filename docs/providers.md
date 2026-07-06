@@ -6,7 +6,7 @@ OB-1 speaks OpenAI-compatible HTTP for every provider path.
 
 | Profile | Default endpoint | Key env |
 |---|---|---|
-| FreeLLMAPI | `http://127.0.0.1:49317/v1` managed by OB-1 | managed locally |
+| Free models | Embedded router, in-process | keys in `~/.ob1/keys.env` (optional) |
 | OpenRouter | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 | Ollama | `http://localhost:11434/v1` | optional |
 | LM Studio | `http://localhost:1234/v1` | optional |
@@ -25,34 +25,30 @@ OB-1 speaks OpenAI-compatible HTTP for every provider path.
 
 Env keys are runtime-only. `saveSettings()` preserves the saved profile and never writes env secrets.
 
-## FreeLLMAPI
+## Free Models
 
-OB-1 stores FreeLLMAPI state in `~/.ob1/freellm.json` and the managed checkout in
-`~/.ob1/freellmapi`. The proxy binds to localhost by default and reuses the existing install on later
-runs.
+OB-1 has an embedded free-models router: 150+ free models across 20+ cloud providers, routed in-process
+inside the CLI. There is no separate proxy, no local state file for a managed checkout, and no
+dashboard. Add your own free provider keys to `~/.ob1/keys.env`; saving the file activates a provider on
+your next message, no restart.
 
-Anonymous providers are useful for first-token setup. For better quality, add free provider keys in the
-FreeLLMAPI dashboard.
+### Keyless Providers
 
-### Anonymous Providers
-
-FreeLLMAPI is usable before you add provider keys because it includes anonymous routes. These are best
-for setup, quick checks, and low-stakes edits; they can throttle, disappear, or vary in quality. Add your
-own provider keys in the local FreeLLMAPI dashboard when you need stronger models and more predictable
-capacity.
+Four providers need no key at all and are usable the moment you start OB-1:
 
 | Route | What to expect | When to add keys |
 |---|---|---|
-| Pollinations | Anonymous free model access, variable capacity | Add keys before serious coding loops |
-| LLM7 | Anonymous free model access, variable quality | Add keys when output quality matters |
-| OVH | Anonymous free model access, provider throttling possible | Add keys for longer sessions |
-| Kilo | Anonymous free model access, shared limits possible | Add keys for repeatable agent work |
+| Pollinations | Keyless free model access, variable capacity | Add keys before serious coding loops |
+| LLM7 | Keyless free model access, variable quality | Add keys when output quality matters |
+| OVH | Keyless free model access, provider throttling possible | Add keys for longer sessions |
+| Kilo | Keyless free model access, shared limits possible | Add keys for repeatable agent work |
 
-The dashboard stores user-added provider keys inside FreeLLMAPI, encrypted at rest. OB-1 only talks to
-the single local `/v1` endpoint and the unified FreeLLMAPI key.
+Keys you add stay in `~/.ob1/keys.env` on your machine; OB-1 calls each provider directly with your own
+key. There is no unified key and no server-side key store.
 
-See [FreeLLMAPI guide](freellmapi.md) for the managed lifecycle and [Free-tier capacity ledger](free-tier-capacity.md)
-for the launch verification table behind the free-tier headline.
+See [Free models guide](free-models.md) for the keys file, routing strategies, and the `/free` command,
+and [Free-tier capacity ledger](free-tier-capacity.md) for the launch verification table behind the
+free-tier headline.
 
 ### Gemini BYOK Example
 

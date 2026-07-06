@@ -4,8 +4,8 @@ Common OB-1 commands:
 
 | Command | Purpose |
 |---|---|
-| `/models` | Choose FreeLLMAPI, a custom endpoint, a named provider, or hosted frontier models. |
-| `/freellm` | Start, stop, heal, inspect, open, or unmanage the local FreeLLMAPI proxy. |
+| `/models` | Choose Free models (auto or a pinned model), a custom endpoint, a named provider, or hosted frontier models. |
+| `/free` | Manage the free-models pool: keys file, routing strategy, provider health. |
 | `/memory` | Inspect stored project memory. |
 | `/memory add <text>` | Add a fact to memory. |
 | `/memory search <query>` | Search project memory. |

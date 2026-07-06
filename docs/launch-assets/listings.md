@@ -7,9 +7,9 @@ Prepare these after the first release artifacts and docs are live.
 Pitch:
 
 ```text
-OB-1 is an Apache-2.0 terminal coding agent with a free local first-run path through FreeLLMAPI,
-provider-neutral OpenAI-compatible routing, an inspectable project memory graph, MCP, checkpoints, and
-multi-agent modes.
+OB-1 is an Apache-2.0 terminal coding agent with an embedded free-models router (150+ free models
+across 20+ providers, keyless out of the box), provider-neutral OpenAI-compatible routing, an
+inspectable project memory graph, MCP, checkpoints, and multi-agent modes.
 ```
 
 Required links:

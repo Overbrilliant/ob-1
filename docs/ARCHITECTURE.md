@@ -10,7 +10,7 @@ flowchart TD
   user["User runs ob1"] --> boot["CLI boot and startup checks"]
   boot --> config["Config and provider routing"]
   config --> hosted["Hosted OB-1 server"]
-  config --> free["Managed FreeLLMAPI"]
+  config --> free["Embedded free-models router (in-process)"]
   config --> byok["BYOK or local OpenAI-compatible endpoint"]
   hosted --> loop["Agent loop"]
   free --> loop

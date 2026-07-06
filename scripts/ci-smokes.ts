@@ -79,10 +79,9 @@ const SMOKES = [
   "treesitter-smoke.ts",      // tree-sitter repo-map symbol extraction (+ regex fallback)
   "compiled-startup-smoke.ts",// standalone binary startup: no runtime node_modules assets required
   "git-exclude-smoke.ts",     // startup excludes .ob1/ from repo-local git status without touching .gitignore
-  "settings-persist-smoke.ts",// settings persistence (.ob1/settings.json round-trip + precedence)
-  "freellm-smoke.ts",         // FreeLLMAPI provider: profile registry + url normalization + config round-trip
+  "settings-persist-smoke.ts",// settings persistence (.ob1/settings.json round-trip + precedence + freellmapi→free migration)
   "auth-route-smoke.ts",      // managed-server routing: token precedence + /v1 + web_search bearer/402/401
-  "freellm-manage-smoke.ts",  // OB-1-managed FreeLLMAPI: runtime detect + dashboard setup + unified-key auto-wire
+  "free-router-smoke.ts",     // embedded free-models router: keys/registry/routing/failover + freellmapi→free settings migration
   "onboarding-smoke.ts",      // first-run onboarding gate + provider-choice routing + 'seen' marker
   "verify-smoke.ts",          // self-verification: detect checks + runVerification + auto self-fix loop
   "browser-check-smoke.ts",   // headless-browser behavioral verification: working vs inert toggle + page-error/unreachable

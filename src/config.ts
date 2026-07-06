@@ -10,6 +10,10 @@ import { validateSettings } from "./config-validate.ts";
 export type Mode = "solo" | "fusion" | "council" | "personas" | "adaptive";
 export type SandboxMode = "off" | "read-only" | "workspace-write";
 export type QualityMode = "off" | "normal" | "strict";
+/** Routing strategy for the embedded free-models router (src/providers/free). Kept as a local string union
+ *  so config.ts has no runtime import of the free module (avoids an import cycle: free/index imports config). */
+export type FreeStrategy = "priority" | "balanced" | "smartest" | "fastest" | "reliable";
+const FREE_STRATEGIES: FreeStrategy[] = ["priority", "balanced", "smartest", "fastest", "reliable"];
 /** Permission mode: "autopilot" (the default) executes mutating tools without prompting; "ask" gates each
  *  one behind an approval prompt. (Default resolved in loadConfig: autopilot unless a saved value is "ask".) */
 export type PermissionMode = "ask" | "autopilot";
@@ -106,34 +110,76 @@ export function detectEnvProvider(env: NodeJS.ProcessEnv = process.env): EnvProv
 
 /** Pick provider. Supported model routes:
  *  1. explicit runtime override (`OB1_BASE_URL`, optionally `OB1_API_KEY`),
- *  2. a provider profile configured via /models (FreeLLMAPI, local presets, Custom API),
+ *  2. a provider profile configured via /models (the embedded Free models router, local presets, Custom API),
  *  3. the managed OB-1 server subscription route, where the server injects upstream keys,
  *  4. named env provider keys (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`)
  *     when nothing more deliberate is configured. */
-function resolveProvider(saved: PersistedSettings): { provider: Provider; apiKey: string | undefined; baseUrl: string; model: string; providerProfile?: string; envProviderSource?: string } {
+function resolveProvider(saved: PersistedSettings): {
+  provider: Provider;
+  apiKey: string | undefined;
+  baseUrl: string;
+  model: string;
+  providerProfile?: string;
+  envProviderSource?: string;
+} {
   const model = process.env.OB1_MODEL?.trim() || undefined;
   const envRoute = detectEnvProvider();
   if (envRoute && envRouteIsExplicitOverride(envRoute)) {
-    return { provider: envRoute.provider, apiKey: envRoute.apiKey, baseUrl: envRoute.baseUrl, model: model ?? envRoute.model, envProviderSource: envRoute.source };
+    return {
+      provider: envRoute.provider,
+      apiKey: envRoute.apiKey,
+      baseUrl: envRoute.baseUrl,
+      model: model ?? envRoute.model,
+      envProviderSource: envRoute.source,
+    };
   }
-  // A provider profile (e.g. FreeLLMAPI, or a bring-your-own Custom endpoint) set up via /models — creds
+  // The embedded free-models router: no URL/key to restore — the wire provider is "free" (callFree routes
+  // in-process across free-tier providers via the keys file). Checked before the URL-bearing profile branch
+  // below because "free" has no providerUrl. Default model "auto" ⇒ strategy routing.
+  if (saved.providerProfile === "free") {
+    return {
+      provider: "free",
+      apiKey: undefined,
+      baseUrl: "",
+      model: model ?? saved.model ?? "auto",
+      providerProfile: "free",
+    };
+  }
+  // A URL-bearing provider profile (e.g. a named preset, or a bring-your-own Custom endpoint) set up via /models — creds
   // restored from persisted settings. The KEY is optional (a keyless Custom/LAN endpoint persists an empty
   // string), so a profile is restored on URL alone; apiKey stays undefined when no key was saved.
   const prof = profileById(saved.providerProfile);
   if (prof && saved.providerUrl) {
-    return { provider: "openai", apiKey: saved.providerKey || undefined, baseUrl: saved.providerUrl, model: model ?? saved.model ?? prof?.defaultModel ?? "auto", providerProfile: saved.providerProfile };
+    return {
+      provider: "openai",
+      apiKey: saved.providerKey || undefined,
+      baseUrl: saved.providerUrl,
+      model: model ?? saved.model ?? prof?.defaultModel ?? "auto",
+      providerProfile: saved.providerProfile,
+    };
   }
   const token = loadAuthToken();
   if (token) {
     return { provider: "openai", apiKey: token, baseUrl: `${ob1ServerUrl()}/v1`, model: model ?? "qwen/qwen3.6-plus" };
   }
   if (envRoute) {
-    return { provider: envRoute.provider, apiKey: envRoute.apiKey, baseUrl: envRoute.baseUrl, model: model ?? envRoute.model, envProviderSource: envRoute.source };
+    return {
+      provider: envRoute.provider,
+      apiKey: envRoute.apiKey,
+      baseUrl: envRoute.baseUrl,
+      model: model ?? envRoute.model,
+      envProviderSource: envRoute.source,
+    };
   }
   // Nothing configured → route through the managed OB-1 server with the signed-in user's token (the
   // server injects the upstream key). No token yet → apiKey undefined: the app disables model calls and
-  // prompts `ob1 onboard` or /models for FreeLLMAPI / BYOK / Custom API.
-  return { provider: "openai", apiKey: undefined, baseUrl: `${ob1ServerUrl()}/v1`, model: model ?? "qwen/qwen3.6-plus" };
+  // prompts `ob1 onboard` or /models for Free models / BYOK / Custom API.
+  return {
+    provider: "openai",
+    apiKey: undefined,
+    baseUrl: `${ob1ServerUrl()}/v1`,
+    model: model ?? "qwen/qwen3.6-plus",
+  };
 }
 
 export type Effort = "low" | "medium" | "high";
@@ -146,7 +192,7 @@ export interface Config {
   effort?: Effort;
   apiKey: string | undefined;
   baseUrl: string;
-  /** Set when the active provider was configured via the /models setup flow (e.g. "freellmapi").
+  /** Set when the active provider was configured via the /models setup flow (e.g. "free", "custom").
    *  Gates persistence of baseUrl/apiKey: only profile creds are written to disk — never an env key. */
   providerProfile?: string;
   /** Runtime-only env route source when an env provider is active; never persisted. */
@@ -166,6 +212,9 @@ export interface Config {
   /** Output-token cap. undefined ⇒ governed by the model on the OpenAI-compatible route. Set
    *  OB1_MAX_TOKENS only to force a specific cap. */
   maxTokens?: number;
+  /** Routing strategy for the embedded free-models router (priority|balanced|smartest|fastest|reliable).
+   *  Default "balanced". Read by src/providers/free at call time; surfaced/changed by the phase-2 UX. */
+  freeStrategy: FreeStrategy;
   mode: Mode;
   /** true = read-only Plan mode; false = Act mode (R6 — Cline plan/act). */
   planMode: boolean;
@@ -231,7 +280,7 @@ export interface Config {
 // /settings, etc. are remembered across sessions AND identical no matter which folder you launch from.
 // Precedence on load:  explicit env var (OB1_*)  >  persisted value  >  built-in default.
 export interface PersistedSettings {
-  provider?: Provider;          // guards the model: a saved model only applies under the same provider
+  provider?: Provider; // guards the model: a saved model only applies under the same provider
   model?: string;
   mode?: Mode;
   planMode?: boolean;
@@ -247,14 +296,16 @@ export interface PersistedSettings {
   sandbox?: SandboxMode;
   checkpoint?: boolean;
   effort?: Effort;
+  /** Routing strategy for the embedded free-models router (default "balanced"). */
+  freeStrategy?: FreeStrategy;
   // A provider configured via the /models setup flow. Creds live here (the file is gitignored) so the
   // provider survives restarts without re-entry. Direct provider env keys are not model routes.
   // The single tuple names the ACTIVE provider (what resolveProvider restores on next launch).
-  providerProfile?: string;     // e.g. "freellmapi" | "ollama" | "custom"
-  providerUrl?: string;         // the active provider base URL (…/v1)
-  providerKey?: string;         // the active provider bearer token
+  providerProfile?: string; // e.g. "free" | "ollama" | "custom"
+  providerUrl?: string; // the active provider base URL (…/v1)
+  providerKey?: string; // the active provider bearer token
   // Per-provider credential memory, keyed by profile id. Remembers EVERY configured provider's URL+key
-  // so switching between FreeLLMAPI and Custom API from /models never needs re-entry. The active
+  // so switching between providers from /models never needs re-entry. The active
   // provider above is one of these entries.
   providerCreds?: Record<string, { url: string; key: string }>;
 }
@@ -290,7 +341,9 @@ export function loadAuthToken(settingsDir = globalSettingsDir()): string | undef
   try {
     const j = JSON.parse(readFileSync(join(settingsDir, "auth.json"), "utf8")) as { token?: string };
     return j.token || undefined;
-  } catch { return undefined; }
+  } catch {
+    return undefined;
+  }
 }
 
 /** Where global settings live. ~/.ob1 by default so they're shared across every launch folder;
@@ -304,16 +357,35 @@ function loadPersisted(dir: string): PersistedSettings {
     const raw = JSON.parse(readFileSync(join(dir, SETTINGS_FILE), "utf8"));
     // Schema-validate: drop any invalid field (a hand-edited sandbox:"yolo" must fall back to the
     // default, not silently mis-apply) and ignore unknown keys. Errors are surfaced by `settingsHealth`.
-    return validateSettings(raw).value;
+    return migrateFreellmapiToFree(dir, validateSettings(raw).value);
+  } catch {
+    return {};
+  } // missing / unreadable / corrupt → fall back to defaults
+}
+
+/** One-time migration: the old self-hosted FreeLLMAPI proxy profile is replaced by the embedded free-models
+ *  router. Rewrite a persisted providerProfile "freellmapi" to "free" (model "auto") and persist the rewrite
+ *  best-effort, so an existing user lands on the in-process router on the next launch without re-setup. */
+function migrateFreellmapiToFree(dir: string, s: PersistedSettings): PersistedSettings {
+  if (s.providerProfile !== "freellmapi") return s;
+  const migrated: PersistedSettings = { ...s, providerProfile: "free", model: "auto" };
+  try {
+    writeSettingsFile(dir, migrated);
+  } catch {
+    /* best-effort — routing still uses the in-memory rewrite */
   }
-  catch { return {}; } // missing / unreadable / corrupt → fall back to defaults
+  return migrated;
 }
 
 /** Validate the on-disk settings WITHOUT applying — for a /doctor-style startup check. Returns the
  *  structured report (clean when the file is missing or fully valid). */
 export function settingsHealth(dir: string): ReturnType<typeof validateSettings> {
   let raw: unknown = {};
-  try { raw = JSON.parse(readFileSync(join(dir, SETTINGS_FILE), "utf8")); } catch { return validateSettings({}); }
+  try {
+    raw = JSON.parse(readFileSync(join(dir, SETTINGS_FILE), "utf8"));
+  } catch {
+    return validateSettings({});
+  }
   return validateSettings(raw);
 }
 
@@ -324,7 +396,11 @@ function writeSettingsFile(dir: string, data: PersistedSettings): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const path = join(dir, SETTINGS_FILE);
   writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
-  try { chmodSync(path, 0o600); } catch { /* perms are best-effort */ }
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    /* perms are best-effort */
+  }
 }
 
 function envSet(name: string): boolean {
@@ -334,11 +410,17 @@ function envSet(name: string): boolean {
 /** Persist the user-changeable settings. Best-effort — never throws (a failed write must not break a turn). */
 export function saveSettings(cfg: Config): void {
   const prev = loadPersisted(cfg.settingsDir);
-  const supportedProvider = cfg.provider === "openai";
+  // Both the OpenAI-compatible route and the embedded free router persist the active model (the free router
+  // stores "auto"/a pin); an env route does not.
+  const supportedProvider = cfg.provider === "openai" || cfg.provider === "free";
   const envRoute = detectEnvProvider();
-  const envActive = !!envRoute && cfg.provider === envRoute.provider && cfg.baseUrl === envRoute.baseUrl && (cfg.apiKey ?? "") === (envRoute.apiKey ?? "");
+  const envActive =
+    !!envRoute &&
+    cfg.provider === envRoute.provider &&
+    cfg.baseUrl === envRoute.baseUrl &&
+    (cfg.apiKey ?? "") === (envRoute.apiKey ?? "");
   const data: PersistedSettings = {
-    provider: "openai",
+    provider: cfg.provider === "free" ? "free" : "openai",
     model: envActive || envSet("OB1_MODEL") ? prev.model : supportedProvider ? cfg.model : prev.model,
     mode: cfg.mode,
     planMode: cfg.planMode,
@@ -354,13 +436,14 @@ export function saveSettings(cfg: Config): void {
     sandbox: envSet("OB1_SANDBOX") ? prev.sandbox : cfg.sandbox,
     checkpoint: envSet("OB1_CHECKPOINT") ? prev.checkpoint : cfg.checkpoint,
     effort: envSet("OB1_EFFORT") ? prev.effort : cfg.effort,
+    freeStrategy: envSet("OB1_FREE_STRATEGY") ? prev.freeStrategy : cfg.freeStrategy,
   };
   // Provider creds. The single tuple (providerProfile/Url/Key) names the ACTIVE provider; the
-  // providerCreds map remembers EVERY configured provider so switching FreeLLMAPI⇄Custom needs no
+  // providerCreds map remembers EVERY configured provider so switching between providers needs no
   // re-entry.
   // GLOBAL settings (~/.ob1) are the ONLY source of truth. We no longer fall back to a per-workspace
   // <cwd>/.ob1 file: that legacy migration kept resurrecting stale provider URLs (e.g. an old remote
-  // FreeLLMAPI host) into the global config. FreeLLMAPI is self-hosted/local, set up fresh via /models.
+  // provider host) into the global config. Providers are set up fresh via /models.
   const legacy = prev;
   const creds: Record<string, { url: string; key: string }> = { ...(prev.providerCreds ?? {}) };
   // Fold any legacy single-tuple into the map (back-compat for files written before the map existed).
@@ -373,47 +456,84 @@ export function saveSettings(cfg: Config): void {
     // alone next launch, without ever writing a bogus token.
     const key = cfg.apiKey ?? "";
     creds[cfg.providerProfile] = { url: cfg.baseUrl, key };
-    data.providerProfile = cfg.providerProfile; data.providerUrl = cfg.baseUrl; data.providerKey = key;
+    data.providerProfile = cfg.providerProfile;
+    data.providerUrl = cfg.baseUrl;
+    data.providerKey = key;
   } else if (envActive && prev.providerProfile && prev.providerUrl && prev.providerKey != null) {
     data.providerProfile = prev.providerProfile;
     data.providerUrl = prev.providerUrl;
     data.providerKey = prev.providerKey;
   }
   if (Object.keys(creds).length) data.providerCreds = creds;
-  try { writeSettingsFile(cfg.settingsDir, data); }
-  catch { /* best-effort persistence */ }
+  try {
+    writeSettingsFile(cfg.settingsDir, data);
+  } catch {
+    /* best-effort persistence */
+  }
 }
 
 /** Whether a persisted settings file exists (for a "settings restored" startup note). */
 export function hasPersistedSettings(settingsDir: string): boolean {
-  try { readFileSync(join(settingsDir, SETTINGS_FILE), "utf8"); return true; } catch { return false; }
+  try {
+    readFileSync(join(settingsDir, SETTINGS_FILE), "utf8");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Raw persisted settings (pre-migration) — used at boot to show the one-time adaptive→Solo note. */
-export function persistedSettings(settingsDir: string): PersistedSettings { return loadPersisted(settingsDir); }
+export function persistedSettings(settingsDir: string): PersistedSettings {
+  return loadPersisted(settingsDir);
+}
 
 /** Persist a configured provider's creds as the ACTIVE provider (and remember it in the per-provider
- *  map) WITHOUT a full Config — used by the FreeLLMAPI manager to AUTO-WIRE the proxy it just started,
- *  so the user never enters a URL/key. Merges into settings.json (other prefs untouched); loadConfig's
- *  resolveProvider then restores it on the next launch. */
+ *  map) WITHOUT a full Config — used to activate a provider directly (e.g. the embedded Free models router,
+ *  which persists profile "free" + model "auto" with no URL/key). Merges into settings.json (other prefs
+ *  untouched); loadConfig's resolveProvider then restores it on the next launch. */
 /** Switch the active provider to the managed OB-1 server (the paid SUBSCRIPTION path) with a default
- *  flagship model. Clears any provider PROFILE (e.g. FreeLLMAPI) so resolveProvider falls through to the
+ *  flagship model. Clears any provider PROFILE (e.g. Free models) so resolveProvider falls through to the
  *  server route (token + ${OB1_SERVER}/v1); keeps the per-provider cred memory. Chat then bills credits. */
 export function persistSubscription(settingsDir: string, model: string): void {
   const prev = loadPersisted(settingsDir);
-  const data: PersistedSettings = { ...prev, provider: "openai", model, providerProfile: undefined, providerUrl: undefined, providerKey: undefined };
-  try { writeSettingsFile(settingsDir, data); }
-  catch { /* best-effort persistence */ }
+  const data: PersistedSettings = {
+    ...prev,
+    provider: "openai",
+    model,
+    providerProfile: undefined,
+    providerUrl: undefined,
+    providerKey: undefined,
+  };
+  try {
+    writeSettingsFile(settingsDir, data);
+  } catch {
+    /* best-effort persistence */
+  }
 }
 
-export function persistActiveProvider(settingsDir: string, profile: string, url: string, key: string, model?: string): void {
+export function persistActiveProvider(
+  settingsDir: string,
+  profile: string,
+  url: string,
+  key: string,
+  model?: string,
+): void {
   const prev = loadPersisted(settingsDir);
   const creds: Record<string, { url: string; key: string }> = { ...(prev.providerCreds ?? {}) };
   creds[profile] = { url, key };
-  const data: PersistedSettings = { ...prev, providerProfile: profile, providerUrl: url, providerKey: key, providerCreds: creds };
+  const data: PersistedSettings = {
+    ...prev,
+    providerProfile: profile,
+    providerUrl: url,
+    providerKey: key,
+    providerCreds: creds,
+  };
   if (model) data.model = model;
-  try { writeSettingsFile(settingsDir, data); }
-  catch { /* best-effort persistence */ }
+  try {
+    writeSettingsFile(settingsDir, data);
+  } catch {
+    /* best-effort persistence */
+  }
 }
 
 /** The shipped, baked-in credentials for a provider. Kept as a tiny compatibility shim for older callers:
@@ -424,7 +544,7 @@ export function bakedProviderCreds(profileId: string): { url: string; key: strin
 }
 
 /** Every configured provider's remembered creds, keyed by profile id. Used by the /models picker to
- *  switch FreeLLMAPI⇄Custom without re-prompting for a key already entered. Folds the legacy single
+ *  switch between providers without re-prompting for a key already entered. Folds the legacy single
  *  tuple in for back-compat with settings files written before the per-provider map existed. */
 export function savedProviderCreds(settingsDir: string): Record<string, { url: string; key: string }> {
   const s = loadPersisted(settingsDir);
@@ -455,36 +575,68 @@ export function loadConfig(): Config {
   const saved = loadPersisted(settingsDir);
   // NOTE: settings come ONLY from the global dir (~/.ob1). We intentionally do NOT migrate/adopt a
   // per-workspace <cwd>/.ob1/settings.json. That old migration kept resurrecting stale provider configs
-  // (e.g. an old remote FreeLLMAPI URL) into a freshly-reset global config every time `ob1` ran from a
+  // (e.g. an old remote provider URL) into a freshly-reset global config every time `ob1` ran from a
   // folder that still had a legacy .ob1. The workspace .ob1 is now used only for memory.db, not settings.
   const p = resolveProvider(saved);
   const sameProvider = saved.provider === p.provider;
   // model: OB1_MODEL (already folded into p.model) wins; else the saved model when the provider matches.
-  const model = process.env.OB1_MODEL ? p.model : (sameProvider && saved.model ? saved.model : p.model);
+  const model = process.env.OB1_MODEL ? p.model : sameProvider && saved.model ? saved.model : p.model;
   const effortRaw = (process.env.OB1_EFFORT as Effort | undefined) ?? saved.effort;
-  const envPerm = process.env.OB1_PERMISSION === "autopilot" ? "autopilot" : process.env.OB1_PERMISSION === "ask" ? "ask" : undefined;
+  const envPerm =
+    process.env.OB1_PERMISSION === "autopilot" ? "autopilot" : process.env.OB1_PERMISSION === "ask" ? "ask" : undefined;
   // Explicit = the user chose the permission mode (env, or any previously-saved value); implicit = the
   // built-in default. A fresh install has no saved permissionMode → implicit → the trust gate may downgrade
   // it to "ask" in an untrusted folder (index.ts), so a first `ob1` in a real repo never runs autopilot unasked.
   const permissionModeExplicit = envPerm !== undefined || saved.permissionMode != null;
-  const envAutoRoute = /^(1|true|on)$/i.test(process.env.OB1_AUTO_ROUTE ?? "") ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_AUTO_ROUTE ?? "") ? false : undefined;
-  const envSubagents = /^(1|true|on)$/i.test(process.env.OB1_SUBAGENTS ?? "") ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_SUBAGENTS ?? "") ? false : undefined;
-  const envRepoMap = /^(1|true|on)$/i.test(process.env.OB1_REPO_MAP ?? "") ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_REPO_MAP ?? "") ? false : undefined;
-  const envMemEvolve = /^(1|true|on)$/i.test(process.env.OB1_MEM_EVOLVE ?? "") ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_MEM_EVOLVE ?? "") ? false : undefined;
-  const envMemReflect = /^(1|true|on)$/i.test(process.env.OB1_MEM_REFLECT ?? "") ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_MEM_REFLECT ?? "") ? false : undefined;
-  const envMemAutolink = /^(1|true|on)$/i.test(process.env.OB1_MEM_AUTOLINK ?? "") ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_MEM_AUTOLINK ?? "") ? false : undefined;
-  const envSkillLearn = /^(1|true|on)$/i.test(process.env.OB1_SKILL_LEARN ?? "") ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_SKILL_LEARN ?? "") ? false : undefined;
-  const envQualityMode = QUALITY_MODES.includes(process.env.OB1_QUALITY as QualityMode) ? process.env.OB1_QUALITY as QualityMode : undefined;
-  const envCheckpoint = /^(1|true|on)$/i.test(process.env.OB1_CHECKPOINT ?? "") ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_CHECKPOINT ?? "") ? false : undefined;
-  const envSandbox = SANDBOXES.includes(process.env.OB1_SANDBOX as SandboxMode) ? process.env.OB1_SANDBOX as SandboxMode : undefined;
+  const envAutoRoute = /^(1|true|on)$/i.test(process.env.OB1_AUTO_ROUTE ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_AUTO_ROUTE ?? "")
+      ? false
+      : undefined;
+  const envSubagents = /^(1|true|on)$/i.test(process.env.OB1_SUBAGENTS ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_SUBAGENTS ?? "")
+      ? false
+      : undefined;
+  const envRepoMap = /^(1|true|on)$/i.test(process.env.OB1_REPO_MAP ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_REPO_MAP ?? "")
+      ? false
+      : undefined;
+  const envMemEvolve = /^(1|true|on)$/i.test(process.env.OB1_MEM_EVOLVE ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_MEM_EVOLVE ?? "")
+      ? false
+      : undefined;
+  const envMemReflect = /^(1|true|on)$/i.test(process.env.OB1_MEM_REFLECT ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_MEM_REFLECT ?? "")
+      ? false
+      : undefined;
+  const envMemAutolink = /^(1|true|on)$/i.test(process.env.OB1_MEM_AUTOLINK ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_MEM_AUTOLINK ?? "")
+      ? false
+      : undefined;
+  const envSkillLearn = /^(1|true|on)$/i.test(process.env.OB1_SKILL_LEARN ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_SKILL_LEARN ?? "")
+      ? false
+      : undefined;
+  const envQualityMode = QUALITY_MODES.includes(process.env.OB1_QUALITY as QualityMode)
+    ? (process.env.OB1_QUALITY as QualityMode)
+    : undefined;
+  const envCheckpoint = /^(1|true|on)$/i.test(process.env.OB1_CHECKPOINT ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_CHECKPOINT ?? "")
+      ? false
+      : undefined;
+  const envSandbox = SANDBOXES.includes(process.env.OB1_SANDBOX as SandboxMode)
+    ? (process.env.OB1_SANDBOX as SandboxMode)
+    : undefined;
+  const envFreeStrategy = FREE_STRATEGIES.includes(process.env.OB1_FREE_STRATEGY as FreeStrategy)
+    ? (process.env.OB1_FREE_STRATEGY as FreeStrategy)
+    : undefined;
   // Migration: `adaptive` is retired as an interactive mode — it's now the off-by-default Solo
   // auto-route toggle. Collapse ANY persisted adaptive workspace to Solo; a deliberate autoRoute:true
   // is preserved independently below, so "Solo + auto-route on" reproduces the old adaptive behaviour.
@@ -508,6 +660,9 @@ export function loadConfig(): Config {
     // Guard against a non-numeric OB1_MAX_TOKENS (e.g. "8k"): Number("8k") is NaN, and NaN flows to the
     // provider body as max_tokens (NaN ?? x === NaN), breaking every request. Only accept a positive number.
     maxTokens: maxTokensFromEnv(),
+    freeStrategy:
+      envFreeStrategy ??
+      (saved.freeStrategy && FREE_STRATEGIES.includes(saved.freeStrategy) ? saved.freeStrategy : "balanced"),
     mode,
     planMode: saved.planMode ?? false,
     autoRoute: envAutoRoute ?? saved.autoRoute ?? false,
@@ -517,7 +672,8 @@ export function loadConfig(): Config {
     memReflect: envMemReflect ?? saved.memReflect ?? false,
     memAutolink: envMemAutolink ?? saved.memAutolink ?? false,
     skillLearn: envSkillLearn ?? saved.skillLearn ?? false,
-    qualityMode: envQualityMode ?? (saved.qualityMode && QUALITY_MODES.includes(saved.qualityMode) ? saved.qualityMode : "normal"),
+    qualityMode:
+      envQualityMode ?? (saved.qualityMode && QUALITY_MODES.includes(saved.qualityMode) ? saved.qualityMode : "normal"),
     permissionMode: envPerm ?? (saved.permissionMode === "ask" ? "ask" : "autopilot"),
     permissionModeExplicit,
     sandbox: envSandbox ?? (saved.sandbox && SANDBOXES.includes(saved.sandbox) ? saved.sandbox : "off"),

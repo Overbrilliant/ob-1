@@ -9,16 +9,17 @@ brew install overbrilliant/tap/ob1
 ob1
 ```
 
-Choose **Start free**. OB-1 provisions FreeLLMAPI locally, starts it on localhost, creates a local
-dashboard account, fetches the unified key, and writes the endpoint into `~/.ob1/settings.json`.
+Choose **Start free**. OB-1 works instantly through its embedded free-models router — 150+ free models
+across 20+ providers, no server to start, no account, no card. Keyless providers (Kilo, Pollinations,
+OVH, LLM7) answer your first message with zero setup.
 
-Anonymous providers are a bootstrap path with variable quality and shared limits. Add provider keys in
-the FreeLLMAPI dashboard when you want stronger free-tier capacity.
+For stronger free-tier capacity, add your own free provider keys to `~/.ob1/keys.env`. Saving the file
+activates the provider on your next message — no restart.
 
 Useful commands:
 
 ```text
-/freellm
+/free
 /models
 ```
 

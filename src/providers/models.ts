@@ -53,7 +53,7 @@ export function modelSpec(id: string): ModelSpec | undefined {
 }
 
 /** A router alias — not a concrete model, but an instruction for the proxy to pick one per request
- *  (FreeLLMAPI's default). The real model is only known once a response comes back (ModelResponse.model). */
+ *  (the free router's default). The real model is only known once a response comes back (ModelResponse.model). */
 export function isRouterModel(id: string): boolean {
   return /^(auto|router|default)$/i.test(id.trim());
 }
@@ -76,7 +76,7 @@ export function modelReasoning(id: string): { effort: boolean; visible: boolean 
 }
 
 /** Whether to attach a reasoning-effort param for this model. Known reasoning models with effort:true →
- *  yes; known models without reasoning support → no; UNKNOWN ids (FreeLLMAPI `auto`, an arbitrary proxy
+ *  yes; known models without reasoning support → no; UNKNOWN ids (the free router's `auto`, an arbitrary proxy
  *  model) → yes on the benefit of the doubt — the effort param is harmlessly ignored by models that
  *  don't reason, and `auto` routers strip it upstream anyway. */
 export function supportsEffort(id: string): boolean {

@@ -1,11 +1,15 @@
 // Deterministic smoke for first-run onboarding decision logic (src/cli/onboarding.ts).
 // The interactive flow (readline) isn't unit-tested; the gate + routing + marker are.
 // Usage: bun run scripts/onboarding-smoke.ts
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decideOnboard, generatedDashboardCredentials, isOnboarded, markOnboarded, subscribeFlow } from "../src/cli/onboarding.ts";
-import { detectEnvProvider } from "../src/config.ts";
+import { decideOnboard, isOnboarded, markOnboarded, subscribeFlow } from "../src/cli/onboarding.ts";
+import { detectEnvProvider, loadConfig, persistActiveProvider } from "../src/config.ts";
+import { ensureKeysFile } from "../src/providers/free/index.ts";
+
+// Named env keys would otherwise shadow the persisted free profile in loadConfig — clear the ones that matter.
+for (const k of ["OB1_MODEL", "OB1_BASE_URL", "OB1_API_KEY", "OB1_TOKEN"]) delete process.env[k];
 
 let fail = false;
 const check = (n: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} ${n}`); if (!ok) fail = true; };
@@ -44,11 +48,22 @@ check("named env keys are offered during onboarding, not treated as already conf
   check("detectEnvProvider lets OB1_BASE_URL win over named keys", detectEnvProvider({ ...env, OB1_BASE_URL: "localhost:9999" } as any)?.baseUrl === "http://localhost:9999/v1");
 }
 {
-  const creds = generatedDashboardCredentials();
-  // Must use a REAL TLD: FreeLLMAPI's dashboard rejects invented TLDs like `.ob1` with a 400,
-  // which stalls first-run setup at the reconnect prompt (found live 2026-07-02).
-  check("generated FreeLLMAPI dashboard email is local and valid-looking", /^ob1-local-[0-9a-f]{10}@local\.overbrilliant\.com$/.test(creds.email));
-  check("generated FreeLLMAPI dashboard password is strong enough for setup", creds.password.length >= 24);
+  // The free onboarding path activates the EMBEDDED router with zero setup: it persists the "free" profile
+  // + model "auto" and creates the keys template. Assert those effects hermetically (the interactive
+  // open-editor prompt itself is covered by manual e2e). Pinned to a temp settings dir — never touches ~/.ob1.
+  const prevDir = process.env.OB1_SETTINGS_DIR;
+  const fdir = mkdtempSync(join(tmpdir(), "ob1-free-"));
+  process.env.OB1_SETTINGS_DIR = fdir;
+  try {
+    persistActiveProvider(fdir, "free", "", "", "auto");
+    const keysPath = ensureKeysFile();
+    const cfg = loadConfig();
+    check("free onboarding persists the 'free' profile + model 'auto'", cfg.providerProfile === "free" && cfg.provider === "free" && cfg.model === "auto");
+    check("free onboarding creates the keys.env template", existsSync(keysPath) && keysPath.endsWith("keys.env"));
+  } finally {
+    if (prevDir === undefined) delete process.env.OB1_SETTINGS_DIR; else process.env.OB1_SETTINGS_DIR = prevDir;
+    rmSync(fdir, { recursive: true, force: true });
+  }
 }
 
 // (auth + provider choice are now up/down arrow selectors — interactive, covered by manual e2e)

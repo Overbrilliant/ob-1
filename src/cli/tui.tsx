@@ -610,10 +610,10 @@ export class TuiController {
   };
 
   // ─── "Get Intelligent Models" upsell (footer button) ───────────────────────
-  // A prominent footer call-to-action shown ONLY on the OB-1-managed Free LLM API provider (free models
-  // only). From the input box, ↓ moves focus onto the button and ↑ returns; Enter opens the pricing page
-  // in the browser. Both hooks are injected by index.ts so this file stays free of config/browser deps.
-  upsellEligible: () => boolean = () => false; // index.ts: cfg.providerProfile === "freellmapi"
+  // A prominent footer call-to-action shown ONLY on the Free models provider (free tiers only). From the
+  // input box, ↓ moves focus onto the button and ↑ returns; Enter opens the pricing page in the browser.
+  // Both hooks are injected by index.ts so this file stays free of config/browser deps.
+  upsellEligible: () => boolean = () => false; // index.ts: cfg.providerProfile === "free"
   onUpsell: () => void = () => {};             // index.ts: open the pricing page in the browser
   upsellFocus = false;                         // ↓ from the input gives the button focus; ↑/Esc returns
   focusUpsell = (): void => { if (!this.upsellFocus && this.upsellEligible()) { this.upsellFocus = true; this.emit(); } };
@@ -783,14 +783,14 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/export", "save the conversation to a file (or /export clipboard)"],
   ["/exit", "exit the session"],
   // ── model & mode ──
-  ["/models", "pick a model — or connect FreeLLMAPI (↑↓ · Enter)"],
+  ["/models", "pick a model or provider (↑↓ · Enter)"],
   ["/mode", "pick a mode (↑↓ · Enter)"],
   ["/solo", "exit a heavy mode → back to Solo"],
   ["/plan", "read-only plan mode"],
   ["/act", "act mode (allow edits)"],
   ["/effort", "reasoning effort: low/medium/high (↑↓ · Enter)"],
   // ── provider & plan ──
-  ["/freellm", "set up / manage the Free LLM API proxy (↑↓ · Enter)"],
+  ["/free", "manage the free-models pool: keys, strategy, health (↑↓ · Enter)"],
   ["/upgrade", "subscribe / manage your plan (opens pricing, signed in)"],
   // ── permissions & safety ──
   ["/permission", "approval mode: ask / autopilot (↑↓ · Enter)"],

@@ -638,10 +638,10 @@ cctrl.setBusy(false);
   const su = new TuiController({ model: "m", mode: "solo", plan: false, inTok: 0, outTok: 0, cacheTok: 0 });
   let tested: { url: string; key: string } | null = null;
   const sp = su.providerSetup({
-    title: "Set up FreeLLMAPI",
-    blurb: ["aggregates free LLM tiers", "behind one OpenAI-compatible endpoint"],
+    title: "Set up OpenRouter",
+    blurb: ["bring your own OpenRouter key", "for 300+ hosted models"],
     presets: [{ label: "Local", hint: "this machine", url: "http://localhost:3001/v1" }, { label: "Remote", hint: "another host", url: "https://" }],
-    keyPrefix: "freellmapi-",
+    keyPrefix: "sk-or-",
     initialUrl: "http://localhost:3001/v1",
     initialKey: "",
     onTest: async (url, key) => { tested = { url, key }; return "✓ connected — 3 model(s) available"; },
@@ -649,7 +649,7 @@ cctrl.setBusy(false);
   const { lastFrame: sf } = render(<TuiApp ctrl={su} />);
   await tick();
   let fr = strip(sf() ?? "");
-  check("setup tab renders title + blurb (users know what it is)", fr.includes("Set up FreeLLMAPI") && fr.includes("aggregates free LLM tiers"));
+  check("setup tab renders title + blurb (users know what it is)", fr.includes("Set up OpenRouter") && fr.includes("bring your own OpenRouter key"));
   check("setup tab shows the Local/Remote location toggle", fr.includes("Location") && fr.includes("◀ Local ▶"));
   check("setup tab shows the prefilled URL + a masked-empty key", fr.includes("http://localhost:3001/v1") && fr.includes("(none)"));
   check("setup tab shows Test/Save/Cancel actions", fr.includes("Test connection") && fr.includes("Save & use") && fr.includes("Cancel"));
@@ -667,23 +667,23 @@ cctrl.setBusy(false);
   check("cursor lands on the key row", su.setupRowKinds()[su.setup!.index] === "key");
   su.setupActivate(); // open the key editor
   check("activating the key row opens the editor", su.setup?.editing === "key");
-  su.setupEditChange("freellmapi-abc123"); su.setupEditSubmit();
-  check("typed key is stored + editor closed", su.setup?.key === "freellmapi-abc123" && su.setup?.editing === null);
+  su.setupEditChange("sk-or-abc123"); su.setupEditSubmit();
+  check("typed key is stored + editor closed", su.setup?.key === "sk-or-abc123" && su.setup?.editing === null);
   await tick();
-  check("key renders masked (never shows the raw token)", strip(sf() ?? "").includes("•") && !strip(sf() ?? "").includes("freellmapi-abc123"));
+  check("key renders masked (never shows the raw token)", strip(sf() ?? "").includes("•") && !strip(sf() ?? "").includes("sk-or-abc123"));
 
   // run the live test → status line appears
   su.setupMove(1); // key → test
   su.setupActivate();
   await tick();
-  check("Test connection invokes onTest with the entered url/key", !!tested && (tested as any).url === "http://localhost:3001/v1" && (tested as any).key === "freellmapi-abc123");
+  check("Test connection invokes onTest with the entered url/key", !!tested && (tested as any).url === "http://localhost:3001/v1" && (tested as any).key === "sk-or-abc123");
   check("test result renders under the form", strip(sf() ?? "").includes("✓ connected"));
 
   // Save resolves with {url, key}
   su.setupMove(1); // test → save
   su.setupActivate();
   const result = await sp;
-  check("Save resolves with the entered url + key", !!result && result.url === "http://localhost:3001/v1" && result.key === "freellmapi-abc123");
+  check("Save resolves with the entered url + key", !!result && result.url === "http://localhost:3001/v1" && result.key === "sk-or-abc123");
   await tick();
   check("setup tab closes after Save (input restored)", strip(sf() ?? "").includes("type a task, or /"));
 }
