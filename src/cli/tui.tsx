@@ -816,6 +816,7 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/goal", "keep working until a condition is met"],
   ["/subagents", "parallel subagents on/off"],
   ["/escalation", "escalate a verified-failure turn to fusion (on/off)"],
+  ["/review", "independent refute-reviewer over your current diff"],
   ["/eval", "compute-matched eval"],
   ["/codeact", "code-as-action mode (task)"],
   // ── tools & integrations ──

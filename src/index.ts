@@ -36,6 +36,7 @@ import { loadMcpServers, makeMcpLoaderTool, type McpLoadResult } from "./mcp/man
 import { runCodeAct, CODEACT_SYSTEM } from "./agent/codeact.ts";
 import { runFusion } from "./multimind/fusion.ts";
 import { ensembleModels, detectSignal } from "./multimind/evaluate.ts";
+import { runReview, pickReviewerModel, type Finding } from "./multimind/reviewer.ts";
 import { applySolution as applySolutionStep } from "./multimind/apply.ts";
 import type { WorkerEvent } from "./multimind/runtime.ts";
 import { appendUsage, loadUsage, aggregate, formatUsage, turnCost } from "./usage/log.ts";
@@ -530,6 +531,7 @@ ${c.bold("Commands")}
   ${c.cyan("/goal")} ${c.dim("<condition>")}     keep working until a condition is met ${c.dim("(bounded loop · ESC or /goal stop)")}
   ${c.cyan("/subagents")} ${c.dim("[on|off]")}   parallel subagents ${c.dim("(↑↓ · Enter)")} — Solo may fan out independent read-only sub-tasks; watch them in the footer ${c.dim("(on by default)")}
   ${c.cyan("/escalation")} ${c.dim("[on|off]")}  on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N ${c.dim("(on by default)")}
+  ${c.cyan("/review")}               independent refute-reviewer over your current diff ${c.dim("— reports only correctness bugs it can't refute, then offers to fix them")}
   ${c.cyan("/eval")} ${c.dim("[modes…]")}        compute-matched eval: does each mode beat Solo at equal tokens?
   ${c.cyan("/codeact")} <task>       run a task in code-as-action mode (model emits code, sandboxed)
 
@@ -1506,6 +1508,7 @@ async function handleCommand(line: string): Promise<boolean> {
       await evalTurn(rest);
       break;
     }
+    case "review": await reviewTurn(); break; // refute-reviewer over the current diff (Bugbot pattern)
     case "mcp": {
       if (!mcp.clients.length) { console.log(c.dim("  no MCP servers connected (configure .ob1/mcp.json or mcp.json)")); break; }
       const active = new Set([...tools.keys()].filter((k) => k.startsWith("mcp__")));
@@ -1813,7 +1816,124 @@ async function handleCommand(line: string): Promise<boolean> {
  *  and this function never loops. */
 async function runEscalatedTurn(task: string, esc: { reason: string; report: string }): Promise<void> {
   console.log(c.yellow("  ↗ verified failure — escalating to fusion") + c.dim(` — ${esc.reason}`));
+  // Cheap HEAD-before/after diff so we only auto-review when the escalated apply ACTUALLY wrote something
+  // (applySolution reports whether it dispatched the gated turn, not whether that turn changed files — so
+  // we compare the working diff instead of trusting a dispatch bool). Plan mode never writes → skip both.
+  const before = cfg.planMode ? "" : await collectWorkingDiff();
   await fusionTurn(task, { escalationContext: esc.report });
+  // Auto-review — the Bugbot pattern on the RISKY path: an escalated best-of-N apply is exactly where an
+  // independent refuter earns its keep. Runs AT MOST ONCE per escalated turn (never on the fix turn below),
+  // so it can't loop. Skipped in plan mode, on ESC, and when the apply wrote nothing new.
+  if (cfg.planMode || activeAbort?.signal.aborted) return;
+  const after = await collectWorkingDiff();
+  if (!after || after === before) return; // nothing was written → nothing to review
+  console.log(c.dim("  ↳ auto-reviewing the escalated apply (independent refuter · read-only)…"));
+  const r = await runReview({ cfg, tools, diff: after, task, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return;
+  printReview(r);
+  await maybeApplyReviewFixes(r); // ONE gated fix turn (canEscalateOnFailure:false), never re-reviewed
+}
+
+// ── /review — the refute-reviewer over the current diff (reviewer.ts) ─────────────────────────────
+/** Quote a path for a bash `-c` command line (single-quote, escaping embedded quotes) so filenames with
+ *  spaces/specials in the untracked list can't break the per-file diff command. */
+function shQuote(p: string): string { return `'${p.replace(/'/g, "'\\''")}'`; }
+
+/** The current WORKING-TREE diff: tracked staged+unstaged changes vs HEAD, PLUS untracked files rendered as
+ *  new-file diffs — computed WITHOUT touching the index. `git diff --no-index /dev/null <file>` never uses
+ *  the index (provably index-neutral), unlike the `add -N` / `reset` trick which would clobber the user's
+ *  staged state. Errors are swallowed (2>/dev/null) → a non-git dir yields "" (the caller gates on that). */
+async function collectWorkingDiff(): Promise<string> {
+  const git = (command: string) => shellExec({ cwd: cfg.cwd, sandbox: "off", command, signal: activeAbort?.signal });
+  const tracked = (await git("git -c core.quotePath=false --no-pager diff HEAD --no-color 2>/dev/null")).output;
+  const others = (await git("git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null")).output
+    .split("\n").map((s) => s.trim()).filter(Boolean);
+  let untracked = "";
+  for (const f of others) {
+    // --no-index against /dev/null renders the whole file as an added new-file diff; it exits 1 (differences
+    // found) which shellExec reports without throwing — take the output regardless.
+    untracked += (await git(`git --no-pager diff --no-index --no-color -- /dev/null ${shQuote(f)} 2>/dev/null`)).output;
+  }
+  return (tracked + untracked).trim();
+}
+
+/** What /review should review: the working-tree diff when there is one; otherwise (clean tree) the last
+ *  commit as a fallback so `/review` is still useful right after a commit. A non-git dir returns an error. */
+async function collectReviewDiff(): Promise<{ diff: string; source: string } | { error: string }> {
+  const inside = (await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git rev-parse --is-inside-work-tree 2>/dev/null", signal: activeAbort?.signal })).output.trim();
+  if (inside !== "true") return { error: "not a git repository (or git unavailable) — /review needs git to compute a diff" };
+  const working = await collectWorkingDiff();
+  if (working) return { diff: working, source: "working tree (staged + unstaged + untracked)" };
+  const show = (await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git --no-pager show HEAD --no-color 2>/dev/null", signal: activeAbort?.signal })).output.trim();
+  if (!show) return { error: "nothing to review — the tree is clean and there is no commit to fall back to" };
+  return { diff: show, source: "last commit (working tree is clean) — git show HEAD" };
+}
+
+/** Print a review result: findings as a numbered list (file:line · summary · scenario), a green all-clear on
+ *  NONE, or the raw text dimmed as UNPARSED when the response was garbled (never a false green). */
+function printReview(r: { findings: Finding[]; none: boolean; raw: string; totalInputTokens: number; totalOutputTokens: number }): void {
+  if (r.none) { console.log(c.green("  ✓ reviewer found nothing it couldn't refute")); return; }
+  if (!r.findings.length) {
+    const raw = r.raw.trim();
+    if (!raw) { console.log(c.dim("  reviewer produced no output")); return; }
+    console.log(c.dim("  reviewer response (unparsed — no strict FINDING lines; treat as unreviewed, not clean):"));
+    console.log(raw.split("\n").map((l) => c.dim("  │ " + l)).join("\n"));
+    return;
+  }
+  console.log("\n" + c.bold(`  ${r.findings.length} finding${r.findings.length === 1 ? "" : "s"} that survived refutation:`));
+  r.findings.forEach((f, i) => {
+    const loc = f.line != null ? `${f.file}:${f.line}` : f.file;
+    console.log(`  ${c.cyan(`${i + 1}.`)} ${c.bold(loc)} ${c.dim("—")} ${f.summary}`);
+    console.log(c.dim(`     scenario: ${f.scenario}`));
+  });
+  console.log(c.dim(`  [reviewer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+}
+
+/** The fix-turn message: the reviewer's findings VERBATIM, framed so the agent must either fix each or
+ *  justify it as a false positive (no silent dismissals). Shared by /review and the escalated auto-review. */
+function reviewFixPrompt(findings: Finding[]): string {
+  const list = findings.map((f, i) => {
+    const loc = f.line != null ? `${f.file}:${f.line}` : f.file;
+    return `${i + 1}. ${loc} — ${f.summary}\n   Failure scenario: ${f.scenario}`;
+  }).join("\n");
+  return (
+    "An independent reviewer verified these findings on the current diff. Fix each one, or state explicitly " +
+    "why it is a false positive (name the guard, caller, type, or invariant that makes it safe). Do not make " +
+    `unrelated changes.\n\n${list}`
+  );
+}
+
+/** Offer an approval-gated fix turn for the surviving findings (interactive TTY only; non-TTY just leaves
+ *  the findings printed). The fix turn runs with escalation forced OFF and is NEVER re-reviewed — so neither
+ *  /review nor the escalated auto-review can loop. No-op on a clean/garbled result or in plan mode. */
+async function maybeApplyReviewFixes(r: { findings: Finding[]; none: boolean }): Promise<void> {
+  if (r.none || !r.findings.length) return;
+  if (cfg.planMode) { console.log(c.dim("  (plan mode — not applying fixes; /act to let the findings drive edits)")); return; }
+  if (!stdin.isTTY) return; // non-TTY: findings are already printed; no interactive gate to run a fix turn
+  const ok = await ui.approve("apply fixes for these findings");
+  if (!ok) { console.log(c.dim("  left as-is — the findings above are yours to act on")); return; }
+  const startLen = history.length;
+  // canEscalateOnFailure:false — a review-fix turn must not recursively escalate (one escalation per user
+  // turn), and canSpawn off to keep it a single focused pass.
+  await runTurn(reviewFixPrompt(r.findings), history, turnDeps({ canEscalateOnFailure: false, canSpawn: false }));
+  rememberTurn("apply reviewer findings", startLen, "review");
+  persistSession();
+}
+
+async function reviewTurn(): Promise<void> {
+  if (!modelReachable()) { console.log(c.yellow("  /review needs a model provider (a key, or a configured endpoint via /models)")); return; }
+  const collected = await collectReviewDiff();
+  if ("error" in collected) { console.log(c.dim("  " + collected.error)); return; }
+  const model = pickReviewerModel(ensembleModels(cfg), cfg.model);
+  // Budget declared up front (the existing honest-UX pattern): one read-only worker ≈ one Solo pass. Say
+  // whether an INDEPENDENT model is reviewing (decorrelated errors) or the same one with fresh context.
+  const modelNote = model !== cfg.model ? c.dim(` · independent model ${model} (decorrelated errors)`) : c.dim(" · same model, fresh context (fresh-context errors)");
+  console.log(c.dim(`  budget (declared up front): 1 read-only reviewer worker ≈ 1× a Solo investigation${modelNote}`));
+  console.log(c.dim(`  reviewing ${collected.source} — adversarial refuter: reports only bugs it can't refute…`));
+  const r = await runReview({ cfg, tools, diff: collected.diff, model, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return; // ESC: don't render/act on a partial review
+  printReview(r);
+  await maybeApplyReviewFixes(r);
 }
 
 async function fusionTurn(task: string, opts?: { escalationContext?: string }): Promise<string | undefined> {

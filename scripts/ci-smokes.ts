@@ -38,6 +38,7 @@ const SMOKES = [
   "lsp-smoke.ts",             // LSP diagnostics: message framing + client flow vs a mock server + fallback
   "parity-harness-smoke.ts",  // mock-provider parity: scripted scenarios drive runTurn + assert wire behavior
   "escalation-smoke.ts",      // verified escalation: self-fix budget spent → { escalate } + report; off/plan/apply-turn never escalate
+  "reviewer-smoke.ts",        // refute-reviewer: findings/NONE/garbled parse + read-only worker wiring + model choice + diff bounding
   "fusion-smoke.ts",          // fusion best-of-N + synthesizer + verify-revert
   "fusion-worktree-smoke.ts", // fusion real git-worktree test scoring
   "worker-write-smoke.ts",    // write-capable fusion workers (gated mutating tools) + workspace-copy isolation
