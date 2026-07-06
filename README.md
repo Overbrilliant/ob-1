@@ -12,6 +12,7 @@
 [![npm](https://img.shields.io/npm/v/%40overbrilliant%2Fob1.svg)](https://www.npmjs.com/package/@overbrilliant/ob1)
 [![Homebrew](https://img.shields.io/badge/Homebrew-overbrilliant%2Ftap-orange)](https://github.com/Overbrilliant/homebrew-tap)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Overbrilliant/ob-1)
 
 ![OB-1 start-free demo](docs/media/start-free.gif)
 
