@@ -311,14 +311,18 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
     content.push({ type: "tool_use", id: tc.id, name: tc.name, input });
   }
   const stop_reason = content.some((b) => b.type === "tool_use") || finish === "tool_calls" ? "tool_use" : "end_turn";
-  // Proxy quirk: some OpenAI-compatible endpoints (e.g. FreeLLMAPI's `auto` router) send no usage chunk,
-  // or send all-zeros. Fall back to a local char-based estimate so the meter never reads a misleading 0.
+  // Proxy quirk: some OpenAI-compatible endpoints (e.g. FreeLLMAPI's `auto` router, several free-tier
+  // providers) send no usage chunk, send all-zeros, or report ONLY prompt tokens (completion_tokens
+  // 0/absent) even though a real answer streamed. Fall back to a local char-based estimate so the meter
+  // never reads a misleading 0 — and backfill JUST the output count when the input was reported but the
+  // output wasn't (the "10.1k in / 0.0k out" free-route symptom), keeping the provider's real input total.
+  const toolArgsChars = toolAcc.reduce((n, t) => n + t.name.length + t.args.length, 0);
+  const producedOutput = text.length > 0 || toolArgsChars > 0;
   if (!usage || (usage.input_tokens === 0 && usage.output_tokens === 0)) {
-    usage = estimateUsage(
-      opts,
-      text,
-      toolAcc.reduce((n, t) => n + t.name.length + t.args.length, 0),
-    );
+    usage = estimateUsage(opts, text, toolArgsChars);
+  } else if (usage.output_tokens === 0 && producedOutput) {
+    usage.output_tokens = estimateUsage(opts, text, toolArgsChars).output_tokens;
+    usage.estimated = true;
   }
   return { stop_reason, content, usage, model: resolvedModel };
 }

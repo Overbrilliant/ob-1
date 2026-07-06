@@ -23,9 +23,20 @@ export function decideOnboard(s: OnboardState): boolean {
 }
 type ArrowSelection = number | "skip" | "abort";
 
+/** Grace window (ms) after a lone ESC byte before it counts as the Escape key. A split escape sequence
+ *  (ESC then "[A" for an arrow) arrives within microseconds over a pty, so this disambiguates the two
+ *  imperceptibly — and, crucially, a bare ESC resolves after the window instead of hanging forever. */
+const ESC_GRACE_MS = 50;
+
 /** A minimal up/down arrow selector for the pre-TUI onboarding (the Ink pickers aren't mounted yet).
- *  Returns the chosen index, "skip" for Esc, or "abort" for Ctrl-C. TTY-only (onboarding is). */
-function arrowSelect(title: string, options: string[], opts: { escHint?: string } = {}): Promise<ArrowSelection> {
+ *  Returns the chosen index, "skip" for Esc, or "abort" for Ctrl-C. TTY-only (onboarding is). `input` is
+ *  an injectable seam (defaults to process.stdin) so the key handling is unit-testable without a real pty. */
+export function arrowSelect(
+  title: string,
+  options: string[],
+  opts: { escHint?: string } = {},
+  input: NodeJS.ReadStream = stdin,
+): Promise<ArrowSelection> {
   return new Promise((resolve) => {
     let idx = 0;
     const draw = (first: boolean) => {
@@ -39,19 +50,36 @@ function arrowSelect(title: string, options: string[], opts: { escHint?: string 
     // sub-pickers (hosted account / fallback) truly skip. Keep the hint honest per caller.
     stdout.write(`\n  ${c.bold(title)}  ${c.dim(`(↑/↓ · Enter · ${opts.escHint ?? "Esc skips"} · Ctrl-C aborts)`)}\n`);
     draw(true);
-    const prevRaw = stdin.isRaw;
-    stdin.setRawMode?.(true);
-    stdin.resume();
-    const done = (val: ArrowSelection) => { stdin.off("data", onData); stdin.setRawMode?.(!!prevRaw); stdin.pause(); resolve(val); };
+    const prevRaw = input.isRaw;
+    input.setRawMode?.(true);
+    input.resume();
+    let escTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearEsc = () => { if (escTimer) { clearTimeout(escTimer); escTimer = undefined; } };
+    const done = (val: ArrowSelection) => { clearEsc(); input.off("data", onData); input.setRawMode?.(!!prevRaw); input.pause(); resolve(val); };
+    const up = () => { idx = (idx - 1 + options.length) % options.length; draw(false); };
+    const down = () => { idx = (idx + 1) % options.length; draw(false); };
     const onData = (b: Buffer) => {
       const s = b.toString();
-      if (s === "\x1b[A" || s === "k") { idx = (idx - 1 + options.length) % options.length; draw(false); }
-      else if (s === "\x1b[B" || s === "j") { idx = (idx + 1) % options.length; draw(false); }
-      else if (s === "\r" || s === "\n") done(idx);
-      else if (s === "\x1b") done("skip");
-      else if (s === "\x03") done("abort");
+      // A bare ESC is pending (grace window open): this chunk decides what it was. The tail of a split
+      // escape sequence (an arrow) cancels the skip; anything else means it really was the Escape key.
+      if (escTimer) {
+        clearEsc();
+        if (s === "[A" || s === "OA") return up();
+        if (s === "[B" || s === "OB") return down();
+        return done("skip"); // ESC stood alone (or was followed by an unrelated key) → skip
+      }
+      if (s === "\x1b[A" || s === "\x1bOA" || s === "k") return up();
+      if (s === "\x1b[B" || s === "\x1bOB" || s === "j") return down();
+      if (s === "\r" || s === "\n") return done(idx);
+      if (s === "\x03") return done("abort");
+      if (s === "\x1b") {
+        // Lone ESC byte: the Escape key OR the first byte of an arrow's escape sequence delivered split
+        // across reads (seen over some ptys). Wait a very short grace window; if no continuation arrives,
+        // honor it as Escape → skip. THIS is what makes a bare ESC resolve instead of hanging.
+        escTimer = setTimeout(() => { escTimer = undefined; done("skip"); }, ESC_GRACE_MS);
+      }
     };
-    stdin.on("data", onData);
+    input.on("data", onData);
   });
 }
 

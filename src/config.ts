@@ -368,7 +368,10 @@ function loadPersisted(dir: string): PersistedSettings {
  *  best-effort, so an existing user lands on the in-process router on the next launch without re-setup. */
 function migrateFreellmapiToFree(dir: string, s: PersistedSettings): PersistedSettings {
   if (s.providerProfile !== "freellmapi") return s;
-  const migrated: PersistedSettings = { ...s, providerProfile: "free", model: "auto" };
+  // The embedded router has no URL/key of its own (it routes in-process); clear the stale FreeLLMAPI proxy
+  // endpoint + token so they don't linger in settings.json (matching a fresh `free` activation, which
+  // persists providerUrl:""/providerKey:"").
+  const migrated: PersistedSettings = { ...s, providerProfile: "free", model: "auto", providerUrl: "", providerKey: "" };
   try {
     writeSettingsFile(dir, migrated);
   } catch {

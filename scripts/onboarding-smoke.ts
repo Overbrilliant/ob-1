@@ -4,7 +4,8 @@
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { decideOnboard, isOnboarded, markOnboarded, subscribeFlow } from "../src/cli/onboarding.ts";
+import { EventEmitter } from "node:events";
+import { arrowSelect, decideOnboard, isOnboarded, markOnboarded, subscribeFlow } from "../src/cli/onboarding.ts";
 import { detectEnvProvider, loadConfig, persistActiveProvider } from "../src/config.ts";
 import { ensureKeysFile } from "../src/providers/free/index.ts";
 
@@ -66,7 +67,46 @@ check("named env keys are offered during onboarding, not treated as already conf
   }
 }
 
-// (auth + provider choice are now up/down arrow selectors — interactive, covered by manual e2e)
+// ── arrowSelect key handling (injected mock stdin — deterministic, no real pty) ──
+// Regression: a LONE ESC byte must resolve to "skip" (it once hung >40s over a pty because the handler
+// only matched multi-byte sequences), while a SPLIT escape sequence (ESC then "[B") must still register
+// as an arrow rather than a premature skip.
+{
+  class MockStdin extends EventEmitter {
+    isRaw = false;
+    setRawMode(v: boolean) { this.isRaw = v; return this; }
+    resume() { return this; }
+    pause() { return this; }
+    feed(s: string) { this.emit("data", Buffer.from(s)); }
+  }
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const origWrite = process.stdout.write.bind(process.stdout);
+  (process.stdout as unknown as { write: () => boolean }).write = () => true; // silence the picker's redraw ANSI
+  try {
+    const race = async (p: Promise<unknown>) => Promise.race([p, sleep(600).then(() => "HANG")]);
+    const m1 = new MockStdin();
+    const p1 = arrowSelect("pick", ["a", "b"], {}, m1 as unknown as NodeJS.ReadStream);
+    await sleep(5); m1.feed("\x1b");
+    check("arrowSelect: a lone ESC resolves to skip (no hang)", (await race(p1)) === "skip");
+
+    const m2 = new MockStdin();
+    const p2 = arrowSelect("pick", ["a", "b"], {}, m2 as unknown as NodeJS.ReadStream);
+    await sleep(5); m2.feed("\x1b[B"); m2.feed("\r");
+    check("arrowSelect: down-arrow + Enter selects the next option", (await race(p2)) === 1);
+
+    const m3 = new MockStdin();
+    const p3 = arrowSelect("pick", ["a", "b"], {}, m3 as unknown as NodeJS.ReadStream);
+    await sleep(5); m3.feed("\x1b"); await sleep(10); m3.feed("[B"); m3.feed("\r");
+    check("arrowSelect: a split ESC+[B is an arrow, not a skip", (await race(p3)) === 1);
+
+    const m4 = new MockStdin();
+    const p4 = arrowSelect("pick", ["a", "b"], {}, m4 as unknown as NodeJS.ReadStream);
+    await sleep(5); m4.feed("\x03");
+    check("arrowSelect: Ctrl-C resolves to abort", (await race(p4)) === "abort");
+  } finally {
+    (process.stdout as unknown as { write: typeof origWrite }).write = origWrite;
+  }
+}
 
 // ── subscription flow (injected deps; no TTY/network) ──
 // The flow now just forwards to the server's /pricing page (which owns cadence/tier + Stripe checkout)

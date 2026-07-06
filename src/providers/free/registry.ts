@@ -93,6 +93,16 @@ export interface FreeProvider {
   /** Derive the wire connection from the stored key. Default (undefined) ⇒ {baseUrl, apiKey: key}. Used
    *  by Cloudflare, whose key is `ACCOUNT_ID:TOKEN` and whose URL embeds the account id. */
   resolveConnection?: (key: string) => ResolvedConnection;
+  /** Health-probe override. The background probe GETs `{probeBase}/models` (default: the resolved base
+   *  URL). Some providers don't serve a catalog there, which made a perfectly good key read as health
+   *  "error": `probeBaseUrl(conn)` points the probe at the base whose `/models` DOES exist (GitHub
+   *  Models' catalog lives at a different path than its inference base). */
+  probeBaseUrl?: (conn: ResolvedConnection) => string;
+  /** Skip the /models health probe entirely — health stays "unknown", never a false "error". For a
+   *  provider whose OpenAI-compat endpoint has no usable GET /models at all (Cloudflare: 405 on
+   *  `/ai/v1/models`, and its model list lives at the non-`/models` `/ai/models/search`). Chat still
+   *  works while credits remain; the auth check happens on the real call (which benches on 401/403). */
+  skipProbe?: boolean;
 }
 
 /** Cloudflare Workers AI: the key is `ACCOUNT_ID:TOKEN`. Split on the FIRST ":" — the account id goes in
@@ -127,7 +137,11 @@ export const FREE_PROVIDERS: FreeProvider[] = [
     recommended: true,
     // The catalog stores BARE Gemini ids (e.g. "gemini-2.5-flash"), which the generativelanguage
     // OpenAI-compat endpoint accepts as-is — no per-model mapping hook needed (verified against the
-    // vendored data + the existing GEMINI_API_KEY env route in config.ts).
+    // vendored data + the existing GEMINI_API_KEY env route in config.ts). Live single/simple turns
+    // verified working incl. gemini-3-flash-preview (with and without reasoning_effort). CAVEAT: gemini-3
+    // can 400 mid tool-loop over the OpenAI-compat bridge ("missing thought_sig" — the native
+    // thoughtSignature isn't expressible in OpenAI wire format); that's an upstream/model quirk the
+    // router's failover routes around, not a param-mapping bug on our side.
   },
   {
     id: "groq",
@@ -159,6 +173,10 @@ export const FREE_PROVIDERS: FreeProvider[] = [
     keyEnvName: "GITHUB_API_KEY",
     signupUrl: "https://github.com/settings/tokens",
     recommended: true,
+    // The inference base only serves POST /chat/completions — `…/inference/models` 404s. The model
+    // catalog lives on a SEPARATE path (`…/catalog/models`, verified 200), so probe there instead of
+    // false-flagging a good token as health "error".
+    probeBaseUrl: () => "https://models.github.ai/catalog",
   },
   {
     id: "nvidia",
@@ -222,6 +240,12 @@ export const FREE_PROVIDERS: FreeProvider[] = [
     signupUrl: "https://dash.cloudflare.com",
     keyNote: "key format: ACCOUNT_ID:TOKEN",
     resolveConnection: cloudflareConnection,
+    // GET `…/ai/v1/models` 405s ("GET not supported for requested URI") and the model list lives at the
+    // non-`/models` `…/ai/models/search`, so there's no usable /models probe — skip it (health stays
+    // "unknown", never a false "error"). NOTE: the free tier is a shared 10k-neuron/day cap that
+    // exhausts fast → a live call then 429s with "used up your daily free allocation of … neurons"
+    // (verified); that's upstream quota, not a client bug, and the router correctly benches it on the 429.
+    skipProbe: true,
   },
   {
     id: "cohere",

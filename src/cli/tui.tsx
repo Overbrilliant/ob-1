@@ -31,6 +31,9 @@ export interface Status {
   subscribed?: boolean;
   monthUsed?: number;     // managed credits used this billing month
   monthCap?: number;      // monthly credit cap
+  // Embedded free-models router active: models cost $0, but their resolved ids can regex-match a priced
+  // frontier family, so suppress the $ meter entirely (never print a phantom "~$0.0034" for a free call).
+  free?: boolean;
 }
 
 interface ScrollItem { id: number; text: string; md?: boolean; dim?: boolean; code?: boolean; user?: boolean } // md = inline Markdown; dim = reasoning; code = inside a ``` fence (verbatim); user = a submitted prompt (grey bar)
@@ -702,8 +705,9 @@ function StatusBar({ s, reasoning, procs, agents, busy, stopping, genChars = 0, 
   // they pay a flat plan, so the dollar figure is meaningless to them. Free/custom keeps the $ cost.
   const subscribed = !!s.subscribed && (s.monthCap ?? 0) > 0;
   // inTok is the UNCACHED input; cached tokens still bill (~0.25× input) so fold them in at the cache
-  // rate — otherwise the live cost understates a cache-heavy session.
-  const cost = costForUsage(specModel, s.inTok, s.outTok, s.cacheTok);
+  // rate — otherwise the live cost understates a cache-heavy session. Free-router turns are $0 (their
+  // resolved id may match a priced frontier family, so gate on the route, not the model id).
+  const cost = s.free ? 0 : costForUsage(specModel, s.inTok, s.outTok, s.cacheTok);
   const meter = `${(s.inTok / 1000).toFixed(1)}k in · ${(s.outTok / 1000).toFixed(1)}k out` +
     (s.cacheTok ? ` · ${(s.cacheTok / 1000).toFixed(1)}k cached` : "") +
     (!subscribed && cost ? ` · ~$${cost.toFixed(4)}` : "") + // subscribers see the usage bar, not a $ amount

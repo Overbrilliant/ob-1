@@ -49,8 +49,22 @@ export async function runFreeHealthCheck(force = false, _probe: Prober = fetchMo
       const stale = keyChanged || force || !prev || now - prev.lastCheckedAt > CHECK_INTERVAL_MS;
       if (!stale) continue;
 
+      // No usable GET /models (Cloudflare) → don't probe; leave health "unknown" (never a false "error"),
+      // but stamp lastCheckedAt so kickHealthIfStale doesn't re-fire this provider every window.
+      if (provider.skipProbe) {
+        setHealth(provider.id, {
+          status: "unknown",
+          consecutiveAuthFails: prev?.consecutiveAuthFails ?? 0,
+          keyHash: hash,
+          lastCheckedAt: Date.now(),
+        });
+        continue;
+      }
+
       const conn = resolveConnection(provider, key);
-      const result = await _probe(conn.baseUrl, conn.apiKey);
+      // Some providers serve their catalog at a base other than the chat base (GitHub Models) — probe there.
+      const probeBase = provider.probeBaseUrl ? provider.probeBaseUrl(conn) : conn.baseUrl;
+      const result = await _probe(probeBase, conn.apiKey);
       const base = getHealth(provider.id);
       if (result.ok) {
         setHealth(provider.id, {
@@ -63,6 +77,10 @@ export async function runFreeHealthCheck(force = false, _probe: Prober = fetchMo
         const fails = (base?.consecutiveAuthFails ?? 0) + 1;
         const status: HealthStatus = fails >= CONSECUTIVE_FAILS_TO_DISABLE ? "disabled" : "invalid";
         setHealth(provider.id, { status, consecutiveAuthFails: fails, keyHash: hash, lastCheckedAt: Date.now() });
+      } else if (result.status === 429) {
+        // A 429 means the credential AUTHENTICATED and merely hit a rate/quota cap (a rejected key can't be
+        // throttled) — record healthy, not a misleading "error" (Cohere trial keys throttle the /models GET).
+        setHealth(provider.id, { status: "healthy", consecutiveAuthFails: 0, keyHash: hash, lastCheckedAt: Date.now() });
       } else {
         // Transport error / unexpected non-2xx (e.g. a provider whose /models 404s): mark "error" WITHOUT
         // counting toward disable. "error" does not gate routing — chat may still work.

@@ -42,7 +42,7 @@ import { applySolution as applySolutionStep } from "./multimind/apply.ts";
 import { runPersonas } from "./multimind/personas.ts";
 import { runAdaptive, suggestMode } from "./multimind/router.ts";
 import type { WorkerEvent } from "./multimind/runtime.ts";
-import { appendUsage, loadUsage, aggregate, formatUsage, costForUsage } from "./usage/log.ts";
+import { appendUsage, loadUsage, aggregate, formatUsage, turnCost } from "./usage/log.ts";
 import { loadTasks } from "./eval/tasks.ts";
 import { buildRunners, ALL_MODES, SELECTABLE_MODES } from "./eval/runners.ts";
 import { runEval, computeMatched, computeCapability } from "./eval/harness.ts";
@@ -376,7 +376,7 @@ function accrue(inTok: number, outTok: number, cacheRead = 0, cacheWrite = 0): v
     appendUsage(join(cfg.dataDir, "usage.jsonl"), {
       ts: new Date().toISOString(), model, provider: cfg.provider, mode: cfg.mode,
       in: inTok, out: outTok, cacheRead, cacheWrite,
-      costUsd: costForUsage(model, inTok, outTok, cacheRead, cacheWrite),
+      costUsd: turnCost(cfg.provider, model, inTok, outTok, cacheRead, cacheWrite),
     });
   } catch { /* analytics must never interrupt a turn */ }
 }
@@ -763,7 +763,7 @@ function switchToManaged(model: string): void {
   cfg.providerProfile = undefined;
   cfg.model = model;
   cfg.resolvedModel = undefined;
-  ctrl?.setStatus({ model, resolvedModel: undefined, estTok: false });
+  ctrl?.setStatus({ model, resolvedModel: undefined, estTok: false, free: false }); // managed route bills per token
   persistSubscription(cfg.settingsDir, model); // clears the profile on disk; keeps the per-provider cred map
   console.log(`  model → ${c.cyan(model)}  ${c.dim(describeModel(model))}`);
 }
@@ -808,7 +808,7 @@ async function setupProvider(prof: ProviderProfile = CUSTOM): Promise<boolean> {
   // Model: a typed one (Custom) wins; otherwise a first-time connect adopts the profile default.
   if (res.model) cfg.model = res.model;
   else if (!active) cfg.model = prof.defaultModel;
-  cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false }); // new provider → drop stale resolution/est marker
+  cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false, free: false }); // new provider → drop stale resolution/est marker; URL/key routes price by model
   console.log(`  provider → ${c.cyan(prof.name)}  ${c.dim(url)}`);
   saveSettings(cfg); // persist active provider + per-provider creds + model (global ~/.ob1/settings.json — shared across folders)
   const note = prof.id === "custom" && !cfg.apiKey ? " (no key — sent without auth)" : "";
@@ -850,7 +850,7 @@ function activateFree(model = "auto"): void {
   cfg.model = model;
   cfg.resolvedModel = undefined;
   persistActiveProvider(cfg.settingsDir, "free", "", "", model);
-  ctrl?.setStatus({ model: freeModelLabel(model), resolvedModel: undefined, estTok: false });
+  ctrl?.setStatus({ model: freeModelLabel(model), resolvedModel: undefined, estTok: false, free: true }); // free router → $0, hide the $ meter
 }
 
 /** Open the keys file from a RUNNING session — non-blocking (GUI "open with default app", else print the
@@ -2128,7 +2128,7 @@ async function runRepl(startup: string[]): Promise<void> {
 
 // ─── Ink TUI (interactive TTY) ──────────────────────────────────────────────
 async function runTui(startup: string[]): Promise<void> {
-  ctrl = new TuiController({ model: modelStatusLabel(), mode: cfg.mode, plan: cfg.planMode, inTok: 0, outTok: 0, cacheTok: 0, autopilot: cfg.permissionMode === "autopilot", effort: cfg.effort }, procs, agentReg, todos);
+  ctrl = new TuiController({ model: modelStatusLabel(), mode: cfg.mode, plan: cfg.planMode, inTok: 0, outTok: 0, cacheTok: 0, autopilot: cfg.permissionMode === "autopilot", effort: cfg.effort, free: cfg.providerProfile === "free" }, procs, agentReg, todos);
   // "Get Intelligent Models" footer button — shown only on the Free models provider (free tiers only);
   // Enter opens the subscription pricing page in the browser. Read live so switching providers via /models
   // toggles it. [[no-auto-escalation-to-expensive-modes]]

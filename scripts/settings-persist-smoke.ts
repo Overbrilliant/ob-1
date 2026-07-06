@@ -173,8 +173,10 @@ try {
   process.env.OB1_SETTINGS_DIR = gdirMig;
   const migFree = loadConfig();
   check("legacy freellmapi profile migrates to the embedded free router", migFree.providerProfile === "free" && migFree.provider === "free" && migFree.model === "auto", `${migFree.providerProfile}/${migFree.provider}/${migFree.model}`);
+  check("migration drops the stale FreeLLMAPI endpoint/key from the live config", (migFree.baseUrl ?? "") === "" && !migFree.apiKey, `${migFree.baseUrl}/${migFree.apiKey}`);
   const migPersisted = JSON.parse(readFileSync(join(gdirMig, "settings.json"), "utf8"));
   check("migration is persisted to disk (freellmapi → free / auto)", migPersisted.providerProfile === "free" && migPersisted.model === "auto", JSON.stringify(migPersisted.providerProfile));
+  check("migration clears stale providerUrl/providerKey on disk", migPersisted.providerUrl === "" && migPersisted.providerKey === "", `${JSON.stringify(migPersisted.providerUrl)}/${JSON.stringify(migPersisted.providerKey)}`);
 } finally {
   process.chdir(origCwd);
   rmSync(tmp, { recursive: true, force: true });

@@ -35,6 +35,7 @@ import {
 import { intelligenceComposite } from "../src/providers/free/scoring.ts";
 import { selectCandidates } from "../src/providers/free/router.ts";
 import { callFree, freeStatus, getFreeStrategy, listFreeModels } from "../src/providers/free/index.ts";
+import { costForUsage, turnCost } from "../src/usage/log.ts";
 import { loadConfig, persistedSettings } from "../src/config.ts";
 
 const MINUTE = 60_000;
@@ -252,6 +253,11 @@ async function run(): Promise<void> {
   check("migration: provider profile freellmapi → free", cfg.providerProfile === "free" && cfg.provider === "free");
   check("migration: model reset to auto", cfg.model === "auto");
   check("migration: rewrite is persisted to disk", persistedSettings(settingsDir).providerProfile === "free");
+  check(
+    "migration: stale providerUrl/providerKey cleared on disk",
+    persistedSettings(settingsDir).providerUrl === "" && persistedSettings(settingsDir).providerKey === "",
+    `${JSON.stringify(persistedSettings(settingsDir).providerUrl)}/${JSON.stringify(persistedSettings(settingsDir).providerKey)}`,
+  );
 
   // ── 12. status + listing surfaces ────────────────────────────────────────────
   rmSync(join(settingsDir, "settings.json"), { force: true });
@@ -264,6 +270,30 @@ async function run(): Promise<void> {
   check("freeStatus strategy is valid + catalog version present", getFreeStrategy() === status.strategy && !!status.catalogVersion);
   const groqStatus = status.providers.find((p) => p.id === "groq");
   check("freeStatus flags the keyed provider as hasKey", !!groqStatus?.hasKey && groqStatus.availableCount > 0);
+
+  // ── 13. usage passthrough + free turns are unpriced ($0) ─────────────────────
+  freshState();
+  writeKeys("GROQ_API_KEY=gsk\n");
+  const usageStub = async (o: CallOpts): Promise<ModelResponse> => ({
+    stop_reason: "end_turn",
+    content: [{ type: "text", text: "hello" }],
+    usage: { input_tokens: 10_100, output_tokens: 57 },
+    model: o.model,
+  });
+  const respU = await callFree(makeOpts("auto"), usageStub);
+  check(
+    "usage passthrough: callFree/postProcess keeps real output_tokens (never zeroes them)",
+    respU.usage?.output_tokens === 57 && respU.usage?.input_tokens === 10_100,
+    JSON.stringify(respU.usage),
+  );
+  // A free-router turn is $0 even when its resolved id regex-matches a PRICED frontier family in MODELS[]
+  // (the "~$0.0034" phantom): turnCost gates on the ROUTE, not the model id.
+  const servedFree = respU.model ?? "google/gemini-3-flash-preview";
+  check("free turn is unpriced ($0) via turnCost", turnCost("free", servedFree, 10_100, 500) === 0, String(turnCost("free", servedFree, 10_100, 500)));
+  check(
+    "the same free id WOULD price on a billed route (proves the phantom was real)",
+    costForUsage("google/gemini-3-flash-preview", 10_100, 500) > 0,
+  );
 }
 
 run()

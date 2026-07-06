@@ -43,6 +43,15 @@ export function costForUsage(model: string, inTok: number, outTok: number, cache
   return estimateCost(model, effIn, outTok);
 }
 
+/** USD cost for one turn, priced by ROUTE not just model id. The embedded free-models router serves
+ *  genuinely-free models whose ids (e.g. "google/gemini-3-flash-preview") happen to regex-match a priced
+ *  frontier family in MODELS[] — pricing those by the table would print a phantom "~$0.0034" for a $0 call.
+ *  So provider "free" is always $0; every other route prices by the model's table rate. */
+export function turnCost(provider: string, model: string, inTok: number, outTok: number, cacheRead = 0, cacheWrite = 0): number {
+  if (provider === "free") return 0;
+  return costForUsage(model, inTok, outTok, cacheRead, cacheWrite);
+}
+
 /** Append one usage line. Best-effort: creates the dir, never throws into the turn (caller wraps too). */
 export function appendUsage(path: string, e: UsageEntry): void {
   mkdirSync(dirname(path), { recursive: true });
