@@ -47,7 +47,7 @@ base64 -i DeveloperIDApplication.p12 | pbcopy
 Release artifacts have GitHub artifact attestations. To verify one:
 
 ```sh
-gh release download v0.1.5 --repo Overbrilliant/ob-1 --pattern ob1-darwin-arm64.tar.gz
+gh release download v0.2.0 --repo Overbrilliant/ob-1 --pattern ob1-darwin-arm64.tar.gz
 gh attestation verify ob1-darwin-arm64.tar.gz --repo Overbrilliant/ob-1
 ```
 
@@ -67,7 +67,7 @@ Draft package-manager artifacts live in `packaging/`.
 Run it manually from GitHub Actions, or with:
 
 ```sh
-gh workflow run fresh-install.yml --repo Overbrilliant/ob-1 -f version=v0.1.5
+gh workflow run fresh-install.yml --repo Overbrilliant/ob-1 -f version=v0.2.0
 ```
 
 The workflow also runs on published releases and weekly on Mondays.

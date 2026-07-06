@@ -2,7 +2,7 @@
 
 All notable OB-1 CLI changes are documented here.
 
-## [Unreleased]
+## [0.2.0] - 2026-07-06
 
 - Free models: replaced the external FreeLLMAPI service with an embedded free-models router that runs
   in-process inside the CLI — no second process, no local server, no git clone, no Docker/Node
