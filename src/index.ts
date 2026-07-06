@@ -35,6 +35,7 @@ import { TodoRegistry } from "./agent/todo-registry.ts";
 import { loadMcpServers, makeMcpLoaderTool, type McpLoadResult } from "./mcp/manager.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "./agent/codeact.ts";
 import { runFusion } from "./multimind/fusion.ts";
+import { ensembleModels, detectSignal } from "./multimind/evaluate.ts";
 import { applySolution as applySolutionStep } from "./multimind/apply.ts";
 import type { WorkerEvent } from "./multimind/runtime.ts";
 import { appendUsage, loadUsage, aggregate, formatUsage, turnCost } from "./usage/log.ts";
@@ -1782,28 +1783,43 @@ async function handleCommand(line: string): Promise<boolean> {
 
 async function fusionTurn(task: string): Promise<string | undefined> {
   if (!modelReachable()) { console.log(c.yellow("  fusion needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const models = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
+  // Env vars REFINE the run but never gate a real signal: the auto verifier signal (evaluate.ts) is the
+  // default; OB1_FUSION_* are honored only as explicit overrides.
+  const envModels = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
+  const models = envModels?.length ? envModels : ensembleModels(cfg); // the diversity gate (frontier ensemble on free)
   const n = process.env.OB1_FUSION_N ? envInt("OB1_FUSION_N", 3) : undefined;
   const check = process.env.OB1_FUSION_CHECK;
   const moa = process.env.OB1_FUSION_MOA === "1";
   const judgeModel = process.env.OB1_FUSION_JUDGE_MODEL;
-  const worktree = process.env.OB1_FUSION_WORKTREE === "1";
+  const worktree = process.env.OB1_FUSION_WORKTREE === "1"; // explicit worktree-at-HEAD override (not required)
   const testCmd = process.env.OB1_FUSION_TEST_CMD;
   const targetPath = process.env.OB1_FUSION_TARGET;
-  const nCand = n ?? Math.max(3, models?.length ?? 0);
-  console.log(c.dim(`  budget (declared up front): ~${nCand + 1 + (moa ? nCand : 0)} model calls ≈ ${nCand + 1 + (moa ? nCand : 0)}× a Solo pass`));
+  const nCand = n ?? Math.max(3, models.length);
+  const calls = nCand + (moa ? nCand : 0); // candidates (+ MoA); a selector/synth call is added only sometimes
+  const sig = detectSignal(cfg);
+  const sigNote = sig.tier === "test" ? `real tests (${sig.testCmd})`
+    : sig.tier === "auto" ? `compile gates (${sig.autoCmds.join(" && ") || "auto"})`
+    : "syntax only (no project checks detected)";
+  console.log(c.dim(`  budget (declared up front): ~${calls}–${calls + 1} model calls ≈ ${calls}× a Solo pass (+1 only when a judge is needed)`));
   const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy each";
-  console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) + auto-score → synthesizer merges the best parts${models?.length ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}${worktree ? ` + worktree real-test (${testCmd ?? "bun test"})` : ""}…`));
+  console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) → auto-score [${sigNote}] → select the best (merge only if none pass)${models.length > 1 ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}…`));
   const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
   if (activeAbort?.signal.aborted) return undefined; // ESC: don't render a partial result or apply it
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
   for (const cnd of r.candidates) {
-    const v = !cnd.score?.checked ? c.gray("unscored") : cnd.score.ok ? c.green("PASS") : c.red("FAIL");
-    console.log(c.dim(`  • ${cnd.label} [${cnd.model}] `) + v + c.dim(`  ${cnd.outputTokens} out tok`));
+    const sc = cnd.score;
+    const v = !sc?.checked ? c.gray("unscored") : sc.ok ? c.green("PASS") : c.red("FAIL");
+    // Partial credit surfaced honestly when a candidate failed but passed SOME tests (e.g. 4/5 → "80%").
+    const frac = sc?.checked && !sc.ok && typeof sc.score === "number" && sc.score > 0 ? c.dim(` ${Math.round(sc.score * 100)}%`) : "";
+    console.log(c.dim(`  • ${cnd.label} [${cnd.model}] `) + v + frac + c.dim(`  ${cnd.outputTokens} out tok`));
   }
-  if (r.reverted) console.log(c.yellow("  synthesis failed the objective check → reverted to a passing candidate"));
+  const tierLabel: Record<string, string> = { "copy-checks": "copy checks (real state)", "worktree-tests": "worktree tests", check: "check command", syntax: "syntax", none: "none" };
+  if (r.selected) console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · selected ${c.cyan(r.selected.label)} [${r.selected.model}] by ${r.selected.method}`));
+  else console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · no candidate passed → judge-synthesized a merge`));
+  if (r.reverted) console.log(c.yellow("  the merge regressed below the best candidate → reverted to it"));
+  if (r.failing) console.log(c.red("  ⚠ the result STILL FAILS the objective check — treat it as UNVERIFIED and review before trusting it"));
   console.log("\n" + c.bold(modeColor("fusion")("Fusion result:")) + "\n" + r.synthesis + "\n");
-  console.log(c.dim(`  [${r.candidates.length} candidates + synthesizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+  console.log(c.dim(`  [${r.candidates.length} candidates${r.selected ? "" : " + synthesizer"} · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
   await applySolution(task, r.synthesis);
   return r.synthesis;
 }
