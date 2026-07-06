@@ -33,21 +33,16 @@ import { ProcRegistry } from "./agent/procs.ts";
 import { AgentRegistry } from "./agent/agent-registry.ts";
 import { TodoRegistry } from "./agent/todo-registry.ts";
 import { loadMcpServers, makeMcpLoaderTool, type McpLoadResult } from "./mcp/manager.ts";
-import { fanout } from "./multimind/orchestrator.ts";
-import { runLedger } from "./multimind/ledger.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "./agent/codeact.ts";
 import { runFusion } from "./multimind/fusion.ts";
-import { runCouncil } from "./multimind/council.ts";
 import { applySolution as applySolutionStep } from "./multimind/apply.ts";
-import { runPersonas } from "./multimind/personas.ts";
-import { runAdaptive, suggestMode } from "./multimind/router.ts";
 import type { WorkerEvent } from "./multimind/runtime.ts";
 import { appendUsage, loadUsage, aggregate, formatUsage, turnCost } from "./usage/log.ts";
 import { loadTasks } from "./eval/tasks.ts";
 import { buildRunners, ALL_MODES, SELECTABLE_MODES } from "./eval/runners.ts";
 import { runEval, computeMatched, computeCapability } from "./eval/harness.ts";
 import { renderReport, renderCapability } from "./eval/report.ts";
-import { runTurn, describe as describeTool, systemPrompt, type HeavyMode } from "./agent/loop.ts";
+import { runTurn, describe as describeTool, systemPrompt } from "./agent/loop.ts";
 import { runVerification, shellExec } from "./agent/verify.ts";
 import { latestQualityLedger, formatQualityLedger } from "./agent/task-quality.ts";
 import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
@@ -316,13 +311,11 @@ async function runGoalLoop(goal: string): Promise<void> {
       ? `${goal}\n\n[Goal mode] Work toward this goal. When it is FULLY achieved, end your reply with the exact token GOAL_MET on its own line. If work remains, end with GOAL_CONTINUE.`
       : `Continue toward the goal: ${goal}\n[Goal mode] End with GOAL_MET when fully done, otherwise GOAL_CONTINUE.`;
     const startLen = history.length;
-    const outcome = await runTurn(prompt, history, turnDeps());
+    await runTurn(prompt, history, turnDeps());
     if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
-    const escalatedText = outcome?.escalate ? await runEscalatedTurn(prompt, outcome.escalate) : undefined;
-    if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
-    rememberTurn(prompt, startLen, outcome?.escalate ? `goal→${outcome.escalate.mode}` : "goal");
+    rememberTurn(prompt, startLen, "goal");
     persistSession();
-    const txt = escalatedText ?? lastAssistantText();
+    const txt = lastAssistantText();
     if (/\bGOAL_MET\b/.test(txt)) { console.log(c.green(`  ✓ goal achieved after ${i + 1} iteration(s)`)); activeGoal = null; return; }
     console.log(c.dim(`  ↻ goal iteration ${i + 1}/${maxIters} — not yet met, continuing…`));
   }
@@ -415,17 +408,9 @@ function workerProgress(ev: WorkerEvent): void {
 async function applySolution(task: string, solution: string): Promise<void> {
   await applySolutionStep({
     task, solution, planMode: cfg.planMode,
-    run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canEscalate: false, canSpawn: false, canSpawnWrite: false })); }, // applying a mode's result must not re-escalate or re-spawn
+    run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canSpawn: false, canSpawnWrite: false })); }, // applying a mode's result must not re-spawn
     log: console.log, note: c.dim,
   });
-}
-
-async function runEscalatedTurn(task: string, esc: { mode: HeavyMode; reason: string }): Promise<string | undefined> {
-  const { mode, reason } = esc;
-  console.log(c.dim(`  ↗ Solo routed this to ${modeColor(mode)(mode)} — ${reason}`));
-  if (mode === "fusion") return await fusionTurn(task);
-  if (mode === "council") return await councilTurn(task);
-  return await personasTurn(task);
 }
 
 let activeAbort: AbortController | null = null; // the current turn's cancel handle (ESC); null when idle
@@ -447,7 +432,7 @@ async function autoVerify(): Promise<{ ran: boolean; ok: boolean; report: string
   } catch { return null; }
 }
 
-function turnDeps(overrides?: { canEscalate?: boolean; canSpawn?: boolean; canSpawnWrite?: boolean }) {
+function turnDeps(overrides?: { canSpawn?: boolean; canSpawnWrite?: boolean }) {
   return {
     cfg, tools, store, readCache, approve: ui.approve, interactive: Boolean(stdin.isTTY), log: ui.log, gap: ui.gap, onText: ui.onText, endText: ui.endText,
     onReasoning: ui.onReasoning, endReasoning: ui.endReasoning, onUsage: ui.onUsage, onResolvedModel: ui.onResolvedModel, onErrorAction: ui.onErrorAction,
@@ -461,9 +446,6 @@ function turnDeps(overrides?: { canEscalate?: boolean; canSpawn?: boolean; canSp
     approvals,
     hooks: hooks.hooks,
     hookExec,
-    // The LLM router: offer Solo the escalate tool only when auto-route is on. Callers can force it off
-    // (apply turns) so a heavier mode's own result can't recursively re-escalate.
-    canEscalate: overrides?.canEscalate ?? cfg.autoRoute,
     // Parallel subagents: offer the spawn tool only when enabled; forced off on apply turns (no nesting).
     // Per-subagent progress drives both the inline meter (workerProgress) and the footer registry.
     canSpawn: overrides?.canSpawn ?? cfg.subagents,
@@ -475,9 +457,9 @@ function turnDeps(overrides?: { canEscalate?: boolean; canSpawn?: boolean; canSp
 }
 
 /** Parse a positive-integer env override, falling back to `def` for missing OR malformed values. A bare
- *  Number()/Math.max(1, Number()) yields NaN for e.g. "two", and NaN then poisons the mode loops — Council's
- *  `for (r=1; r<=NaN; …)` never runs, leaving an empty rounds[] and a `rounds[len-1]` crash; eval/personas
- *  trial/round counts behave the same way. */
+ *  Number()/Math.max(1, Number()) yields NaN for e.g. "two", and NaN then poisons the loops it feeds —
+ *  a `for (i=0; i<NaN; …)` never runs, and eval trial counts / Fusion candidate counts behave the same
+ *  way — so a malformed override silently breaks the run instead of falling back to the default. */
 function envInt(name: string, def: number): number {
   const v = process.env[name];
   if (v == null || v === "") return def;
@@ -501,8 +483,8 @@ ${c.bold("Commands")}
 
   ${c.bold("Model & mode")}
   ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} give 150+ free models across 20+ providers, frontier models need a subscription
-  ${c.cyan("/mode")} ${c.dim("[m]")}             pick a mode ${c.dim("(↑↓ · Enter)")} or /mode solo|fusion|council|personas ${c.dim("— heavy modes stay on (sticky); /solo exits")}
-  ${c.cyan("/solo")}                 exit a heavy mode (fusion/council/personas) → back to Solo
+  ${c.cyan("/mode")} ${c.dim("[m]")}             pick a mode ${c.dim("(↑↓ · Enter)")} or /mode solo|fusion ${c.dim("— fusion stays on (sticky); /solo exits")}
+  ${c.cyan("/solo")}                 exit Fusion mode → back to Solo
   ${c.cyan("/plan")} ${c.dim("|")} ${c.cyan("/act")}           toggle read-only Plan vs Act mode
   ${c.cyan("/effort")} ${c.dim("[low|medium|high]")}  reasoning effort ${c.dim("(↑↓ · Enter)")} — thinking budget for models that support it ${c.dim("(default medium)")}
 
@@ -538,12 +520,7 @@ ${c.bold("Commands")}
 
   ${c.bold("Orchestration modes")}
   ${c.cyan("/goal")} ${c.dim("<condition>")}     keep working until a condition is met ${c.dim("(bounded loop · ESC or /goal stop)")}
-  ${c.cyan("/autoroute")} ${c.dim("[on|off]")}   Solo auto-routing ${c.dim("(↑↓ · Enter)")} — Solo itself decides (via the escalate tool) when a turn needs a heavier mode ${c.dim("(off by default)")}
   ${c.cyan("/subagents")} ${c.dim("[on|off]")}   parallel subagents ${c.dim("(↑↓ · Enter)")} — Solo may fan out independent read-only sub-tasks; watch them in the footer ${c.dim("(on by default)")}
-  ${c.cyan("/route")} <task>         one-shot adaptive: Solo first, escalate only if the task warrants it AND the check fails
-  ${c.cyan("/fanout")} <task>        multi-mind: N isolated workers + synthesis (~Nx tokens)
-  ${c.cyan("/council")} <task>       author ↔ reviewer revise rounds (≤3) → comprehensive finalizer
-  ${c.cyan("/personas")} <task>      goal → expert panel dialogue → facilitator finalizes
   ${c.cyan("/eval")} ${c.dim("[modes…]")}        compute-matched eval: does each mode beat Solo at equal tokens?
   ${c.cyan("/codeact")} <task>       run a task in code-as-action mode (model emits code, sandboxed)
 
@@ -1044,18 +1021,12 @@ async function pickModel(): Promise<void> {
 // One-line description of what each mode does — shown after a switch and as a picker hint.
 function modeNote(m: Mode): string {
   return m === "fusion" ? "each task → N same-prompt candidates, auto-scored, synthesizer merges the best parts"
-    : m === "council" ? "each task → author ↔ reviewer revise rounds, then a comprehensive finalizer"
-    : m === "personas" ? "each goal → a tailored expert panel dialogue, then facilitator synthesis"
-    : m === "adaptive" ? "Solo first; escalate only when the task warrants deeper analysis AND the objective check fails"
     : "one model, one pass — the frugal default";
 }
-// Rough cost multiplier shown in the per-turn "still in <mode>" reminder — these modes fan out into
+// Rough cost multiplier shown in the per-turn "still in <mode>" reminder — Fusion fans out into
 // several model calls, so a stray heavy turn is expensive. Approximate, by design (depends on the task).
 function modeCostHint(m: Mode): string {
-  return m === "fusion" ? "~3× cost — candidates + synthesis"
-    : m === "council" ? "~3× cost — author ↔ reviewer rounds"
-    : m === "personas" ? "~5× cost — multi-expert panel"
-    : "";
+  return m === "fusion" ? "~3× cost — candidates + synthesis" : "";
 }
 /** Set when a heavy mode is freshly selected, so the FIRST turn after selection skips the "still in …"
  *  reminder (the user just chose it); every later turn shows it. Consumed in processLine. */
@@ -1099,7 +1070,7 @@ function setQualityMode(q: QualityMode): void {
 // shows the keys, so titles stay terse.
 async function pickMode(): Promise<void> {
   if (!ui.pick) return;
-  const topo: Mode[] = ["solo", "fusion", "council", "personas"];
+  const topo: Mode[] = ["solo", "fusion"];
   const items: { label: string; hint?: string; value: string }[] = topo.map((x) => ({ label: x, hint: modeNote(x), value: x }));
   // Plan/act is part of HOW a turn runs, so it lives in the mode picker (not a separate setting).
   items.push({
@@ -1140,14 +1111,6 @@ async function pickEffort(): Promise<void> {
     { label: "high", hint: "deepest — a large thinking budget; slower + more tokens", value: "high" },
   ], cfg.effort ?? "medium");
   if (e) setEffort(e as Effort);
-}
-async function pickAutoRoute(): Promise<void> {
-  if (!ui.pick) return;
-  const a = await ui.pick("Solo auto-route", [
-    { label: "off", hint: "always stay Solo (default) — never auto-escalate", value: "off" },
-    { label: "on", hint: "Solo may route a hard/high-stakes turn to Fusion/Council/Personas (it decides)", value: "on" },
-  ], cfg.autoRoute ? "on" : "off");
-  if (a) { cfg.autoRoute = a === "on"; console.log(`  auto-route ${cfg.autoRoute ? c.yellow("ON") : "off"}${c.dim(" — Solo decides per-turn whether to route to a heavier mode")}`); }
 }
 async function pickSubagents(): Promise<void> {
   if (!ui.pick) return;
@@ -1507,9 +1470,9 @@ async function handleCommand(line: string): Promise<boolean> {
     case "rewind": await rewindCmd(rest); break;
     case "mode": {
       const m = rest[0] as Mode;
-      if (["solo", "fusion", "council", "personas"].includes(m)) setMode(m);
+      if (["solo", "fusion"].includes(m)) setMode(m);
       else if (!rest[0] && ui.pick) await pickMode();   // bare /mode opens the picker on a TTY
-      else console.log(c.red("  usage: /mode solo|fusion|council|personas"));
+      else console.log(c.red("  usage: /mode solo|fusion"));
       break;
     }
     case "solo": setMode("solo"); break; // quick exit from a sticky heavy mode
@@ -1519,51 +1482,6 @@ async function handleCommand(line: string): Promise<boolean> {
       const map = buildRepoMap(cfg.cwd);
       console.log("\n" + renderRepoMap(map, { maxFiles: 20 }));
       console.log(c.dim(`\n  ${map.totalFiles} files · ${map.totalSymbols} symbols\n`));
-      break;
-    }
-    case "fanout": {
-      if (!modelReachable()) { console.log(c.yellow("  /fanout needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /fanout <task>")); break; }
-      // Optional dual-ledger controller (item #11): act → assess → re-plan-on-stall, bounded. Default
-      // OFF; OB1_ORCH_LEDGER=1 routes /fanout through it instead of the single-shot fan-out.
-      if (process.env.OB1_ORCH_LEDGER === "1") {
-        console.log(c.dim("  dual-ledger orchestration (act → assess → re-plan on stall)…"));
-        const lr = await runLedger({ ledger: { task: arg, facts: [], guesses: [], plan: [arg] }, cfg, tools, onEvent: workerProgress, signal: activeAbort?.signal });
-        if (activeAbort?.signal.aborted) break;
-        const status = lr.satisfied ? c.green("satisfied") : lr.stalledOut ? c.yellow("stalled out (recovery exhausted)") : c.yellow("round cap reached");
-        console.log("\n" + c.bold("Ledger result:") + "\n" + lr.finalText + "\n");
-        console.log(c.dim(`  [${status} · ${lr.rounds} rounds · ${lr.replans} re-plans · ~${lr.totalInputTokens} in / ${lr.totalOutputTokens} out tokens]`));
-        break;
-      }
-      console.log(c.dim("  spawning isolated workers (multi-mind — uses ~Nx tokens)…"));
-      const r = await fanout({ task: arg, cfg, tools, onEvent: workerProgress, signal: activeAbort?.signal });
-      if (activeAbort?.signal.aborted) break; // ESC
-      // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-      for (const w of r.workers) console.log(c.dim(`  • ${w.label}: ${w.outputTokens} out tok${w.ok ? "" : c.yellow(" (incomplete)")}`));
-      console.log("\n" + c.bold("Synthesis:") + "\n" + r.synthesis + "\n");
-      console.log(c.dim(`  [${r.workers.length} workers + synthesizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens total]`));
-      // Persist the synthesized result like Fusion/Council/Personas do: the fan-out workers run read-only
-      // in isolated contexts, so without this the synthesis is only PRINTED and never lands on disk. Gated
-      // by shouldApply (only writes when the synthesis carries code, and never in Plan mode).
-      await applySolution(arg, r.synthesis);
-      break;
-    }
-    case "council": {
-      if (!modelReachable()) { console.log(c.yellow("  /council needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /council <task>")); break; }
-      await councilTurn(arg);
-      break;
-    }
-    case "personas": {
-      if (!modelReachable()) { console.log(c.yellow("  /personas needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /personas <task>")); break; }
-      await personasTurn(arg);
-      break;
-    }
-    case "route": {
-      if (!modelReachable()) { console.log(c.yellow("  /route needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /route <task>")); break; }
-      await adaptiveTurn(arg);
       break;
     }
     case "eval": {
@@ -1682,7 +1600,7 @@ async function handleCommand(line: string): Promise<boolean> {
       // /settings was a menu that just duplicated the slash commands. It's gone — every setting is now a
       // first-class command. Keep a friendly redirect so old muscle memory isn't a dead "unknown command".
       console.log(c.dim("  settings are now individual commands — press / to browse them:"));
-      console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /autoroute · /subagents · /repomap · /quality · /trust · /allow"));
+      console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /subagents · /repomap · /quality · /trust · /allow"));
       break;
     case "free": {
       // Manage the shared free-models pool (works regardless of the active profile): keys file, routing
@@ -1739,14 +1657,6 @@ async function handleCommand(line: string): Promise<boolean> {
           }
         }
       } else console.log(c.red(`  usage: /quality normal|strict|off|show|scenarios (current: ${cfg.qualityMode})`));
-      break;
-    }
-    case "autoroute": {
-      if (rest[0] === "on" || rest[0] === "off") {
-        cfg.autoRoute = rest[0] === "on";
-        console.log(`  auto-route ${cfg.autoRoute ? c.yellow("ON") : "off"}`);
-      } else if (!rest[0] && ui.pick) await pickAutoRoute();  // bare /autoroute opens an on/off picker on a TTY
-      else console.log(c.red(`  usage: /autoroute on|off (current: ${cfg.autoRoute ? "on" : "off"})`));
       break;
     }
     case "subagents": {
@@ -1898,53 +1808,6 @@ async function fusionTurn(task: string): Promise<string | undefined> {
   return r.synthesis;
 }
 
-async function councilTurn(task: string): Promise<string | undefined> {
-  if (!modelReachable()) { console.log(c.yellow("  council needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const models = process.env.OB1_COUNCIL_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
-  const check = process.env.OB1_COUNCIL_CHECK;
-  const arbiterModel = process.env.OB1_COUNCIL_ARBITER_MODEL;
-  const maxR = envInt("OB1_COUNCIL_ROUNDS", 3);
-  const twoModels = (models?.length ?? 0) > 1;
-  // Council workers edit the REAL workspace directly; gate each mutating action with the same approval Solo
-  // uses (autopilot → no prompt; ask → prompt). In Plan mode the workers stay read-only (nothing written).
-  const workerApprove = cfg.permissionMode === "autopilot" ? undefined : (desc: string) => ui.approve(desc);
-  console.log(c.dim(`  budget (declared up front): up to ~${1 + maxR * 2 + 1} model calls (author + ${maxR}×(review + revise) + finalizer), fewer if it converges early`));
-  console.log(c.dim(`  Council: author ↔ reviewer${twoModels ? ` (2 models)` : ""}${check ? " · objective-grounded" : ""} over up to ${maxR} round(s) · ${cfg.planMode ? "read-only (plan mode)" : "editing the workspace directly" + (cfg.permissionMode === "autopilot" ? "" : ", each change gated")}…`));
-  const r = await runCouncil({ task, cfg, tools, rounds: maxR, models, check, arbiterModel, approve: workerApprove, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return undefined; // ESC
-  // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  for (const rd of r.rounds) {
-    const tag = rd.blocking ? c.red("BLOCK") : c.green("OK");
-    console.log(c.dim(`  • round ${rd.round}: `) + tag + c.dim(rd.revisedThisRound ? " → revised" : " → no revision needed"));
-  }
-  const v = r.accepted ? c.green("ACCEPT") : c.yellow("REVISE");
-  console.log("\n" + c.bold(modeColor("council")("Council result")) + " " + v + ":\n" + r.final + "\n");
-  console.log(c.dim(`  [${r.rounds.length} round(s) · author + reviewer + finalizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  // No separate apply step: the workers already wrote their changes to the real workspace as they went.
-  if (cfg.planMode) console.log(c.dim("  (plan mode — council investigated read-only; nothing written. /act to let it edit the workspace.)"));
-  else if (r.accepted) console.log(c.dim("  council edited the workspace directly; changes are in place — review and verify them."));
-  else console.log(c.yellow("  ⚠ council returned REVISE (not ready to ship). Any edits it made are already in the workspace — review them and re-run or refine the task."));
-  return r.final;
-}
-
-async function personasTurn(task: string): Promise<string | undefined> {
-  if (!modelReachable()) { console.log(c.yellow("  personas needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const rounds = envInt("OB1_PERSONAS_ROUNDS", 2);
-  const max = envInt("OB1_PERSONAS_MAX", 6);
-  console.log(c.dim(`  budget (declared up front): up to ~${1 + max * rounds + 1} model calls (former + ≤${max} personas × ${rounds} dialogue rounds + facilitator), or 1 if it collapses to Solo`));
-  console.log(c.dim("  Personas: casting the panel for your goal…"));
-  const r = await runPersonas({ task, cfg, tools, rounds, max, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return undefined; // ESC
-  // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  const names = r.personas.map((p) => (p.title ? `${p.name} (${p.title})` : p.name)).join(", ");
-  if (r.collapsed) console.log(c.dim(`  panel collapsed to a single solver: ${c.bold(names)} (goal didn't warrant a panel)`));
-  else console.log(c.dim(`  panel (${r.personas.length}): `) + c.bold(names) + c.dim(` · ${r.dialogue.turns.length} turns over ${r.rounds} round(s) · facilitator: ${r.personas[0].name}`));
-  console.log("\n" + c.bold(modeColor("personas")("Personas result:")) + "\n" + r.final + "\n");
-  console.log(c.dim(`  [${r.collapsed ? "collapsed→solo" : `${r.personas.length} personas + facilitator`} · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  await applySolution(task, r.final);
-  return r.final;
-}
-
 async function evalTurn(requested: string[]): Promise<void> {
   if (!modelReachable()) { console.log(c.yellow("  eval needs a model provider (a key, or a configured endpoint via /models)")); return; }
   const picked = requested.filter((m) => (SELECTABLE_MODES as readonly string[]).includes(m));
@@ -1955,30 +1818,8 @@ async function evalTurn(requested: string[]): Promise<void> {
   console.log(c.yellow(`  ⚠ Eval spends real tokens: ${tasks.length} task(s) × ${modes.join(", ")} × ${trials} trial(s)…`));
   const runners = buildRunners(cfg, tools, modes);
   const outcomes = await runEval({ tasks, runners, cwd: cfg.cwd, trials, onProgress: (m) => console.log(c.dim("  · " + m)) });
-  console.log("\n" + c.bold(modeColor("adaptive")("Capability (solve what Solo fails)")) + "\n" + renderCapability(computeCapability(outcomes, { baseline: "solo" })) + "\n");
-  console.log(c.bold(modeColor("council")("Compute-matched (efficiency)")) + "\n" + renderReport(computeMatched(outcomes, { baseline: "solo" })) + "\n");
-}
-
-async function adaptiveTurn(task: string, hint?: { mode: "fusion" | "council" | "personas"; why: string }): Promise<void> {
-  if (!modelReachable()) { console.log(c.yellow("  adaptive needs a model provider (a key, or a configured endpoint via /models)")); return; }
-  const check = process.env.OB1_ROUTE_CHECK;
-  // Escalation target: env override, else derive from the difficulty signal (risk/design → Council's
-  // critique; hard/high-value → Fusion's best-of-N). Council/Fusion are the only escalation topologies.
-  const escalateTo = process.env.OB1_ROUTE_ESCALATE === "council" ? "council"
-    : hint && hint.mode !== "fusion" ? "council" : "fusion";
-  const models = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
-  // If this escalates to Council, its workers edit the REAL tree — gate each mutating action with the
-  // SAME approval Solo/council uses (autopilot → no prompt; ask → prompt), and honor Plan mode (read-only).
-  const workerApprove = cfg.permissionMode === "autopilot" ? undefined : (desc: string) => ui.approve(desc);
-  console.log(c.dim(`  Adaptive${hint ? ` (${hint.why})` : ""}: Solo first; escalate to ${escalateTo} only if the task warrants it AND the objective check fails${check ? "" : c.yellow(" (no OB1_ROUTE_CHECK set → syntax signal only)")}…`));
-  const r = await runAdaptive({ task, cfg, tools, check, escalateTo, models, requireDifficultySignal: true, approve: workerApprove, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return; // ESC
-  // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  const tag = r.path === "solo" ? c.gray("solo (Solo passed → no escalation)") : modeColor(r.path)(`${r.path} (Solo failed the check → escalated)`);
-  console.log(c.dim("  path: ") + tag);
-  console.log("\n" + c.bold(modeColor("adaptive")("Adaptive result:")) + "\n" + r.final + "\n");
-  console.log(c.dim(`  [~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  await applySolution(task, r.final);
+  console.log("\n" + c.bold(modeColor("fusion")("Capability (solve what Solo fails)")) + "\n" + renderCapability(computeCapability(outcomes, { baseline: "solo" })) + "\n");
+  console.log(c.bold(modeColor("solo")("Compute-matched (efficiency)")) + "\n" + renderReport(computeMatched(outcomes, { baseline: "solo" })) + "\n");
 }
 
 // ─── per-line dispatch (shared by REPL + TUI) ───────────────────────────────
@@ -2011,32 +1852,19 @@ async function processLine(line: string): Promise<boolean> {
   // Heavy modes are sticky (persist until switched). To keep that from silently running every later
   // prompt at multiplied cost, show a visible reminder before each heavy turn — except the very first
   // turn right after selection (the user just chose it). `/solo` exits.
-  if (cfg.mode === "fusion" || cfg.mode === "council" || cfg.mode === "personas") {
+  if (cfg.mode === "fusion") {
     if (!modeJustSet) console.log(c.yellow(`  ⚠ still in ${modeColor(cfg.mode)(cfg.mode.toUpperCase())} (${modeCostHint(cfg.mode)}) · ${c.cyan("/solo")} to exit`));
     modeJustSet = false;
   }
   const startLen = history.length;
   if (cfg.mode === "fusion") { await fusionTurn(turnText); rememberTurn(t, startLen, "fusion"); persistSession(); return false; }
-  if (cfg.mode === "council") { await councilTurn(turnText); rememberTurn(t, startLen, "council"); persistSession(); return false; }
-  if (cfg.mode === "personas") { await personasTurn(turnText); rememberTurn(t, startLen, "personas"); persistSession(); return false; }
-  // (no `adaptive` branch — it's retired as a mode; auto-routing is the cfg.autoRoute toggle below)
-  // Auto-route OFF: a pure-regex *nudge* (no extra model call) suggesting a heavier mode — purely advisory.
-  if (!cfg.autoRoute) {
-    const hint = suggestMode(t);
-    if (hint) console.log(c.dim(`  💡 looks ${hint.why} — ${c.cyan("/mode " + hint.mode)} for deeper analysis · auto-route is off (${c.cyan("/autoroute on")} to enable). Continuing in Solo…`));
-  }
-  // Auto-route ON: Solo gets the `escalate` tool (offered via turnDeps.canEscalate) and decides DURING its
-  // normal response whether the task needs a heavier mode. No upfront probe call — an easy turn is one Solo
-  // call; only a genuinely hard turn pays for the heavier mode. If it escalated, forward the whole task.
-  const outcome = await runTurn(turnText, history, turnDeps());
-  if (outcome?.escalate) {
-    await runEscalatedTurn(turnText, outcome.escalate);
-  }
-  rememberTurn(t, startLen, outcome?.escalate ? `solo→${outcome.escalate.mode}` : "solo");
+  // Solo: one careful pass. (Verified escalation to Fusion on a failed check is reintroduced in Wave 3.)
+  await runTurn(turnText, history, turnDeps());
+  rememberTurn(t, startLen, "solo");
   persistSession(); // write the conversation so /resume can reopen it
   // Auto skill learning (opt-in, OFF by default): distil this turn into reusable procedural memory.
-  // One cheap brain call, only on a substantive non-escalated Solo turn. Never blocks/breaks the turn.
-  if (cfg.skillLearn && memBrain && !outcome?.escalate) {
+  // One cheap brain call, only on a substantive Solo turn. Never blocks/breaks the turn.
+  if (cfg.skillLearn && memBrain) {
     try {
       const res = await maybeLearnSkill({ cwd: cfg.cwd, slice: history.slice(startLen), existing: listSkills(cfg.cwd, { includeArchived: true }), ask: memBrain.ask });
       if (res.action !== "none" && res.name) console.log(c.dim(`  💾 ${res.action === "create" ? "learned" : "refined"} skill: ${c.cyan(res.name)}`));
@@ -2339,10 +2167,12 @@ try {
   const a = analyzeBranch(gs);
   if (a.stale) startup.push(c.yellow(`  ⚠ ${a.recommendation}`));
 } catch { /* best-effort — never block boot on git */ }
-// One-time migration note: `adaptive` mode is now the Solo auto-route toggle. loadConfig collapsed any
-// adaptive workspace to Solo, so this is always accurate; saveSettings rewrites mode:"solo" → shows once.
-if (persistedSettings(cfg.settingsDir).mode === "adaptive") {
-  startup.push(c.yellow(`  note: 'adaptive' mode is now a Solo auto-route toggle — you're in Solo (auto-route ${cfg.autoRoute ? "on" : "off"}). Change it with /autoroute.`));
+// One-time migration note: the retired heavy modes (council/personas) and the old adaptive router are
+// gone — a workspace persisted in any of them now loads as Solo. loadConfig already collapsed it, so this
+// is always accurate; saveSettings rewrites mode:"solo" → the note shows a single time.
+const persistedMode = persistedSettings(cfg.settingsDir).mode as string | undefined;
+if (persistedMode && persistedMode !== "solo" && persistedMode !== "fusion") {
+  startup.push(c.yellow(`  note: '${persistedMode}' mode has been retired — you're now in Solo. Use ${c.cyan("/mode fusion")} for best-of-N, or ${c.cyan("/eval")} to compare modes.`));
   saveSettings(cfg);
 }
 // The embedded free-models router has no process to start — it routes in-process. Kick a best-effort,

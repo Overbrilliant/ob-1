@@ -25,7 +25,6 @@ back to disk.
 | `OB1_PERMISSION` | `autopilot`, `ask` | Tool approval mode. |
 | `OB1_SANDBOX` | `off`, `workspace-write`, `read-only` | OS sandbox mode. |
 | `OB1_EFFORT` | `low`, `medium`, `high` | Reasoning effort hint. |
-| `OB1_AUTO_ROUTE` | `on`, `off` | Adaptive solo-to-multi-agent routing. |
 | `OB1_SUBAGENTS` | `on`, `off` | Read-only subagent planning/reporting. |
 | `OB1_REPO_MAP` | `on`, `off` | Automatic repository map context. |
 | `OB1_CHECKPOINT` | `on`, `off` | Shadow-git checkpoints and `/rewind`. |

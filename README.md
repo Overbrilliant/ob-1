@@ -192,15 +192,10 @@ Start with `solo`. Switch modes only when the task benefits from extra work.
 | --- | --- |
 | `solo` | Normal coding tasks. Fastest and cheapest path. |
 | `fusion` | Several candidate solutions, checked and merged into one result. |
-| `council` | Author and reviewer rounds before the final answer. |
-| `personas` | A small expert panel for product, design, architecture, or strategy tradeoffs. |
 
 ```text
 /mode solo
 /mode fusion
-/mode council
-/mode personas
-/autoroute on    let Solo route hard turns to a heavier mode
 ```
 
 ## Commands

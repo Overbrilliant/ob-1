@@ -79,9 +79,6 @@ export interface TurnDeps {
   hookExec?: HookExec;
   /** External cancellation (ESC) — stops the turn between/within model calls. */
   signal?: AbortSignal;
-  /** When true, Solo is offered the `escalate` tool — it may hand the whole turn to a heavier mode
-   *  (set from cfg.autoRoute). Suppressed on apply turns so a mode's own result can't re-escalate. */
-  canEscalate?: boolean;
   /** When true, Solo is offered the `spawn_subagents` tool — it may fan out independent read-only
    *  sub-tasks in parallel (set from cfg.subagents). Suppressed on apply turns (no nested spawn). */
   canSpawn?: boolean;
@@ -98,39 +95,17 @@ export interface TurnDeps {
   _runWorker?: typeof runWorker;
 }
 
-/** A heavier multi-agent mode Solo can route a hard turn to (the escalation targets). */
-export type HeavyMode = "fusion" | "council" | "personas";
-
-/** What a Solo turn yields back to the dispatcher. `escalate` set ⇒ Solo judged the task too
- *  complex for one pass and the caller should re-run it in the named mode. */
-export interface TurnOutcome { escalate?: { mode: HeavyMode; reason: string } }
-
-// The LLM router: instead of a brittle regex guessing difficulty up front (and paying a probe call),
-// Solo decides DURING the response it was already making. If the task is too hard/high-stakes for a
-// single pass, it calls `escalate` and the dispatcher forwards the whole turn — otherwise it just
-// answers, so an easy turn costs exactly one Solo call. Only advertised when canEscalate (autoRoute on).
-const ESCALATE_TOOL: ToolDef = {
-  name: "escalate",
-  description:
-    "Hand THIS task off to a heavier multi-agent mode when solving it well in a single pass is unlikely. " +
-    "Call it BEFORE doing the work (it forwards the whole task; you won't continue). Default to answering " +
-    "directly — only escalate when one pass would be wrong or shallow. Pick the mode by failure shape: " +
-    "fusion = a hard/tricky algorithm or performance problem (parallel best-of-N, then merge); " +
-    "council = a correctness-, security-, or risk-critical change (author ↔ reviewer revise rounds, then a finalizer); " +
-    "personas = an open-ended design / architecture / trade-off question (a tailored expert-panel dialogue).",
-  input_schema: {
-    type: "object",
-    properties: {
-      mode: { type: "string", enum: ["fusion", "council", "personas"], description: "the heavier mode to route to" },
-      reason: { type: "string", description: "one concise phrase on why a single Solo pass is insufficient" },
-    },
-    required: ["mode", "reason"],
-  },
-};
+/** What a Solo turn yields back to the dispatcher. Effectively empty in Wave 1a — the LLM `escalate`
+ *  router was removed here and Wave 3 reintroduces escalation with new (verified-failure) semantics.
+ *  Kept as a named, extensible interface so runTurn's signature and every caller survive the rework
+ *  unchanged; the `_reserved` slot is a placeholder Wave 3 replaces with real fields (a bare `{}`
+ *  interface trips biome's noEmptyInterface, and `{}` satisfies `{ _reserved?: never }`). */
+export interface TurnOutcome {
+  _reserved?: never;
+}
 
 // Decomposition parallelism: Solo splits a big task into INDEPENDENT read-only sub-tasks and runs them
-// concurrently, getting each one's findings back to synthesize. Distinct from escalate (which forwards a
-// whole turn to a heavier mode). Only advertised when canSpawn (cfg.subagents on).
+// concurrently, getting each one's findings back to synthesize. Only advertised when canSpawn (cfg.subagents on).
 const SPAWN_TOOL: ToolDef = {
   name: "spawn_subagents",
   description:
@@ -430,7 +405,6 @@ export function describe(name: string, input: any): string {
     // ── PRs · orchestration ──
     case "create_pr": return `Opening PR: ${oneline(i.title)}`;
     case "pr_checks": return i.pr ? `Checking PR #${i.pr}` : "Checking PR status";
-    case "escalate": return `Escalating to ${i.mode} mode`;
     case "spawn_subagents": { const n = Array.isArray(i.subtasks) ? i.subtasks.length : 0; return `Spawning ${n} subagent${n === 1 ? "" : "s"}`; }
     case "spawn_write_subagents": { const n = Array.isArray(i.subtasks) ? i.subtasks.length : 0; return `Spawning ${n} write subagent${n === 1 ? "" : "s"}`; }
 
@@ -595,8 +569,6 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   const addStable = (s: string) => { system[0].text += "\n\n" + s; };
   const addVolatile = (s: string) => { system[1].text += "\n\n" + s; };
   if (quality) addVolatile(renderTaskQualityContract(quality.ledger.profile, qualityMode));
-  if (deps.canEscalate)
-    addStable("Auto-route is ON: you have the `escalate` tool. If this turn is too hard or high-stakes to solve well in a single pass, call escalate FIRST to forward it to a heavier mode; otherwise just answer (don't escalate routine work).");
   if (deps.canSpawn)
     addStable("Subagents are ON: you have the `spawn_subagents` tool. For a big task that splits into INDEPENDENT parts (investigate several files/areas, research several options, audit several modules), call it with one self-contained sub-task per part to run them in parallel and get each one's findings; then synthesize and act yourself. Don't use it for small, serial, or interdependent work.");
   if (deps.canSpawnWrite)
@@ -646,7 +618,6 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
 
     // Recompute each step so tools activated mid-turn (e.g. via load_mcp_tool) become available.
     const toolDefs: ToolDef[] = [...tools.values()].map((t) => t.def);
-    if (deps.canEscalate) toolDefs.push(ESCALATE_TOOL); // LLM router: Solo-only, advertised only when autoRoute is on
     if (deps.canSpawn) toolDefs.push(SPAWN_TOOL);        // parallel subagents: Solo-only, advertised only when cfg.subagents on
     if (deps.canSpawnWrite) toolDefs.push(SPAWN_WRITE_TOOL); // parallel write-subagents: opt-in (OB1_SUBAGENTS_WRITE)
     let resp;
@@ -821,25 +792,6 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       return {};
     }
     stepsWithTools++; // this step emitted ≥1 tool call — the turn did real work (not a degenerate no-op)
-
-    // LLM router: Solo called `escalate` → judge that this turn needs a heavier mode. Stop here and hand
-    // the whole task back to the dispatcher (which re-runs it in that mode). We still answer EVERY tool_use
-    // in this assistant message with a tool_result so `history` stays valid for the later apply turn.
-    const escTU = deps.canEscalate ? toolUses.find((tu) => tu.name === "escalate") : undefined;
-    if (escTU) {
-      const raw = (escTU.input ?? {}) as { mode?: string; reason?: string };
-      const mode: HeavyMode = raw.mode === "council" || raw.mode === "personas" ? raw.mode : "fusion";
-      const reason = (raw.reason ?? "needs deeper analysis than a single Solo pass").trim();
-      log(c.dim(`  ↗ escalating to ${mode} — ${reason}`));
-      history.push({
-        role: "user",
-        content: toolUses.map((tu) => ({
-          type: "tool_result" as const, tool_use_id: tu.id,
-          content: tu === escTU ? `Task escalated to ${mode} mode; the heavier mode takes over from here.` : "Skipped — task escalated to a heavier mode.",
-        })),
-      });
-      return { escalate: { mode, reason } };
-    }
 
     const results: ContentBlock[] = [];
     for (const tu of toolUses) {

@@ -118,7 +118,7 @@ check("overlappingChanges is empty for disjoint edits", overlappingChanges(new M
     const cfg2 = { ...cfgFor(repo2), apiKey: "k", provider: "openai", model: "m", baseUrl: "x" } as any;
     let n = 0; const calls = [spawnResp, endResp];
     const tr = await runTurn("split", [], { ...base, cfg: cfg2, canSpawnWrite: false, _runWorker: writer, _callModel: async () => calls[n++] });
-    check("gated off: spawn_write_subagents is inert (no write)", !existsSync(join(repo2, "x.txt")) && !tr.escalate);
+    check("gated off: spawn_write_subagents is inert (no write)", !existsSync(join(repo2, "x.txt")) && tr != null);
   }
 }
 

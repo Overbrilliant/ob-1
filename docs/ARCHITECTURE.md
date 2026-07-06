@@ -77,7 +77,9 @@ touching schema or retrieval behavior.
 
 ## Multi-Agent Modes
 
-`src/multimind/` owns Fusion, Council, Personas, subagents, worktree isolation, and adaptive routing.
+`src/multimind/` owns Fusion, subagents, and worktree isolation. Any mode that cannot beat compute-matched
+Solo@k on the eval suite is deleted — Council, Personas, and the adaptive router were removed 2026-07 after
+heterogeneous panels measured harmful (100%→40% accuracy at 29× tokens); see git history.
 Keep worker prompts grounded in the same tool/result contract as Solo.
 
 ## MCP

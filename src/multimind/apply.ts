@@ -1,13 +1,17 @@
 // Applying a multi-mind mode's synthesized solution to the workspace.
 //
-// The worker phases (Fusion candidates / Council critics / Personas panel) run READ-ONLY in isolated
-// contexts — they investigate and propose, but never write (parallel writers + no approval gate would
-// be unsafe). So on their own these modes only PRINT an answer. `applySolution` closes that gap: it
-// hands the final solution to the MAIN gated agent loop (full write_file/edit_file/run_bash tools
-// behind the approval gate), so Council/Fusion/Personas/Adaptive actually SAVE files.
+// The Fusion candidates run READ-ONLY in isolated workspace copies — they investigate and propose, but
+// the SYNTHESIS is only PRINTED, never written back to the real tree. `applySolution` closes that gap:
+// it hands the final solution to the MAIN gated agent loop (full write_file/edit_file/run_bash tools
+// behind the approval gate), so Fusion actually SAVES files.
 //
 // Kept here (not in index.ts, the CLI entry point) and with `run` injected so it's unit-testable.
-import { hasCodeBlock } from "./council.ts";
+
+// A COMPLETE fenced code block (```lang … ```). Kept local so this module has no dependency on any
+// specific mode (it once lived in the now-deleted council.ts).
+const PROVIDER_BLOCK_RE = /```[a-zA-Z0-9_+-]*\n[\s\S]*?```/;
+/** Whether the final answer carried a (complete) fenced code block. */
+export const hasCodeBlock = (text: string): boolean => PROVIDER_BLOCK_RE.test(text);
 
 /** Whether a solution carries code/files worth applying: a COMPLETE fenced block of any size (via
  *  hasCodeBlock), OR — fallback — an opening ```lang fence with substantial trailing content but no

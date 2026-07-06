@@ -3,9 +3,6 @@
 // (one fenced code block) so the objective check can grade them identically.
 import { runWorker, readOnlyTools } from "../multimind/runtime.ts";
 import { runFusion } from "../multimind/fusion.ts";
-import { runCouncil } from "../multimind/council.ts";
-import { runPersonas } from "../multimind/personas.ts";
-import { runAdaptive } from "../multimind/router.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "../agent/codeact.ts";
 import { shellExec } from "../agent/verify.ts";
 import { callModel } from "../providers/gateway.ts";
@@ -63,10 +60,8 @@ export async function runCodeActMode(taskPrompt: string, cfg: Config): Promise<R
   return { text, inputTokens: r.totalInputTokens + (ext.usage?.input_tokens ?? 0), outputTokens: r.totalOutputTokens + (ext.usage?.output_tokens ?? 0) };
 }
 
-export const ALL_MODES = ["solo", "fusion", "council", "personas"] as const;
-// `adaptive` is selectable but excluded from the default suite: in a blind eval (no real check) it
-// degenerates to Solo, so running it by default would just duplicate the Solo row.
-export const SELECTABLE_MODES = [...ALL_MODES, "adaptive", "codeact"] as const;
+export const ALL_MODES = ["solo", "fusion"] as const;
+export const SELECTABLE_MODES = [...ALL_MODES, "codeact"] as const;
 
 const parseModels = (v: string | undefined): string[] | undefined => {
   const ms = (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -74,19 +69,15 @@ const parseModels = (v: string | undefined): string[] | undefined => {
 };
 
 /** Build runners for the requested modes, all bound to the same cfg/tools and grading contract.
- *  Per-mode multi-model routing comes from OB1_{FUSION,COUNCIL}_MODELS (round-robin). Personas is
- *  intentionally single-model: a heterogeneous panel measurably *hurt* it (weak members poisoned
- *  the lead synthesis — 100%→40% at 29× tokens on atoi), the multi-agent fragility R5 warns of. */
+ *  Fusion multi-model routing comes from OB1_FUSION_MODELS (round-robin). NOTE: heterogeneous panels
+ *  (council/personas) were measured HARMFUL (100%→40% accuracy at 29× tokens) and deleted 2026-07; see
+ *  git history. */
 export function buildRunners(cfg: Config, tools: Map<string, Tool>, modes: string[]): Record<string, ModeRunner> {
   const fusionModels = parseModels(process.env.OB1_FUSION_MODELS);
-  const councilModels = parseModels(process.env.OB1_COUNCIL_MODELS);
   const out: Record<string, ModeRunner> = {};
   for (const m of modes) {
     if (m === "solo") out.solo = (t) => runSolo(t + GRADE_CONTRACT, cfg, tools);
     else if (m === "fusion") out.fusion = (t) => runFusion({ task: t + GRADE_CONTRACT, cfg, tools, models: fusionModels, moa: process.env.OB1_FUSION_MOA === "1", judgeModel: process.env.OB1_FUSION_JUDGE_MODEL }).then((r) => ({ text: r.synthesis, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
-    else if (m === "council") out.council = (t) => runCouncil({ task: t + GRADE_CONTRACT, cfg, tools, models: councilModels, check: process.env.OB1_COUNCIL_CHECK, arbiterModel: process.env.OB1_COUNCIL_ARBITER_MODEL }).then((r) => ({ text: r.final, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
-    else if (m === "personas") out.personas = (t) => runPersonas({ task: t + GRADE_CONTRACT, cfg, tools }).then((r) => ({ text: r.final, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
-    else if (m === "adaptive") out.adaptive = (t) => runAdaptive({ task: t + GRADE_CONTRACT, cfg, tools, check: process.env.OB1_ROUTE_CHECK, models: fusionModels, escalateTo: process.env.OB1_ROUTE_ESCALATE === "council" ? "council" : "fusion" }).then((r) => ({ text: r.final, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
     else if (m === "codeact") out.codeact = (t) => runCodeActMode(t, cfg); // develops+verifies via sandboxed execution, then extracts
   }
   return out;

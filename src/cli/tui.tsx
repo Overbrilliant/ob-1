@@ -814,12 +814,7 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/usage", "token + cost analytics"],
   // ── orchestration modes ──
   ["/goal", "keep working until a condition is met"],
-  ["/autoroute", "Solo auto-routing on/off (↑↓ · Enter)"],
   ["/subagents", "parallel subagents on/off"],
-  ["/route", "adaptive routing"],
-  ["/fanout", "multi-mind workers"],
-  ["/council", "draft → critics → arbiter"],
-  ["/personas", "brainstorming panel"],
   ["/eval", "compute-matched eval"],
   ["/codeact", "code-as-action mode (task)"],
   // ── tools & integrations ──
@@ -833,7 +828,7 @@ const SLASH_COMMANDS: [string, string][] = [
 // Commands that take a free-text argument: Enter on these COMPLETES to "/cmd " so the argument can be
 // typed. Every other command RUNS on Enter (opens its picker, toggles, or lists) — so navigating the
 // menu and pressing Enter actually does the thing, instead of just writing the name into the input.
-const NEEDS_ARG = new Set(["/fanout", "/council", "/personas", "/route", "/goal"]);
+const NEEDS_ARG = new Set(["/goal"]);
 
 // Pasting a big block into ink-text-input is brutally slow — every char re-renders the whole growing
 // value (and any embedded \r submits a line early). Ink 7's usePaste delivers the paste as ONE string on
