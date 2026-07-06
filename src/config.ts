@@ -230,6 +230,12 @@ export interface Config {
    *  independent read-only sub-tasks in parallel (the agent decides when; read-only, so low-risk). OFF →
    *  not offered. Env override: OB1_SUBAGENTS=on|off. */
   subagents: boolean;
+  /** Verified escalation. ON (default) → when a Solo turn's auto-verify self-fix loop STILL fails after
+   *  its round budget, the turn escalates to Fusion best-of-N with the failure report as context (so
+   *  candidates FIX rather than restart). The objective SIGNAL decides this, not an LLM — no extra model
+   *  call to route. OFF → never escalate; the changes are left for the user to review (the legacy
+   *  behavior). Forced off on apply turns + Plan mode. Env override: OB1_ESCALATION=on|off. */
+  escalation: boolean;
   /** Auto repo map. ON (default) → a fresh, budgeted codebase map is injected into every system prompt
    *  so the model always knows the structure (rebuilt after file changes). OFF → not injected (the
    *  repo_map tool still works on demand). Env override: OB1_REPO_MAP=on|off. */
@@ -281,6 +287,7 @@ export interface PersistedSettings {
   mode?: Mode;
   planMode?: boolean;
   subagents?: boolean;
+  escalation?: boolean;
   repoMap?: boolean;
   memEvolve?: boolean;
   memReflect?: boolean;
@@ -423,6 +430,7 @@ export function saveSettings(cfg: Config): void {
     mode: cfg.mode,
     planMode: cfg.planMode,
     subagents: envSet("OB1_SUBAGENTS") ? prev.subagents : cfg.subagents,
+    escalation: envSet("OB1_ESCALATION") ? prev.escalation : cfg.escalation,
     repoMap: envSet("OB1_REPO_MAP") ? prev.repoMap : cfg.repoMap,
     memEvolve: envSet("OB1_MEM_EVOLVE") ? prev.memEvolve : cfg.memEvolve,
     memReflect: envSet("OB1_MEM_REFLECT") ? prev.memReflect : cfg.memReflect,
@@ -590,6 +598,11 @@ export function loadConfig(): Config {
     : /^(0|false|off)$/i.test(process.env.OB1_SUBAGENTS ?? "")
       ? false
       : undefined;
+  const envEscalation = /^(1|true|on)$/i.test(process.env.OB1_ESCALATION ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_ESCALATION ?? "")
+      ? false
+      : undefined;
   const envRepoMap = /^(1|true|on)$/i.test(process.env.OB1_REPO_MAP ?? "")
     ? true
     : /^(0|false|off)$/i.test(process.env.OB1_REPO_MAP ?? "")
@@ -659,6 +672,7 @@ export function loadConfig(): Config {
     mode,
     planMode: saved.planMode ?? false,
     subagents: envSubagents ?? saved.subagents ?? true,
+    escalation: envEscalation ?? saved.escalation ?? true,
     repoMap: envRepoMap ?? saved.repoMap ?? true,
     memEvolve: envMemEvolve ?? saved.memEvolve ?? false,
     memReflect: envMemReflect ?? saved.memReflect ?? false,

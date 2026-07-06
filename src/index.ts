@@ -312,9 +312,12 @@ async function runGoalLoop(goal: string): Promise<void> {
       ? `${goal}\n\n[Goal mode] Work toward this goal. When it is FULLY achieved, end your reply with the exact token GOAL_MET on its own line. If work remains, end with GOAL_CONTINUE.`
       : `Continue toward the goal: ${goal}\n[Goal mode] End with GOAL_MET when fully done, otherwise GOAL_CONTINUE.`;
     const startLen = history.length;
-    await runTurn(prompt, history, turnDeps());
+    const outcome = await runTurn(prompt, history, turnDeps());
     if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
-    rememberTurn(prompt, startLen, "goal");
+    // Verified escalation (default ON): loop.ts asked to escalate this iteration → hand it to Fusion once
+    // (the apply turn inside can't re-escalate — one escalation per iteration). Tag the episode "escalate".
+    if (outcome.escalate) await runEscalatedTurn(prompt, outcome.escalate);
+    rememberTurn(prompt, startLen, outcome.escalate ? "escalate" : "goal");
     persistSession();
     const txt = lastAssistantText();
     if (/\bGOAL_MET\b/.test(txt)) { console.log(c.green(`  ✓ goal achieved after ${i + 1} iteration(s)`)); activeGoal = null; return; }
@@ -409,7 +412,7 @@ function workerProgress(ev: WorkerEvent): void {
 async function applySolution(task: string, solution: string): Promise<void> {
   await applySolutionStep({
     task, solution, planMode: cfg.planMode,
-    run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canSpawn: false, canSpawnWrite: false })); }, // applying a mode's result must not re-spawn
+    run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canSpawn: false, canSpawnWrite: false, canEscalateOnFailure: false })); }, // applying a mode's result must not re-spawn OR re-escalate (one escalation per user turn)
     log: console.log, note: c.dim,
   });
 }
@@ -433,7 +436,7 @@ async function autoVerify(): Promise<{ ran: boolean; ok: boolean; report: string
   } catch { return null; }
 }
 
-function turnDeps(overrides?: { canSpawn?: boolean; canSpawnWrite?: boolean }) {
+function turnDeps(overrides?: { canSpawn?: boolean; canSpawnWrite?: boolean; canEscalateOnFailure?: boolean }) {
   return {
     cfg, tools, store, readCache, approve: ui.approve, interactive: Boolean(stdin.isTTY), log: ui.log, gap: ui.gap, onText: ui.onText, endText: ui.endText,
     onReasoning: ui.onReasoning, endReasoning: ui.endReasoning, onUsage: ui.onUsage, onResolvedModel: ui.onResolvedModel, onErrorAction: ui.onErrorAction,
@@ -452,6 +455,10 @@ function turnDeps(overrides?: { canSpawn?: boolean; canSpawnWrite?: boolean }) {
     canSpawn: overrides?.canSpawn ?? cfg.subagents,
     // Write-subagents: opt-in via OB1_SUBAGENTS_WRITE, high-risk (parallel edits). Forced off on apply turns.
     canSpawnWrite: overrides?.canSpawnWrite ?? /^(1|true|on)$/i.test(process.env.OB1_SUBAGENTS_WRITE ?? ""),
+    // Verified escalation: a failed-verification Solo turn returns { escalate } → dispatched to Fusion.
+    // Forced FALSE on apply turns (the override below) so an escalated Fusion's apply can't re-escalate —
+    // at most ONE escalation per user turn (loop.ts also gates on !planMode).
+    canEscalateOnFailure: overrides?.canEscalateOnFailure ?? cfg.escalation,
     onWorkerEvent: workerProgress,
     agentReg,
   };
@@ -522,6 +529,7 @@ ${c.bold("Commands")}
   ${c.bold("Orchestration modes")}
   ${c.cyan("/goal")} ${c.dim("<condition>")}     keep working until a condition is met ${c.dim("(bounded loop · ESC or /goal stop)")}
   ${c.cyan("/subagents")} ${c.dim("[on|off]")}   parallel subagents ${c.dim("(↑↓ · Enter)")} — Solo may fan out independent read-only sub-tasks; watch them in the footer ${c.dim("(on by default)")}
+  ${c.cyan("/escalation")} ${c.dim("[on|off]")}  on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N ${c.dim("(on by default)")}
   ${c.cyan("/eval")} ${c.dim("[modes…]")}        compute-matched eval: does each mode beat Solo at equal tokens?
   ${c.cyan("/codeact")} <task>       run a task in code-as-action mode (model emits code, sandboxed)
 
@@ -1121,6 +1129,14 @@ async function pickSubagents(): Promise<void> {
   ], cfg.subagents ? "on" : "off");
   if (a) { cfg.subagents = a === "on"; console.log(`  subagents ${cfg.subagents ? c.yellow("ON") : "off"}${c.dim(" — Solo may spawn parallel read-only subagents for big, splittable tasks")}`); }
 }
+async function pickEscalation(): Promise<void> {
+  if (!ui.pick) return;
+  const a = await ui.pick("escalation", [
+    { label: "on", hint: "on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N (default)", value: "on" },
+    { label: "off", hint: "never escalate", value: "off" },
+  ], cfg.escalation ? "on" : "off");
+  if (a) { cfg.escalation = a === "on"; console.log(`  escalation ${cfg.escalation ? c.yellow("ON") : "off"}${c.dim(" — on verified failure, hand a Solo turn to fusion best-of-N")}`); }
+}
 async function pickRepoMap(): Promise<void> {
   if (!ui.pick) return;
   const a = await ui.pick("Auto repo map", [
@@ -1601,7 +1617,7 @@ async function handleCommand(line: string): Promise<boolean> {
       // /settings was a menu that just duplicated the slash commands. It's gone — every setting is now a
       // first-class command. Keep a friendly redirect so old muscle memory isn't a dead "unknown command".
       console.log(c.dim("  settings are now individual commands — press / to browse them:"));
-      console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /subagents · /repomap · /quality · /trust · /allow"));
+      console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /subagents · /escalation · /repomap · /quality · /trust · /allow"));
       break;
     case "free": {
       // Manage the shared free-models pool (works regardless of the active profile): keys file, routing
@@ -1666,6 +1682,14 @@ async function handleCommand(line: string): Promise<boolean> {
         console.log(`  subagents ${cfg.subagents ? c.yellow("ON") : "off"}`);
       } else if (!rest[0] && ui.pick) await pickSubagents();  // bare /subagents opens an on/off picker on a TTY
       else console.log(c.red(`  usage: /subagents on|off (current: ${cfg.subagents ? "on" : "off"})`));
+      break;
+    }
+    case "escalation": case "escalate": {
+      if (rest[0] === "on" || rest[0] === "off") {
+        cfg.escalation = rest[0] === "on";
+        console.log(`  escalation ${cfg.escalation ? c.yellow("ON") : "off"}`);
+      } else if (!rest[0] && ui.pick) await pickEscalation();  // bare /escalation opens an on/off picker on a TTY
+      else console.log(c.red(`  usage: /escalation on|off (current: ${cfg.escalation ? "on" : "off"})`));
       break;
     }
     case "effort": {
@@ -1781,7 +1805,18 @@ async function handleCommand(line: string): Promise<boolean> {
   return false;
 }
 
-async function fusionTurn(task: string): Promise<string | undefined> {
+/** Verified escalation (Wave 3, default ON): a Solo turn whose objective checks STILL fail after the
+ *  auto-verify self-fix budget hands ITSELF to Fusion best-of-N. The SIGNAL decided this in loop.ts (no
+ *  LLM router); here we just narrate the one-line reason and run Fusion ONCE, passing the failure report
+ *  as escalationContext so candidates FIX rather than restart. HARD RULE — at most one escalation per user
+ *  turn: fusionTurn's own apply turn runs with escalation OFF (canEscalateOnFailure:false, in applySolution),
+ *  and this function never loops. */
+async function runEscalatedTurn(task: string, esc: { reason: string; report: string }): Promise<void> {
+  console.log(c.yellow("  ↗ verified failure — escalating to fusion") + c.dim(` — ${esc.reason}`));
+  await fusionTurn(task, { escalationContext: esc.report });
+}
+
+async function fusionTurn(task: string, opts?: { escalationContext?: string }): Promise<string | undefined> {
   if (!modelReachable()) { console.log(c.yellow("  fusion needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
   // Env vars REFINE the run but never gate a real signal: the auto verifier signal (evaluate.ts) is the
   // default; OB1_FUSION_* are honored only as explicit overrides.
@@ -1803,7 +1838,7 @@ async function fusionTurn(task: string): Promise<string | undefined> {
   console.log(c.dim(`  budget (declared up front): ~${calls}–${calls + 1} model calls ≈ ${calls}× a Solo pass (+1 only when a judge is needed)`));
   const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy each";
   console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) → auto-score [${sigNote}] → select the best (merge only if none pass)${models.length > 1 ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}…`));
-  const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
+  const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, escalationContext: opts?.escalationContext, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
   if (activeAbort?.signal.aborted) return undefined; // ESC: don't render a partial result or apply it
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
   for (const cnd of r.candidates) {
@@ -1874,9 +1909,13 @@ async function processLine(line: string): Promise<boolean> {
   }
   const startLen = history.length;
   if (cfg.mode === "fusion") { await fusionTurn(turnText); rememberTurn(t, startLen, "fusion"); persistSession(); return false; }
-  // Solo: one careful pass. (Verified escalation to Fusion on a failed check is reintroduced in Wave 3.)
-  await runTurn(turnText, history, turnDeps());
-  rememberTurn(t, startLen, "solo");
+  // Solo: one careful pass. Verified escalation (default ON): if the auto-verify self-fix loop STILL fails
+  // after its budget, loop.ts returns { escalate } and we hand the SAME turn to Fusion best-of-N ONCE, with
+  // the failure report as context. HARD RULE — at most one escalation per user turn: the apply turn inside
+  // Fusion runs with escalation OFF, and runEscalatedTurn never loops. ESC after Solo skips the escalation.
+  const outcome = await runTurn(turnText, history, turnDeps());
+  if (outcome.escalate && !activeAbort?.signal.aborted) await runEscalatedTurn(turnText, outcome.escalate);
+  rememberTurn(t, startLen, outcome.escalate ? "escalate" : "solo");
   persistSession(); // write the conversation so /resume can reopen it
   // Auto skill learning (opt-in, OFF by default): distil this turn into reusable procedural memory.
   // One cheap brain call, only on a substantive Solo turn. Never blocks/breaks the turn.

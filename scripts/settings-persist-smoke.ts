@@ -15,7 +15,7 @@ const tmp = mkdtempSync(join(tmpdir(), "ob1-settings-"));
 const origCwd = process.cwd();
 const savedEnv = { ...process.env };
 delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.GEMINI_API_KEY; delete process.env.GROQ_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL; delete process.env.OB1_API_KEY; delete process.env.OB1_PROVIDER; delete process.env.OB1_TOKEN; delete process.env.OB1_SERVER;
-delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_REPO_MAP; delete process.env.OB1_MEM_EVOLVE; delete process.env.OB1_MEM_REFLECT; delete process.env.OB1_MEM_AUTOLINK; delete process.env.OB1_SKILL_LEARN; delete process.env.OB1_QUALITY; delete process.env.OB1_CHECKPOINT;
+delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_ESCALATION; delete process.env.OB1_REPO_MAP; delete process.env.OB1_MEM_EVOLVE; delete process.env.OB1_MEM_REFLECT; delete process.env.OB1_MEM_AUTOLINK; delete process.env.OB1_SKILL_LEARN; delete process.env.OB1_QUALITY; delete process.env.OB1_CHECKPOINT;
 
 try {
   process.chdir(tmp);
@@ -28,6 +28,7 @@ try {
   check("settings live in the global settings dir", base.settingsDir === join(tmp, ".ob1"), base.settingsDir);
   check("fresh workspace → defaults", base.mode === "solo" && base.sandbox === "off" && base.permissionMode === "autopilot");
   check("subagents default ON (parallel subagents available out of the box)", base.subagents === true);
+  check("escalation default ON (verified failure escalates to fusion out of the box)", base.escalation === true);
   check("quality mode defaults normal", base.qualityMode === "normal");
   check("no settings file yet", !hasPersistedSettings(base.settingsDir));
 
@@ -36,6 +37,7 @@ try {
   base.sandbox = "read-only";
   base.permissionMode = "ask"; // deliberate ask must survive the autopilot default
   base.subagents = false; // toggled off → must persist (so the on default doesn't clobber a deliberate off)
+  base.escalation = false; // toggled off → must persist (so the on default doesn't clobber a deliberate off)
   base.qualityMode = "strict";
   base.model = "anthropic/claude-opus-4.8"; // canonical OpenRouter slug, same provider
   saveSettings(base);
@@ -47,6 +49,7 @@ try {
   check("sandbox restored", restored.sandbox === "read-only", restored.sandbox);
   check("permission mode restored (deliberate ask survives the autopilot default)", restored.permissionMode === "ask", restored.permissionMode);
   check("subagents restored (a deliberate OFF survives the ON default)", restored.subagents === false);
+  check("escalation restored (a deliberate OFF survives the ON default)", restored.escalation === false);
   check("quality mode restored", restored.qualityMode === "strict", restored.qualityMode);
   check("model restored (same provider)", restored.model === "anthropic/claude-opus-4.8", restored.model);
 
@@ -58,9 +61,11 @@ try {
   check("env OB1_MODEL overrides persisted", envWins.model === "x-ai/grok-4.3", envWins.model);
   process.env.OB1_SUBAGENTS = "on"; // persisted is false (above) → env must win
   check("env OB1_SUBAGENTS overrides persisted", loadConfig().subagents === true);
+  process.env.OB1_ESCALATION = "on"; // persisted is false (above) → env must win
+  check("env OB1_ESCALATION overrides persisted", loadConfig().escalation === true);
   process.env.OB1_QUALITY = "off"; // persisted is strict (above) → env must win
   check("env OB1_QUALITY overrides persisted", loadConfig().qualityMode === "off");
-  delete process.env.OB1_SANDBOX; delete process.env.OB1_MODEL; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_QUALITY;
+  delete process.env.OB1_SANDBOX; delete process.env.OB1_MODEL; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_ESCALATION; delete process.env.OB1_QUALITY;
 
   // 4b) env overrides must NOT become permanent just because a slash command saved settings.
   process.env.OB1_MODEL = "env-only-model";

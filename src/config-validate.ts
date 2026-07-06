@@ -25,6 +25,7 @@ const LEGACY_MODE_VALUES = ["council", "personas", "adaptive"];
 const BOOLS = [
   "planMode",
   "subagents",
+  "escalation",
   "repoMap",
   "memEvolve",
   "memReflect",

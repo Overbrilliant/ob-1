@@ -2,7 +2,7 @@
 // prompt, return final text + total tokens. Every mode is held to the same grading contract
 // (one fenced code block) so the objective check can grade them identically.
 import { runWorker, readOnlyTools } from "../multimind/runtime.ts";
-import { runFusion } from "../multimind/fusion.ts";
+import { runFusion, extractCode, scoreCandidate } from "../multimind/fusion.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "../agent/codeact.ts";
 import { shellExec } from "../agent/verify.ts";
 import { callModel } from "../providers/gateway.ts";
@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { Tool } from "../agent/tools.ts";
+import type { EvalTask } from "./tasks.ts";
 import type { ModeRunner, RunOutput } from "./harness.ts";
 
 const GRADE_CONTRACT =
@@ -60,8 +61,23 @@ export async function runCodeActMode(taskPrompt: string, cfg: Config): Promise<R
   return { text, inputTokens: r.totalInputTokens + (ext.usage?.input_tokens ?? 0), outputTokens: r.totalOutputTokens + (ext.usage?.output_tokens ?? 0) };
 }
 
+/** The verified-escalation POLICY as an eval mode — a compute-matched measurement of EXACTLY what the main
+ *  loop does (loop.ts self-fix → runEscalatedTurn): one Solo pass graded by the task's OWN objective check;
+ *  on PASS it's done at Solo's cost (the common, cheap case); on FAIL it escalates to Fusion best-of-N with
+ *  the same check + the Solo failure output as escalationContext (candidates FIX, not restart), and the
+ *  token cost is Solo + Fusion — the real compute this policy spends. The SIGNAL decides, no LLM router.
+ *  The harness re-grades the returned artifact independently, so consulting the check here can't self-grade. */
+export async function runEscalateMode(taskPrompt: string, task: EvalTask | undefined, cfg: Config, tools: Map<string, Tool>): Promise<RunOutput> {
+  const solo = await runSolo(taskPrompt + GRADE_CONTRACT, cfg, tools);
+  const { code, lang } = extractCode(solo.text);
+  const score = await scoreCandidate(code, { langHint: lang ?? task?.lang, check: task?.check, cwd: cfg.cwd });
+  if (score.checked && score.ok) return solo; // Solo already passes the objective check → no escalation
+  const r = await runFusion({ task: taskPrompt + GRADE_CONTRACT, cfg, tools, check: task?.check, escalationContext: score.output });
+  return { text: r.synthesis, inputTokens: solo.inputTokens + r.totalInputTokens, outputTokens: solo.outputTokens + r.totalOutputTokens };
+}
+
 export const ALL_MODES = ["solo", "fusion"] as const;
-export const SELECTABLE_MODES = [...ALL_MODES, "codeact"] as const;
+export const SELECTABLE_MODES = [...ALL_MODES, "codeact", "escalate"] as const;
 
 const parseModels = (v: string | undefined): string[] | undefined => {
   const ms = (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -77,8 +93,12 @@ export function buildRunners(cfg: Config, tools: Map<string, Tool>, modes: strin
   const out: Record<string, ModeRunner> = {};
   for (const m of modes) {
     if (m === "solo") out.solo = (t) => runSolo(t + GRADE_CONTRACT, cfg, tools);
-    else if (m === "fusion") out.fusion = (t) => runFusion({ task: t + GRADE_CONTRACT, cfg, tools, models: fusionModels, moa: process.env.OB1_FUSION_MOA === "1", judgeModel: process.env.OB1_FUSION_JUDGE_MODEL }).then((r) => ({ text: r.synthesis, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
+    // Fusion consults the task's per-task check (t.check) so its best-of-N SELECTION runs against the real
+    // objective signal — symmetric with `escalate` (both may read the check; the harness still grades
+    // independently afterward). See eval/tasks/README.md.
+    else if (m === "fusion") out.fusion = (t, task) => runFusion({ task: t + GRADE_CONTRACT, cfg, tools, models: fusionModels, check: task?.check, moa: process.env.OB1_FUSION_MOA === "1", judgeModel: process.env.OB1_FUSION_JUDGE_MODEL }).then((r) => ({ text: r.synthesis, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
     else if (m === "codeact") out.codeact = (t) => runCodeActMode(t, cfg); // develops+verifies via sandboxed execution, then extracts
+    else if (m === "escalate") out.escalate = (t, task) => runEscalateMode(t, task, cfg, tools); // Solo → (on failed check) Fusion, tokens = Solo + Fusion
   }
   return out;
 }

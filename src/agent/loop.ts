@@ -85,6 +85,11 @@ export interface TurnDeps {
   /** When true, Solo is offered the `spawn_write_subagents` tool — parallel EDITS in isolated worktrees
    *  (set from OB1_SUBAGENTS_WRITE). High-risk, default off; suppressed on apply turns. */
   canSpawnWrite?: boolean;
+  /** Verified escalation (set from cfg.escalation; default on). When true, a turn whose auto-verify
+   *  self-fix loop STILL fails after autofixMax rounds returns { escalate } instead of just leaving the
+   *  changes — the dispatcher then hands it to Fusion best-of-N. The SIGNAL decides (no LLM router, no
+   *  regex). Forced FALSE on apply turns + Plan mode so at most ONE escalation happens per user turn. */
+  canEscalateOnFailure?: boolean;
   /** Live per-worker progress for spawned subagents (the inline meter — the orchestrator's workerProgress). */
   onWorkerEvent?: (ev: WorkerEvent) => void;
   /** Footer progress tracker for spawned subagents (the TUI renders each agent's live status). */
@@ -95,13 +100,23 @@ export interface TurnDeps {
   _runWorker?: typeof runWorker;
 }
 
-/** What a Solo turn yields back to the dispatcher. Effectively empty in Wave 1a — the LLM `escalate`
- *  router was removed here and Wave 3 reintroduces escalation with new (verified-failure) semantics.
- *  Kept as a named, extensible interface so runTurn's signature and every caller survive the rework
- *  unchanged; the `_reserved` slot is a placeholder Wave 3 replaces with real fields (a bare `{}`
- *  interface trips biome's noEmptyInterface, and `{}` satisfies `{ _reserved?: never }`). */
+/** What a Solo turn yields back to the dispatcher. `escalate` is the VERIFIED-escalation signal (Wave 3):
+ *  the auto-verify self-fix loop ran its full budget and the checks STILL fail, so an objective SIGNAL
+ *  (not an LLM, not a regex) asks the dispatcher to hand this turn to Fusion best-of-N. There is no `mode`
+ *  field — Fusion is the only escalation target. Undefined ⇒ an ordinary turn (or escalation disabled /
+ *  suppressed). Kept a named, extensible interface so runTurn's signature and every caller stay stable. */
 export interface TurnOutcome {
-  _reserved?: never;
+  escalate?: { reason: string; report: string };
+}
+
+/** The verified-escalation decision — PURE (no I/O) so it can be unit-tested in isolation. Its PRECONDITION
+ *  (checked by the caller) is a genuine verified failure: the auto-verify self-fix loop ran its full budget
+ *  and the objective check STILL fails. Given that, escalate ONLY when (a) the turn is allowed to escalate
+ *  (canEscalateOnFailure — wired from cfg.escalation, forced FALSE on apply turns so one escalation happens
+ *  per user turn), (b) we're not in read-only Plan mode, and (c) the turn wasn't ESC-aborted. No LLM and no
+ *  regex participate — the objective SIGNAL plus these three policy flags fully determine the outcome. */
+export function shouldEscalate(state: { canEscalateOnFailure?: boolean; planMode: boolean; aborted?: boolean }): boolean {
+  return !!state.canEscalateOnFailure && !state.planMode && !state.aborted;
 }
 
 // Decomposition parallelism: Solo splits a big task into INDEPENDENT read-only sub-tasks and runs them
@@ -759,6 +774,15 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
               `Automated verification of your changes FAILED. Fix the problems below, then finish. Keep going until the checks pass (or, if a failure is pre-existing / unrelated to your change, say so explicitly).\n\n${v.report}` });
             mutated = false; // a fresh fix attempt re-arms verification
             continue;        // re-enter the model loop with the failures in context
+          }
+          // Verified failure: the self-fix budget is spent and the objective check STILL fails. When
+          // escalation is allowed (default; forced off on apply turns + Plan mode), hand the whole turn to
+          // Fusion best-of-N — the SIGNAL decides this, no LLM router and no regex. The dispatcher runs
+          // Fusion ONCE with this report as context; at most one escalation per user turn. Otherwise (off /
+          // plan / aborted) fall through to the legacy "leave the changes for review" outcome.
+          if (shouldEscalate({ canEscalateOnFailure: deps.canEscalateOnFailure, planMode: cfg.planMode, aborted: deps.signal?.aborted })) {
+            log(c.yellow(`  ↗ verified failure after ${autofixMax} self-fix rounds — escalating to fusion (best-of-N)`));
+            return { escalate: { reason: `verification still failing after ${autofixMax} self-correction rounds`, report: v.report } };
           }
           log(c.yellow(`  ⚠ checks still failing after ${autofixMax} self-correction round(s) — leaving the changes for you to review`));
         } else if (v?.ran && v.ok) {

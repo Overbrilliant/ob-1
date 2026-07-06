@@ -16,6 +16,11 @@ Each file is one JSON object or an array of `{ id, lang: "ts", prompt, check }` 
   `bun -e '...'` that imports `process.env.OB1_FILE` and asserts edge cases (use double quotes
   inside — the single quotes wrap the `bun -e` body; escaping goes through JSON then bash).
 
+Every mode may CONSULT this per-task `check` while solving (e.g. `fusion` grounds its best-of-N
+selection in it, `escalate` uses it to decide whether to escalate) — but the harness always re-grades
+each mode's returned artifact with the same `check` independently afterward, so a mode reading its own
+check can never grade itself green.
+
 ## Authorship rule (non-negotiable)
 
 Before a task ships, prove BOTH: (1) a correct reference solution makes the check exit 0, and
