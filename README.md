@@ -73,7 +73,7 @@ The installer picks the right macOS/Linux archive for arm64 or x64, verifies it 
 Pin a release:
 
 ```sh
-curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.3.3
+curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.3.4
 ```
 
 ### npm
@@ -258,7 +258,7 @@ assets.
 Verify an artifact:
 
 ```sh
-gh release download v0.3.3 --repo Overbrilliant/ob-1 --pattern ob1-darwin-arm64.tar.gz
+gh release download v0.3.4 --repo Overbrilliant/ob-1 --pattern ob1-darwin-arm64.tar.gz
 gh attestation verify ob1-darwin-arm64.tar.gz --repo Overbrilliant/ob-1
 ```
 

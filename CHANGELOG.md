@@ -2,6 +2,12 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.4] - 2026-07-07
+
+- Polished first-run onboarding copy to match the final Free, endpoint, and Hosted frontier flows.
+- Simplified Hosted frontier setup so it sends users straight into account signup from the CLI.
+- Updated the fresh-install smoke expectation for the new free-models activation summary.
+
 ## [0.3.3] - 2026-07-07
 
 - Changed `/mode` to the user-facing execution picker: `auto`, `act`, and `plan`.

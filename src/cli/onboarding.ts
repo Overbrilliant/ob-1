@@ -112,12 +112,12 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
   stdout.write(banner());                                   // the same OB-1 wordmark as the TUI
   out("");                                                  // breathing room above the welcome line
   out("");
-  out("  Welcome — let's get you set up. Use ↑/↓ and Enter to choose.");
+  out("  Welcome! Let's get you set up. Use ↑/↓ and Enter to choose.");
   let completed = false;
   try {
     const envRoute = detectEnvProvider();
     const p = await arrowSelect("How do you want to run models?", [
-      "Start free       — 150+ free models from 20+ providers; works instantly, add keys for more",
+      "Start free - 150+ free models from 20+ providers; works instantly, add keys for more",
       envRoute
         ? `Use ${envRoute.source} — ${envRoute.label}; runtime-only, no settings write`
         : "Use my endpoint — OpenAI-compatible URL/key, Ollama, LM Studio, llama.cpp, vLLM, LAN GPU",
@@ -185,15 +185,12 @@ function openKeysFile(path: string, out: (s?: string) => void): void {
 async function runFreeSetup(out: (s?: string) => void): Promise<boolean> {
   // 1. Activate the embedded router now — keyless providers (Kilo, Pollinations, OVH, LLM7) need nothing.
   persistActiveProvider(globalSettingsDir(), "free", "", "", "auto");
-  out("\n  ✓ Free models are on — 150+ free models across 20+ providers, routed automatically for you.");
-  out("    Works out of the box on keyless providers; adding free API keys unlocks the big pools");
-  out("    (Google, Groq, OpenRouter, …).");
 
   // 2. Create the keys file and offer to open it now.
   const path = ensureKeysFile();
   const choice = await arrowSelect("Add your free API keys now?", [
     "Open the keys file now (recommended)",
-    "Skip — I'll add keys later",
+    "Skip, I'll add keys later",
   ]);
   if (choice === "abort") abortOnboarding(out);
   if (choice === 0) {
@@ -213,9 +210,9 @@ async function runFreeSetup(out: (s?: string) => void): Promise<boolean> {
   const keyed = st.providers.filter((p) => p.hasKey).length;
   const keyless = st.providers.filter((p) => p.keyless).length;
   out(
-    `\n  ✓ ${keyed} provider${keyed === 1 ? "" : "s"} keyed · ${keyless} keyless — ${st.availableModels} of ${st.totalModels} models active`,
+    `\n  ✓ ${keyed} providers keyed · ${keyless} keyless - ${st.availableModels} of ${st.totalModels} models active`,
   );
-  out(`    Add keys anytime: ${path} (or /free in the session).`);
+  out("    Add keys anytime: ~/.ob1/keys.env (or /free in the session).");
   return true;
 }
 
@@ -268,10 +265,10 @@ export async function subscribeFlow(d: SubscribeDeps): Promise<SubscribeResult> 
   // server handoff or the plain fallback), so the checkout is always attributed to the CLI.
   pricingUrl = withSource(pricingUrl, source);
 
-  d.out("\n  Opening the plans page in your browser — pick a plan and check out securely via Stripe.");
+  d.out("\n  Opening the plans page in your browser. Pick a plan and check out securely via Stripe.");
   d.out(`    ${pricingUrl}`);
   d.openUrl(pricingUrl);
-  d.out("\n  Take your time — this advances automatically the moment your payment clears, so leave it");
+  d.out("\n  Take your time, this advances automatically the moment your payment clears, so leave it");
   d.out("  running while you pick a plan and check out. (Press Ctrl-C to skip and set up later.)");
 
   // Patient by design: don't abandon a user who's mid-checkout. ~20 min at the 2s cadence; the loop
@@ -282,7 +279,7 @@ export async function subscribeFlow(d: SubscribeDeps): Promise<SubscribeResult> 
     try {
       const s = await (await d.fetchFn(`${d.server}/v1/billing/status`, { headers: { authorization: `Bearer ${d.token}` } })).json() as any;
       if (s?.plan && s.plan !== "free") {
-        d.out(`\n  ✓ ${cap(s.plan)} plan active — $${s.credits_remaining ?? 0} of $${s.credits_per_month ?? 0} credits this month. You're all set.`);
+        d.out(`\n  ✓ ${cap(s.plan)} plan active - $${s.credits_remaining ?? 0} of $${s.credits_per_month ?? 0} credits this month. You're all set.`);
         return "activated";
       }
     } catch { /* transient — keep polling */ }
@@ -309,18 +306,13 @@ async function runSubscriptionSetup(out: (s?: string) => void): Promise<void> {
 
 async function runHostedSetup(out: (s?: string) => void): Promise<boolean> {
   if (!loadAuthToken()) {
-    const choice = await arrowSelect("Hosted frontier models need an OB-1 account:", [
-      "Create account",
-      "Log in   (I already have one)",
-    ]);
-    if (choice === 0) await runLogin({ mode: "signup", source: `${CLI_SOURCE}_onboarding` });
-    else if (choice === 1) await runLogin({ mode: "login", source: `${CLI_SOURCE}_onboarding` });
-    else if (choice === "abort") {
-      abortOnboarding(out);
-    } else {
-      out("\n  Hosted setup skipped. Start free anytime with `ob1 onboard` or /models.");
-      return false;
+    const rl = readline.createInterface({ input: stdin, output: stdout });
+    try {
+      await rl.question("\n  Hosted frontier models need an OB-1 account:  hit Enter key to authenticate ");
+    } finally {
+      rl.close();
     }
+    await runLogin({ mode: "signup", source: `${CLI_SOURCE}_onboarding` });
   } else {
     out("\n  ✓ Already signed in.");
   }
@@ -359,4 +351,3 @@ async function runOwnEndpointSetup(out: (s?: string) => void, envRoute = detectE
     rl.close();
   }
 }
-

@@ -148,7 +148,7 @@ def run_onboard(ob1_bin: str, env: dict[str, str], work_dir: str, settings_dir: 
             fail(f"onboarding exited {exit_code}", strip_ansi(buf))
 
         output = strip_ansi(buf)
-        if "Free models are on" not in output:
+        if "models active" not in output:
             fail("onboarding did not report free-model activation", output)
 
         settings_path = os.path.join(settings_dir, "settings.json")
