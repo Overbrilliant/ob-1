@@ -289,7 +289,9 @@ export function pickFallback(
 }
 
 // Every candidate gets this exact prompt — sampling (and optionally the model) is the only variance.
-const CANDIDATE_SYSTEM =
+// Exported so deep.ts (AB-MCTS-lite) reuses the SAME candidate contract for its GEN arms (spec: "GEN uses
+// the fusion candidate prompt") — one source of truth for what a candidate must emit.
+export const CANDIDATE_SYSTEM =
   "You are an OB-1 Fusion candidate. Investigate with the read-only tools if needed, then output a " +
   "COMPLETE, self-contained solution as a SINGLE fenced code block (full file content if a file is " +
   "targeted). When the solution targets a specific file, put its path on the fence info line " +
@@ -297,7 +299,8 @@ const CANDIDATE_SYSTEM =
 
 // When each candidate has its own writable COPY of the project (mkTools wired), it gets the FULL toolset
 // and can actually edit/run/test its way to a working answer before committing to the code block.
-const CANDIDATE_SYSTEM_COPY =
+// Exported for deep.ts's copy-mode GEN/REFINE workers (same contract as Fusion candidates).
+export const CANDIDATE_SYSTEM_COPY =
   "You are an OB-1 Fusion candidate working in your OWN private, writable COPY of the project with the " +
   "FULL toolset (read, edit, write, run_bash, verify). Implement your solution IN the copy and RUN/TEST " +
   "it until you're confident it works — your copy is isolated, so experiment freely; it is discarded " +
@@ -310,7 +313,7 @@ const SCORE_TIMEOUT_MS = 120_000; // bound a copy's checks so a hanging test can
 /** Capture a candidate's diff vs the pre-fusion baseline for the judge/selector/apply. A git-worktree copy
  *  diffs vs its HEAD checkout (`add -A -N` so NEW files show); a plain temp-dir copy diffs vs the live
  *  original (excluding heavy/irrelevant trees). Best-effort — a diff is context, never load-bearing. */
-function captureCopyDiff(cfg: Config, copyPath: string): string {
+export function captureCopyDiff(cfg: Config, copyPath: string): string {
   try {
     if (isGitRepo(cfg.cwd)) {
       Bun.spawnSync(["git", "-C", copyPath, "add", "-A", "-N"], { stdout: "ignore", stderr: "ignore" });

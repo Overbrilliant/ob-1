@@ -41,6 +41,7 @@ const SMOKES = [
   "reviewer-smoke.ts",        // refute-reviewer: findings/NONE/garbled parse + read-only worker wiring + model choice + diff bounding
   "fusion-smoke.ts",          // fusion best-of-N + synthesizer + verify-revert
   "fusion-worktree-smoke.ts", // fusion real git-worktree test scoring
+  "deep-smoke.ts",            // deep AB-MCTS-lite: Thompson widen-vs-deepen + verified early-stop + ESC partial
   "worker-write-smoke.ts",    // write-capable fusion workers (gated mutating tools) + workspace-copy isolation
   "rewind-smoke.ts",          // /rewind shadow-git checkpoints: worktree snapshot/restore + real-repo isolation
   "retry-smoke.ts",           // gateway upstream-error retry/backoff + isRetryable classification

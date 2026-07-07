@@ -817,6 +817,7 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/subagents", "parallel subagents on/off"],
   ["/escalation", "escalate a verified-failure turn to fusion (on/off)"],
   ["/review", "independent refute-reviewer over your current diff"],
+  ["/deep", "adaptive AB-MCTS search (task) — generate-vs-refine, real verifier"],
   ["/eval", "compute-matched eval"],
   ["/codeact", "code-as-action mode (task)"],
   // ── tools & integrations ──

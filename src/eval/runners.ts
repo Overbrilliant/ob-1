@@ -3,6 +3,7 @@
 // (one fenced code block) so the objective check can grade them identically.
 import { runWorker, readOnlyTools } from "../multimind/runtime.ts";
 import { runFusion, extractCode, scoreCandidate } from "../multimind/fusion.ts";
+import { runDeep } from "../multimind/deep.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "../agent/codeact.ts";
 import { shellExec } from "../agent/verify.ts";
 import { callModel } from "../providers/gateway.ts";
@@ -77,7 +78,16 @@ export async function runEscalateMode(taskPrompt: string, task: EvalTask | undef
 }
 
 export const ALL_MODES = ["solo", "fusion"] as const;
-export const SELECTABLE_MODES = [...ALL_MODES, "codeact", "escalate"] as const;
+export const SELECTABLE_MODES = [...ALL_MODES, "codeact", "escalate", "deep"] as const;
+
+/** Deep's eval budget: total worker calls, default 4 so it is COMPUTE-MATCHED to Fusion's default spend
+ *  (3 candidates + an occasional selector/synth call) — a fair "at equal tokens, does adaptive search win?"
+ *  comparison. OB1_DEEP_EVAL_BUDGET overrides. */
+const deepEvalBudget = (): number => {
+  const v = process.env.OB1_DEEP_EVAL_BUDGET;
+  const n = v ? Number(v) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 4;
+};
 
 const parseModels = (v: string | undefined): string[] | undefined => {
   const ms = (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -99,6 +109,9 @@ export function buildRunners(cfg: Config, tools: Map<string, Tool>, modes: strin
     else if (m === "fusion") out.fusion = (t, task) => runFusion({ task: t + GRADE_CONTRACT, cfg, tools, models: fusionModels, check: task?.check, moa: process.env.OB1_FUSION_MOA === "1", judgeModel: process.env.OB1_FUSION_JUDGE_MODEL }).then((r) => ({ text: r.synthesis, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
     else if (m === "codeact") out.codeact = (t) => runCodeActMode(t, cfg); // develops+verifies via sandboxed execution, then extracts
     else if (m === "escalate") out.escalate = (t, task) => runEscalateMode(t, task, cfg, tools); // Solo → (on failed check) Fusion, tokens = Solo + Fusion
+    // Deep (AB-MCTS-lite): reads the task's check for its per-node reward (symmetric with fusion/escalate; the
+    // harness still grades the returned best node independently). Budget matched to Fusion for a fair race.
+    else if (m === "deep") out.deep = (t, task) => runDeep({ task: t + GRADE_CONTRACT, cfg, tools, models: fusionModels, check: task?.check, budget: deepEvalBudget() }).then((r) => ({ text: r.best?.text ?? "", inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
   }
   return out;
 }

@@ -35,6 +35,7 @@ import { TodoRegistry } from "./agent/todo-registry.ts";
 import { loadMcpServers, makeMcpLoaderTool, type McpLoadResult } from "./mcp/manager.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "./agent/codeact.ts";
 import { runFusion } from "./multimind/fusion.ts";
+import { runDeep, deepNodeLine } from "./multimind/deep.ts";
 import { ensembleModels, detectSignal } from "./multimind/evaluate.ts";
 import { runReview, pickReviewerModel, type Finding } from "./multimind/reviewer.ts";
 import { applySolution as applySolutionStep } from "./multimind/apply.ts";
@@ -532,6 +533,7 @@ ${c.bold("Commands")}
   ${c.cyan("/subagents")} ${c.dim("[on|off]")}   parallel subagents ${c.dim("(↑↓ · Enter)")} — Solo may fan out independent read-only sub-tasks; watch them in the footer ${c.dim("(on by default)")}
   ${c.cyan("/escalation")} ${c.dim("[on|off]")}  on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N ${c.dim("(on by default)")}
   ${c.cyan("/review")}               independent refute-reviewer over your current diff ${c.dim("— reports only correctness bugs it can't refute, then offers to fix them")}
+  ${c.cyan("/deep")} ${c.dim("<task>")}          adaptive AB-MCTS search ${c.dim("(Thompson-sampled generate-vs-refine across the model ensemble, graded by the real verifier · stops on a full pass)")}
   ${c.cyan("/eval")} ${c.dim("[modes…]")}        compute-matched eval: does each mode beat Solo at equal tokens?
   ${c.cyan("/codeact")} <task>       run a task in code-as-action mode (model emits code, sandboxed)
 
@@ -1509,6 +1511,11 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     }
     case "review": await reviewTurn(); break; // refute-reviewer over the current diff (Bugbot pattern)
+    case "deep": {
+      if (!arg) { console.log(c.red("  usage: /deep <task>")); break; }
+      await deepTurn(arg); // AB-MCTS-lite adaptive search (deepTurn guards modelReachable)
+      break;
+    }
     case "mcp": {
       if (!mcp.clients.length) { console.log(c.dim("  no MCP servers connected (configure .ob1/mcp.json or mcp.json)")); break; }
       const active = new Set([...tools.keys()].filter((k) => k.startsWith("mcp__")));
@@ -1977,6 +1984,43 @@ async function fusionTurn(task: string, opts?: { escalationContext?: string }): 
   console.log(c.dim(`  [${r.candidates.length} candidates${r.selected ? "" : " + synthesizer"} · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
   await applySolution(task, r.synthesis);
   return r.synthesis;
+}
+
+/** /deep — AB-MCTS-lite adaptive search (deep.ts). Thompson-samples, per call, whether to WIDEN (a fresh
+ *  generation) or DEEPEN (refine a promising node), grounded in the SAME auto verifier signal Fusion uses.
+ *  Wired exactly like fusionTurn (mkTools/procs/planMode/workerProgress/ESC) and applies the best node via
+ *  the one gated apply turn — the search never writes the real tree itself. */
+async function deepTurn(task: string): Promise<void> {
+  if (!modelReachable()) { console.log(c.yellow("  /deep needs a model provider (a key, or a configured endpoint via /models)")); return; }
+  const models = ensembleModels(cfg); // the diversity gate (frontier ensemble on the free router; else [cfg.model])
+  const budget = envInt("OB1_DEEP_BUDGET", 9);
+  const sig = detectSignal(cfg);
+  const sigNote = sig.tier === "test" ? `real tests (${sig.testCmd})`
+    : sig.tier === "auto" ? `compile gates (${sig.autoCmds.join(" && ") || "auto"})`
+    : "syntax only (no project checks detected)";
+  // Budget declared up front (the honest-UX pattern): a Deep run spends ~budget worker calls, each ≈ a Solo pass.
+  console.log(c.dim(`  budget (declared up front): ~${budget} model calls (Thompson-sampled generate-vs-refine across ${models.length} model${models.length === 1 ? "" : "s"}) ≈ ~${budget}× a Solo pass`));
+  const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy per call";
+  console.log(c.dim(`  Deep (AB-MCTS-lite): adaptive tree search · ${copyKind} · auto-score [${sigNote}] · widen-vs-deepen by Thompson sampling · stops early on a full pass…`));
+  const r = await runDeep({ task, cfg, tools, budget, models, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return; // ESC: don't render a partial result or apply it
+  // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
+  console.log("\n" + c.bold(modeColor("fusion")("Deep search tree")) + c.dim(" (widen-vs-deepen · real verifier reward):"));
+  for (const n of r.nodes) {
+    const isBest = r.best != null && n.id === r.best.id;
+    const v = n.ok ? c.green("PASS") : n.score > 0 ? c.yellow(`${Math.round(n.score * 100)}%`) : c.red("fail");
+    console.log(`  ${isBest ? c.cyan("▸") : " "} ${c.dim(deepNodeLine(n))}  ${v}`);
+  }
+  const best = r.best;
+  const tierLabel: Record<string, string> = { "copy-checks": "copy checks (real state)", "worktree-tests": "worktree tests", check: "check command", syntax: "syntax", none: "none" };
+  if (!best) { console.log(c.yellow("  deep produced no candidate (budget 0 or cancelled)")); return; }
+  const verdict = best.ok ? c.green("PASS") : best.score > 0 ? c.yellow(`partial (${Math.round(best.score * 100)}%)`) : c.red("FAIL");
+  console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · best `) + c.cyan(`#${best.id}`) + c.dim(` [${best.model}] → `) + verdict);
+  // Honest verdict — a still-failing best must be announced loudly (never a silent fail), like fusionTurn.
+  if (!best.ok) console.log(c.red("  ⚠ the best candidate STILL FAILS the objective check — treat it as UNVERIFIED and review before trusting it"));
+  console.log("\n" + c.bold(modeColor("fusion")("Deep result:")) + "\n" + best.text + "\n");
+  console.log(c.dim(`  [${r.nodes.length} node(s) · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+  await applySolution(task, best.text); // same one gated apply turn (no re-escalate) fusion uses
 }
 
 async function evalTurn(requested: string[]): Promise<void> {
