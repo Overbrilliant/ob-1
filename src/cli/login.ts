@@ -5,7 +5,7 @@
 // the real provider keys stay on the server. No passwords are ever typed into the terminal.
 import { writeFileSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { ob1ServerUrl, globalSettingsDir } from "../config.ts";
+import { ignoredLocalOb1ServerOverride, ob1ServerUrl, globalSettingsDir } from "../config.ts";
 
 function authFile(): string { return join(globalSettingsDir(), "auth.json"); }
 
@@ -67,6 +67,10 @@ export async function runLogin(opts: { mode?: "signup" | "login"; source?: strin
   const out = opts.out ?? ((s: string) => console.log(s));
   const write = opts.write ?? ((s: string) => process.stdout.write(s));
   const state = crypto.randomUUID();
+  const ignoredServer = ignoredLocalOb1ServerOverride();
+  if (ignoredServer) {
+    out(`\n  Ignoring OB1_SERVER=${ignoredServer} for installed login. Set OB1_ALLOW_LOCAL_SERVER=1 to use a local OB-1 server.`);
+  }
 
   let resolveToken!: (t: string | null) => void;
   const tokenP = new Promise<string | null>((r) => { resolveToken = r; });

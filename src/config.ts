@@ -327,13 +327,36 @@ function maxTokensFromEnv(): number | undefined {
 // The managed OB-1 backend holds the REAL provider keys (OpenRouter for models, SearXNG for search)
 // and proxies every request per signed-in user. THE SINGLE SOURCE OF TRUTH for the server URL is this
 // constant (everything goes through ob1ServerUrl()). Defaults to the managed PRODUCTION server so a
-// fresh install works out of the box; set OB1_SERVER to override (e.g. http://localhost:8787 for local
-// server development).
+// fresh install works out of the box. OB1_SERVER can point at a remote self-hosted server; localhost
+// overrides require OB1_ALLOW_LOCAL_SERVER=1 so stale shell exports do not break installed CLIs.
 const DEFAULT_OB1_SERVER = "https://ob1-api.overbrilliant.com";
+
+function allowLocalOb1Server(): boolean {
+  return /^(1|true|yes|on)$/i.test(process.env.OB1_ALLOW_LOCAL_SERVER ?? "");
+}
+
+function isLoopbackServer(raw: string): boolean {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === "localhost" || host.endsWith(".localhost") || host === "::1" || host === "[::1]" || host === "0.0.0.0" || /^127(?:\.\d{1,3}){3}$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+export function ignoredLocalOb1ServerOverride(): string | undefined {
+  const raw = process.env.OB1_SERVER?.trim();
+  if (!raw) return undefined;
+  const normalized = raw.replace(/\/+$/, "");
+  return isLoopbackServer(normalized) && !allowLocalOb1Server() ? normalized : undefined;
+}
 
 /** Base origin of the managed OB-1 server (no trailing slash). Override with OB1_SERVER. */
 export function ob1ServerUrl(): string {
-  return (process.env.OB1_SERVER ?? DEFAULT_OB1_SERVER).replace(/\/$/, "");
+  const raw = process.env.OB1_SERVER?.trim();
+  if (!raw) return DEFAULT_OB1_SERVER;
+  const normalized = raw.replace(/\/+$/, "");
+  return ignoredLocalOb1ServerOverride() ? DEFAULT_OB1_SERVER : normalized;
 }
 
 /** The signed-in user's OB-1 token for the managed proxy. Precedence: OB1_TOKEN env > ~/.ob1/auth.json.

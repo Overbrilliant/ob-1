@@ -2,6 +2,12 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.2] - 2026-07-07
+
+- Fixed installed `/login` being hijacked by a stale `OB1_SERVER=http://localhost:8787` shell export.
+  Localhost server overrides now require `OB1_ALLOW_LOCAL_SERVER=1`; remote self-hosted `OB1_SERVER`
+  overrides still work normally.
+
 ## [0.3.1] - 2026-07-07
 
 - Added in-session `/login` and `/logout` browser auth commands.

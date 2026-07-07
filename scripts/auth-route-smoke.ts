@@ -7,14 +7,14 @@
 import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, loadAuthToken, ob1ServerUrl } from "../src/config.ts";
+import { ignoredLocalOb1ServerOverride, loadConfig, loadAuthToken, ob1ServerUrl } from "../src/config.ts";
 import { webSearch, type Fetcher } from "../src/tools/web.ts";
 
 let fail = false;
 const check = (n: string, ok: boolean, d = "") => { console.log(`${ok ? "✓" : "✗"} ${n}${ok || !d ? "" : `  — ${d}`}`); if (!ok) fail = true; };
 
 const savedEnv = { ...process.env };
-for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OB1_BASE_URL", "OB1_API_KEY", "OB1_PROVIDER", "OB1_TOKEN", "OB1_SERVER", "OB1_SEARXNG_URL", "OB1_SEARXNG_KEY"]) delete process.env[k];
+for (const k of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OB1_BASE_URL", "OB1_API_KEY", "OB1_PROVIDER", "OB1_TOKEN", "OB1_SERVER", "OB1_ALLOW_LOCAL_SERVER", "OB1_SEARXNG_URL", "OB1_SEARXNG_KEY"]) delete process.env[k];
 
 const tmp = mkdtempSync(join(tmpdir(), "ob1-auth-"));
 const settingsDir = join(tmp, ".ob1");
@@ -38,6 +38,16 @@ try {
   check("apiKey is the signed-in token", cfg.apiKey === "file-token", String(cfg.apiKey));
   check("web_search defaults to the server /v1/search + Bearer", cfg.searxngUrl === `${ob1ServerUrl()}/v1/search` && cfg.searxngBearer === true);
   check("web_search key is the token", cfg.searxngKey === "file-token");
+
+  // ── managed server override safety ──
+  process.env.OB1_SERVER = "https://selfhost.example";
+  check("remote OB1_SERVER overrides managed server", ob1ServerUrl() === "https://selfhost.example", ob1ServerUrl());
+  process.env.OB1_SERVER = "http://localhost:8787";
+  delete process.env.OB1_ALLOW_LOCAL_SERVER;
+  check("localhost OB1_SERVER is ignored by default", ob1ServerUrl() === "https://ob1-api.overbrilliant.com" && ignoredLocalOb1ServerOverride() === "http://localhost:8787", ob1ServerUrl());
+  process.env.OB1_ALLOW_LOCAL_SERVER = "1";
+  check("localhost OB1_SERVER works when explicitly allowed", ob1ServerUrl() === "http://localhost:8787" && ignoredLocalOb1ServerOverride() === undefined, ob1ServerUrl());
+  delete process.env.OB1_SERVER; delete process.env.OB1_ALLOW_LOCAL_SERVER;
 
   // ── model-provider env precedence ──
   process.env.OPENROUTER_API_KEY = "or-test";

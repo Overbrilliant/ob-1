@@ -62,6 +62,7 @@ env = {
     "OB1_SANDBOX": "off",
     "OB1_TOKEN": "dummy-tui-pty-test-token",
     "OB1_SERVER": "http://127.0.0.1:1",
+    "OB1_ALLOW_LOCAL_SERVER": "1",
     "OB1_MODEL": "anthropic/claude-opus-4.8",
 }
 

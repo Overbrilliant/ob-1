@@ -16,7 +16,8 @@ back to disk.
 | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Route through Gemini's OpenAI-compatible API when no saved provider or hosted subscription is configured. |
 | `GROQ_API_KEY` | Route through Groq when no saved provider or hosted subscription is configured. |
 | `OB1_TOKEN` | Hosted OB-1 CLI token; overrides `~/.ob1/auth.json`. |
-| `OB1_SERVER` | Hosted OB-1 server origin. Defaults to production. |
+| `OB1_SERVER` | Hosted OB-1 server origin. Defaults to production. Remote origins override production. Localhost origins are ignored unless `OB1_ALLOW_LOCAL_SERVER=1` is also set. |
+| `OB1_ALLOW_LOCAL_SERVER` | Set to `1` to allow `OB1_SERVER=http://localhost:...` for local server development. |
 
 ## Agent Behavior
 
