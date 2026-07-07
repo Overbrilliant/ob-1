@@ -8,8 +8,12 @@
 // Kept here (not in index.ts, the CLI entry point) and with `run` injected so it's unit-testable.
 
 // A COMPLETE fenced code block (```lang … ```). Kept local so this module has no dependency on any
-// specific mode (it once lived in the now-deleted council.ts).
-const PROVIDER_BLOCK_RE = /```[a-zA-Z0-9_+-]*\n[\s\S]*?```/;
+// specific mode (it once lived in the now-deleted council.ts). The fence line tolerates an INFO STRING
+// after the language tag (```ts src/file.ts / ```ts path=src/file.ts) — fusion v2's candidate contract
+// explicitly asks for the target path there (see CANDIDATE_SYSTEM), so a winner following instructions
+// must still count as having a code block (this regex once required a bare ```lang fence, which made
+// apply refuse exactly the well-formed candidates and print "no complete code block").
+const PROVIDER_BLOCK_RE = /```[a-zA-Z0-9_+-]*[^\n]*\n[\s\S]*?```/;
 /** Whether the final answer carried a (complete) fenced code block. */
 export const hasCodeBlock = (text: string): boolean => PROVIDER_BLOCK_RE.test(text);
 
@@ -17,7 +21,7 @@ export const hasCodeBlock = (text: string): boolean => PROVIDER_BLOCK_RE.test(te
  *  hasCodeBlock), OR — fallback — an opening ```lang fence with substantial trailing content but no
  *  closing fence, i.e. a synthesis truncated mid-file. We'd rather hand the salvageable artifact to the
  *  apply agent than silently drop the whole file just because the closing ``` went missing. */
-const TRUNCATED_FENCE_RE = /```[a-zA-Z0-9_+-]*\n[\s\S]{40,}$/;
+const TRUNCATED_FENCE_RE = /```[a-zA-Z0-9_+-]*[^\n]*\n[\s\S]{40,}$/;
 export function hasApplicableContent(solution: string): boolean {
   return hasCodeBlock(solution) || TRUNCATED_FENCE_RE.test(solution.trimEnd());
 }

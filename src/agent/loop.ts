@@ -64,7 +64,8 @@ export interface TurnDeps {
    *  (typecheck/compile). If it returns ran && !ok, the loop feeds the failures back and the model
    *  self-corrects. Always wired in Act mode; undefined in read-only Plan mode (no command execution). */
   verify?: () => Promise<{ ran: boolean; ok: boolean; report: string; timedOut?: boolean } | null>;
-  /** Max self-correction rounds before giving up and leaving the changes for the user (default 3). */
+  /** Max self-correction rounds before giving up and leaving the changes for the user (default 3;
+   *  OB1_AUTOFIX_MAX overrides — 0 is valid and means "escalate/stop on the first verified failure"). */
   autofixMax?: number;
   /** Declarative policy rules (from .ob1/policy.json) evaluated before the approval gate: a "deny" rule
    *  blocks a tool call, "allow" auto-approves it (no prompt), "warn" tags the prompt. Empty/undefined
@@ -548,9 +549,10 @@ function looksLikeToolCapabilityRefusal(text: string): boolean {
 export async function runTurn(userInput: string, history: Message[], deps: TurnDeps): Promise<TurnOutcome> {
   const { cfg, tools, store, approve, log } = deps;
   const call = deps._callModel ?? callModel;
-  // A model is reachable with an API key OR a configured provider profile — a keyless Custom/LAN endpoint
-  // (key optional) has no key but is fully usable (the OpenAI-compatible path just omits the auth header).
-  if (!cfg.apiKey && !cfg.providerProfile) {
+  // A model is reachable with an API key OR a configured provider profile OR a runtime env route
+  // (OB1_BASE_URL) — a keyless Custom/LAN endpoint (key optional) has no key but is fully usable (the
+  // OpenAI-compatible path just omits the auth header). Mirror index.ts's modelReachable().
+  if (!cfg.apiKey && !cfg.providerProfile && !cfg.envProviderSource) {
     log(c.yellow("No model provider configured — run `ob1 login`, or use /models to connect one (a key, or a local/LAN endpoint). Memory and /commands still work."));
     return {};
   }
@@ -567,7 +569,12 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   const callCounts = new Map<string, number>(); // exact (tool+input) signatures → executions, for the loop-breaker
   let stepsWithTools = 0;        // steps that emitted ≥1 tool call — for degenerate-no-op detection
   let noopRetries = 0;           // one-time retry when a turn ends having taken no action + given no answer
-  const autofixMax = deps.autofixMax ?? 3;
+  // Self-fix round budget: explicit dep ▸ OB1_AUTOFIX_MAX env (0 is valid — escalate on the FIRST verified
+  // failure; used to demo/measure the escalation trigger deterministically) ▸ default 3. A malformed env
+  // value falls back to the default rather than poisoning the comparison below with NaN.
+  const envAutofixRaw = process.env.OB1_AUTOFIX_MAX?.trim();
+  const envAutofix = envAutofixRaw ? Number(envAutofixRaw) : Number.NaN; // "" ⇒ NaN ⇒ default (Number("")===0!)
+  const autofixMax = deps.autofixMax ?? (Number.isFinite(envAutofix) && envAutofix >= 0 ? Math.floor(envAutofix) : 3);
   // Consecutive mid-stream model failures (e.g. the free router falling back to another model
   // after we'd already streamed output — which the gateway can't safely retry). Resets on any success;
   // when it trips we re-issue the step instead of killing the whole turn. OB1_STEP_RETRIES overrides.
