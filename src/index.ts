@@ -500,7 +500,7 @@ ${c.bold("Commands")}
   ${c.cyan("/exit")} ${c.dim("|")} ${c.cyan("/quit")}          exit the session
 
   ${c.bold("Model & mode")}
-  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} give 150+ free models across 20+ providers, frontier models need a subscription
+  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} use Oracle's monthly catalog, hosted plans unlock the live catalog
   ${c.cyan("/mode")} ${c.dim("[auto|act|plan]")} pick execution mode ${c.dim("(↑↓ · Enter)")}: auto = no prompts, act = ask before edits, plan = read-only
   ${c.cyan("/effort")} ${c.dim("[low|medium|high]")}  reasoning effort ${c.dim("(↑↓ · Enter)")} — thinking budget for models that support it ${c.dim("(default medium)")}
 
@@ -911,7 +911,7 @@ function freeSummaryLines(st: FreeStatus): string[] {
   const lines = [
     `  ${c.bold("Free models")} ${c.dim(`· strategy: ${st.strategy} (${FREE_STRATEGY_HINTS[st.strategy] ?? ""})`)}`,
     `  ${keyed} keyed · ${keyless} keyless — ${c.cyan(`${st.availableModels}/${st.totalModels}`)} models active`,
-    c.dim(`  keys: ${st.keysPath} · catalog ${st.catalogVersion}`),
+    c.dim(`  keys: ${st.keysPath} · catalog ${st.catalogVersion} (${st.catalogTier})`),
   ];
   if (cfg.providerProfile !== "free")
     lines.push(c.dim(`  (active profile: ${cfg.providerProfile ?? "hosted"} — /free manages the shared free pool; /models → Free models to use it)`));
@@ -1026,7 +1026,7 @@ async function pickModel(): Promise<void> {
         : "frontier model — subscribe to unlock",
       value: m.id ?? m.label,
     }));
-    items.push({ label: "Free models ▸ — 150+ models, auto-routed", hint: onFree ? `connected · ${freeModelLabel(cfg.model)}` : "free tiers of 20+ providers · works instantly · add keys for more", value: "__free__" });
+    items.push({ label: "Free models ▸ — Oracle catalog, auto-routed", hint: onFree ? `connected · ${freeModelLabel(cfg.model)}` : "monthly catalog free · hosted plans unlock the live catalog", value: "__free__" });
     for (const prof of PROFILES.filter((p) => p.id !== FREE.id && p.id !== CUSTOM.id)) {
       const active = cfg.providerProfile === prof.id;
       items.push({
@@ -2417,7 +2417,7 @@ startup.push(banner());
   startup.push(c.dim(`  ${accessLine}`));
 }
 if (cfg.providerProfile === "free")
-  startup.push(c.dim(`  model: ${freeModelLabel(cfg.model)} — 150+ free models across 20+ providers${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : ""}`));
+  startup.push(c.dim(`  model: ${freeModelLabel(cfg.model)} — Oracle free-model catalog${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : ""}`));
 else
   startup.push(c.dim(`  model: ${cfg.model} — ${describeModel(cfg.model)}${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : " · output governed by model"}`));
 if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restored (global ~/.ob1/settings.json) — change with /models or individual slash commands"));

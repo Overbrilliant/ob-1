@@ -1,4 +1,4 @@
-// Dev-time catalog sync: vendor the freellmapi-suite live catalog into src/providers/free/catalog.json,
+// Dev-time catalog sync: vendor the freellmapi-suite monthly catalog into src/providers/free/catalog.json,
 // FILTERED for the embedded router. NOT run at runtime — the compiled binary reads the vendored JSON.
 //
 // Filters (see the free-router design spec):
@@ -9,7 +9,7 @@
 //   • KEEP quirks (per-model + top-level, minus quirks that only target dropped platforms).
 //
 // Usage:  bun scripts/sync-free-catalog.ts
-// Source: ../../freellmapi-suite/catalog/data/catalog.live.json (override with OB1_CATALOG_SRC).
+// Source: ../../freellmapi-suite/catalog/data/catalog.monthly.json (override with OB1_CATALOG_SRC).
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { FREE_PROVIDERS, type Catalog, type CatalogModel } from "../src/providers/free/registry.ts";
@@ -18,7 +18,7 @@ const scriptsDir = dirname(Bun.fileURLToPath(import.meta.url));
 const repoRoot = join(scriptsDir, "..");
 const DEST = join(repoRoot, "src/providers/free/catalog.json");
 const SRC =
-  process.env.OB1_CATALOG_SRC ?? join(repoRoot, "..", "..", "freellmapi-suite", "catalog", "data", "catalog.live.json");
+  process.env.OB1_CATALOG_SRC ?? join(repoRoot, "..", "..", "freellmapi-suite", "catalog", "data", "catalog.monthly.json");
 
 const DROP_PLATFORMS = new Set(["aihorde"]);
 const DROP_MODALITIES = new Set(["image", "audio"]);

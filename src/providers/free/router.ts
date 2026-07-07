@@ -3,7 +3,8 @@
 // cooldowns, provider-wide caps), orders by the active strategy, and returns the ordered candidates plus a
 // per-reason tally for the exhaustion message. Adapts the freellmapi-suite router's ordering + gating; the
 // SQLite/analytics/round-robin machinery is dropped (one key per provider here, in-memory windows).
-import { CATALOG, type CatalogModel, type FreeProvider, modelKey, providerById } from "./registry.ts";
+import { currentCatalog } from "./catalog-store.ts";
+import { type CatalogModel, type FreeProvider, modelKey, providerById } from "./registry.ts";
 import {
   combineScore,
   intelligenceComposite,
@@ -60,24 +61,31 @@ function hasCredential(provider: FreeProvider, keys: Map<string, string>): boole
   return provider.keyless || keys.has(provider.id);
 }
 
-/** All models whose provider is registered — the full routable universe (before gating). Built once. */
-const ALL_CANDIDATES: Candidate[] = CATALOG.models
-  .map((model): Candidate | null => {
-    const provider = providerById(model.platform);
-    if (!provider) return null; // unknown platform (shouldn't happen post-sync) — drop
-    return {
-      id: modelKey(model.platform, model.modelId),
-      platform: model.platform,
-      modelId: model.modelId,
-      model,
-      provider,
-    };
-  })
-  .filter((c): c is Candidate => c !== null);
+const DROP_MODALITIES = new Set(["image", "audio"]);
+let candidatesKey = "";
+let candidatesCache: Candidate[] = [];
 
-/** The full catalog candidate list (all providers), for listing/status surfaces. */
+/** All models whose provider is registered — the full routable universe (before gating). */
 export function allCandidates(): Candidate[] {
-  return ALL_CANDIDATES;
+  const catalog = currentCatalog();
+  const key = `${catalog.tier}:${catalog.version}:${catalog.models.length}`;
+  if (key === candidatesKey) return candidatesCache;
+  candidatesKey = key;
+  candidatesCache = catalog.models
+    .map((model): Candidate | null => {
+      if (model.modality && DROP_MODALITIES.has(model.modality)) return null;
+      const provider = providerById(model.platform);
+      if (!provider) return null; // unknown platform (shouldn't happen post-sync) — drop
+      return {
+        id: modelKey(model.platform, model.modelId),
+        platform: model.platform,
+        modelId: model.modelId,
+        model,
+        provider,
+      };
+    })
+    .filter((c): c is Candidate => c !== null);
+  return candidatesCache;
 }
 
 /** Why one candidate can't serve RIGHT NOW, or null when it's servable. Reasons are coarse buckets so the
@@ -149,7 +157,7 @@ function orderCandidates(cands: Candidate[], strategy: RoutingStrategy, now: num
 export function selectCandidates(input: SelectionInput): Selection {
   const servable: Candidate[] = [];
   const tally: Record<string, number> = {};
-  for (const c of ALL_CANDIDATES) {
+  for (const c of allCandidates()) {
     const reason = gateReason(c, input);
     if (reason) {
       tally[reason] = (tally[reason] ?? 0) + 1;

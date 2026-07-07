@@ -263,7 +263,7 @@ async function run(): Promise<void> {
   rmSync(join(settingsDir, "settings.json"), { force: true });
   writeKeys("GROQ_API_KEY=gsk\n");
   const models = listFreeModels();
-  check("listFreeModels returns the whole catalog", models.length === CATALOG.models.length && models.length > 100);
+  check("listFreeModels returns the whole catalog", models.length === CATALOG.models.length && models.length > 50);
   check("listFreeModels marks a keyless model available", models.some((m) => m.available && providerById(m.platform)?.keyless));
   const status = freeStatus();
   check("freeStatus reports every provider", status.providers.length === 23);

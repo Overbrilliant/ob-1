@@ -7,7 +7,9 @@ import { callOpenAI } from "../openai.ts";
 import { AbortedError } from "../http.ts";
 import { toSystemBlocks, type CallOpts, type ModelResponse } from "../types.ts";
 import { globalSettingsDir, persistedSettings } from "../../config.ts";
-import { CATALOG, type CatalogQuirk, FREE_PROVIDERS, resolveConnection, splitModelKey } from "./registry.ts";
+import { currentCatalog } from "./catalog-store.ts";
+import { type CatalogQuirk, FREE_PROVIDERS, resolveConnection, splitModelKey } from "./registry.ts";
+import { syncFreeCatalogIfStale } from "./catalog-sync.ts";
 import { allCandidates, gateReason, selectCandidates } from "./router.ts";
 import { DEFAULT_STRATEGY, type RoutingStrategy, STRATEGIES } from "./scoring.ts";
 import {
@@ -80,8 +82,10 @@ export interface FreeStatus {
   availableModels: number;
   /** Variable names in keys.env that don't match any provider (a hand-edit warning). */
   unknownKeys: string[];
-  /** The vendored catalog version, so the UX can show how fresh the model list is. */
+  /** The active catalog version, so the UX can show how fresh the model list is. */
   catalogVersion: string;
+  catalogTier: string;
+  catalogGeneratedAt: string;
 }
 
 // ── Strategy resolution ───────────────────────────────────────────────────────
@@ -166,6 +170,7 @@ export async function callFree(
   opts: CallOpts,
   _call: (o: CallOpts) => Promise<ModelResponse> = callOpenAI,
 ): Promise<ModelResponse> {
+  await syncFreeCatalogIfStale();
   // 1. Refresh keys if the file changed; kick background health (never blocks the turn).
   const keysChanged = keysChangedSinceCache();
   const keys = loadKeys();
@@ -381,6 +386,7 @@ export function listFreeModels(): FreeModelInfo[] {
 
 /** The whole free-router status: keys path, active strategy, and a per-provider rollup. */
 export function freeStatus(): FreeStatus {
+  const catalog = currentCatalog();
   const keys = loadKeys();
   const models = listFreeModels();
   const byPlatform = new Map<string, FreeModelInfo[]>();
@@ -413,6 +419,8 @@ export function freeStatus(): FreeStatus {
     totalModels: models.length,
     availableModels: models.filter((m) => m.available).length,
     unknownKeys: keys.unknown,
-    catalogVersion: CATALOG.version,
+    catalogVersion: catalog.version,
+    catalogTier: catalog.tier,
+    catalogGeneratedAt: catalog.generatedAt,
   };
 }

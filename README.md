@@ -15,7 +15,7 @@
 
 ![OB-1 start-free demo](docs/media/start-free.gif)
 
-*Start free: OB-1 works instantly with 150+ free models across 20+ providers — no account or card. Keyless providers work out of the box; add your own free provider keys to `~/.ob1/keys.env` for more.*
+*Start free: OB-1 works instantly with Oracle's monthly free-model catalog — no account or card. Hosted plans unlock the live catalog; add your own provider keys to `~/.ob1/keys.env` for higher limits.*
 
 ![OB-1 completing a task](docs/media/first-task.gif)
 
@@ -30,9 +30,10 @@ repository and it can read the codebase, build a repo map, edit files, run check
 coordinate deeper multi-agent passes when the task deserves more compute.
 
 The default path is free out of the box: OB-1 has an embedded free-models router built into the CLI
-process — no server, no clone, no Docker/Node dependency — pooling free tiers across 20+ cloud
-providers. Keyless providers answer your first message with no setup. No API key, card, or account is
-required to start; add your own free provider keys to `~/.ob1/keys.env` for predictable capacity.
+process — no server, no clone, no Docker/Node dependency — backed by Oracle's monthly free-model
+catalog. Keyless providers answer your first message with no setup. No API key, card, or account is
+required to start; hosted plans unlock Oracle's live catalog, and your own provider keys in
+`~/.ob1/keys.env` add predictable capacity.
 
 ## What You Get
 

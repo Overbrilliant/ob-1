@@ -2,6 +2,14 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.5] - 2026-07-08
+
+- Free models now refresh from OB-1's Oracle catalog endpoint: free/anonymous sessions use the monthly
+  catalog, while signed-in hosted plans unlock the live catalog.
+- The CLI verifies Oracle catalog signatures before activating a refreshed catalog, keeps separate
+  monthly/live caches, and falls back to the bundled monthly catalog offline.
+- Updated free-model copy to avoid stale fixed-count claims and show the active catalog tier in `/free`.
+
 ## [0.3.4] - 2026-07-07
 
 - Polished first-run onboarding copy to match the final Free, endpoint, and Hosted frontier flows.
