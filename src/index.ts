@@ -54,7 +54,7 @@ import { callModel } from "./providers/gateway.ts";
 import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning, contextWindowFor } from "./providers/models.ts";
 import { FREE, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
 import { listFreeModels, freeStatus, ensureKeysFile, runFreeHealthCheck, STRATEGIES, type FreeStatus } from "./providers/free/index.ts";
-import { syncFreeCatalogIfStale } from "./providers/free/catalog-sync.ts";
+import { syncFreeCatalogIfStale, startFreeCatalogSyncLoop } from "./providers/free/catalog-sync.ts";
 import { spawn } from "node:child_process";
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
@@ -501,7 +501,7 @@ ${c.bold("Commands")}
   ${c.cyan("/exit")} ${c.dim("|")} ${c.cyan("/quit")}          exit the session
 
   ${c.bold("Model & mode")}
-  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} use Oracle's monthly catalog, hosted plans unlock the live catalog
+  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} add new releases after 30 days, hosted plans get them immediately
   ${c.cyan("/mode")} ${c.dim("[auto|act|plan]")} pick execution mode ${c.dim("(↑↓ · Enter)")}: auto = no prompts, act = ask before edits, plan = read-only
   ${c.cyan("/effort")} ${c.dim("[low|medium|high]")}  reasoning effort ${c.dim("(↑↓ · Enter)")} — thinking budget for models that support it ${c.dim("(default medium)")}
 
@@ -745,7 +745,7 @@ function watchForSubscription(): void {
       ctrl?.setErrorAction(undefined); // the upgrade banner is no longer relevant
       await syncFreeCatalogIfStale({ force: true });
       const name = plan!.plan.charAt(0).toUpperCase() + plan!.plan.slice(1);
-      ctrl?.pushLine(c.green(`  ✓ Subscription active — you're on the ${name} plan. Frontier models and the live free catalog are unlocked.`));
+      ctrl?.pushLine(c.green(`  ✓ Subscription active — you're on the ${name} plan. Frontier models and new free models are unlocked.`));
     }
   }, 5000);
   // Don't let this poller keep the process alive: if the user exits before checkout completes (or the
@@ -1028,7 +1028,7 @@ async function pickModel(): Promise<void> {
         : "frontier model — subscribe to unlock",
       value: m.id ?? m.label,
     }));
-    items.push({ label: "Free models ▸ — Oracle catalog, auto-routed", hint: onFree ? `connected · ${freeModelLabel(cfg.model)}` : "monthly catalog free · hosted plans unlock the live catalog", value: "__free__" });
+    items.push({ label: "Free models ▸ — signed catalog, auto-routed", hint: onFree ? `connected · ${freeModelLabel(cfg.model)}` : "free gets new releases after 30 days · hosted gets them immediately", value: "__free__" });
     for (const prof of PROFILES.filter((p) => p.id !== FREE.id && p.id !== CUSTOM.id)) {
       const active = cfg.providerProfile === prof.id;
       items.push({
@@ -2419,9 +2419,10 @@ startup.push(banner());
   startup.push(c.dim(`  ${accessLine}`));
 }
 if (cfg.providerProfile === "free")
-  startup.push(c.dim(`  model: ${freeModelLabel(cfg.model)} — Oracle free-model catalog${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : ""}`));
+  startup.push(c.dim(`  model: ${freeModelLabel(cfg.model)} — signed free-model catalog${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : ""}`));
 else
   startup.push(c.dim(`  model: ${cfg.model} — ${describeModel(cfg.model)}${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : " · output governed by model"}`));
+if (cfg.providerProfile === "free") startFreeCatalogSyncLoop();
 if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restored (global ~/.ob1/settings.json) — change with /models or individual slash commands"));
 // Settings health: a hand-edited settings.json with a bad value silently fell back to a default — say
 // so, so a typo'd sandbox/mode isn't a silent mystery. Warnings (unknown keys) are shown dimmer.

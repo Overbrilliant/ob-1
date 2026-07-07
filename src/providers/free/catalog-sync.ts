@@ -23,6 +23,7 @@ const publicKey = createPublicKey(PUBLIC_KEY_PEM);
 let lastAttemptAt = 0;
 let lastAuthState = "";
 let inFlight: Promise<void> | null = null;
+let syncLoop: ReturnType<typeof setInterval> | undefined;
 
 function disabled(): boolean {
   return process.env.OB1_FREE_CATALOG_SYNC_DISABLED === "1" || process.env.OB1_FREE_DISABLE_BG === "1";
@@ -100,4 +101,13 @@ export async function syncFreeCatalogIfStale(opts: { force?: boolean } = {}): Pr
 
 export function kickFreeCatalogSync(): void {
   void syncFreeCatalogIfStale();
+}
+
+export function startFreeCatalogSyncLoop(intervalMs = SYNC_INTERVAL_MS): void {
+  if (syncLoop || disabled()) return;
+  kickFreeCatalogSync();
+  syncLoop = setInterval(() => {
+    void syncFreeCatalogIfStale({ force: true });
+  }, intervalMs);
+  syncLoop.unref?.();
 }

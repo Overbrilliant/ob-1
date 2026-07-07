@@ -2,18 +2,25 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.7] - 2026-07-08
+
+- Free-model catalog refresh now starts in the background when the Free models provider is active, then
+  polls regularly so free and paid catalogs stay current without waiting for a model call.
+- Reworded free-model catalog copy around the actual entitlement: free users get new free models after
+  30 days; hosted plans get them immediately.
+
 ## [0.3.6] - 2026-07-08
 
 - When `/upgrade` or `/subscribe` sees a payment clear, the running TUI now force-refreshes the signed
-  Oracle catalog immediately, so the live free-model catalog unlocks in-session without waiting for the
-  normal refresh interval.
+  catalog immediately, so newly released free models unlock in-session without waiting for the normal
+  refresh interval.
 
 ## [0.3.5] - 2026-07-08
 
-- Free models now refresh from OB-1's Oracle catalog endpoint: free/anonymous sessions use the monthly
-  catalog, while signed-in hosted plans unlock the live catalog.
-- The CLI verifies Oracle catalog signatures before activating a refreshed catalog, keeps separate
-  monthly/live caches, and falls back to the bundled monthly catalog offline.
+- Free models now refresh from OB-1's signed catalog endpoint: free/anonymous sessions get models after the
+  30-day promotion window, while signed-in hosted plans get newly released free models immediately.
+- The CLI verifies catalog signatures before activating a refreshed catalog, keeps separate free/paid
+  caches, and falls back to the bundled free catalog offline.
 - Updated free-model copy to avoid stale fixed-count claims and show the active catalog tier in `/free`.
 
 ## [0.3.4] - 2026-07-07

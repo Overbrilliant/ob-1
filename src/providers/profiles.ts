@@ -39,18 +39,18 @@ export interface ProviderProfile {
 }
 
 // Free models — the EMBEDDED router (src/providers/free). Unlike every other profile there is no server to
-// run, no URL, and no single key: OB-1 routes across Oracle's free-model catalog in-process, activated by
+// run, no URL, and no single key: OB-1 routes across a signed free-model catalog in-process, activated by
 // one editable keys file (keyless providers work with nothing at all). The wire provider is "free", not
 // "openai" — callFree picks a concrete OpenAI-compatible endpoint per request. defaultModel "auto" ⇒
 // strategy routing; keyOptional (keyless providers need none); needsModel false (never type a model id).
 export const FREE: ProviderProfile = {
   id: "free",
   name: "Free models",
-  tagline: "Oracle free-model catalog — keys optional, routed automatically",
+  tagline: "Signed free-model catalog — keys optional, routed automatically",
   blurb: [
-    "OB-1 routes across Oracle's free-model catalog in-process — no server, no second process. Free",
-    "users get the monthly catalog; hosted subscribers unlock the live catalog immediately. Keyless",
-    "providers work with zero setup, and you can add your own provider keys for higher limits.",
+    "OB-1 routes across a signed free-model catalog in-process — no server, no second process. Free",
+    "users get newly released free models after 30 days; hosted subscribers get them immediately.",
+    "Keyless providers work with zero setup, and you can add your own provider keys for higher limits.",
     "",
     "Every request is routed to the best available model for your chosen strategy, with automatic",
     "failover, rate-limit tracking, and cooldowns. Keys never leave this machine except to call the",

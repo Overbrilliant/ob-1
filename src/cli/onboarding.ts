@@ -117,7 +117,7 @@ export async function runOnboarding(_opts: { force?: boolean } = {}): Promise<vo
   try {
     const envRoute = detectEnvProvider();
     const p = await arrowSelect("How do you want to run models?", [
-      "Start free - Oracle monthly free-model catalog; works instantly, add keys for more",
+      "Start free - signed free-model catalog; new releases arrive after 30 days",
       envRoute
         ? `Use ${envRoute.source} — ${envRoute.label}; runtime-only, no settings write`
         : "Use my endpoint — OpenAI-compatible URL/key, Ollama, LM Studio, llama.cpp, vLLM, LAN GPU",
