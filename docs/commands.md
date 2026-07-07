@@ -10,7 +10,12 @@ Common OB-1 commands:
 | `/memory add <text>` | Add a fact to memory. |
 | `/memory search <query>` | Search project memory. |
 | `/memory export [dot\|html]` | Export the relationship graph. |
-| `/mode` | Switch agent mode. |
+| `/mode solo\|fusion` | Switch agent mode; `fusion` is sticky (`/solo` exits). |
+| `/subagents [on\|off]` | Parallel read-only subagents for a Solo turn. On by default. |
+| `/escalation [on\|off]` | On verified failure, escalate the turn to Fusion best-of-N. On by default. |
+| `/review` | Independent refute-reviewer over your current diff; reports only correctness bugs it cannot refute, then offers to fix them. |
+| `/deep <task>` | Adaptive AB-MCTS search: Thompson-sampled generate-vs-refine across the model ensemble, graded by the real verifier. |
+| `/eval [modes…]` | Compute-matched eval: does each mode beat Solo at equal tokens? |
 | `/sandbox` | Switch shell sandbox mode. |
 | `/auto` | Adjust auto-approval behavior. |
 | `/mcp` | List connected MCP servers and tools. |

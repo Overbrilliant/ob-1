@@ -12,7 +12,7 @@ Use this template for the first published compute-matched eval. Keep failures in
 | Machine | `TODO` |
 | Model route | `TODO` |
 | Model id | `TODO` |
-| Modes | `solo`, `fusion`, `council`, `personas` |
+| Modes | `solo`, `fusion`, `escalate`, `deep` |
 | Trials | `TODO` |
 | Task set | Built-in `eval/tasks/*.json` plus any listed additions |
 
@@ -22,14 +22,14 @@ Use this template for the first published compute-matched eval. Keep failures in
 bun install --frozen-lockfile
 bun run typecheck
 OB1_BASE_URL=... OB1_API_KEY=... OB1_MODEL=... OB1_EVAL_TRIALS=3 \
-  bun run scripts/eval.ts solo fusion council personas 2>&1 | tee eval-report.txt
+  bun run scripts/eval.ts solo fusion escalate deep 2>&1 | tee eval-report.txt
 ```
 
 Or use the manual GitHub Actions workflow:
 
 ```sh
 gh workflow run eval.yml --repo Overbrilliant/ob-1 \
-  -f modes="solo fusion council personas" \
+  -f modes="solo fusion escalate deep" \
   -f trials=3
 ```
 

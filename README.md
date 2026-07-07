@@ -167,7 +167,7 @@ Update checks are non-blocking and skip CI. Set `OB1_NO_UPDATE_CHECK=1` to disab
 | Works with no API key | Yes, via the embedded free-models router (keyless providers) | No | No | No |
 | Local/LAN models | Yes | Limited | Yes | Yes |
 | Persistent visible memory | SQLite + graph inspector | No | No | No |
-| Multi-agent modes | Fusion, Council, Personas | No | No | No |
+| Multi-agent modes | Fusion best-of-N, verified escalation, refute-review, adaptive search | No | No | No |
 | Sandbox/permissions | macOS Seatbelt, Linux bubblewrap, approvals | Yes | Varies | Limited |
 | Hosted convenience tier | Optional paid | Required account | Bring your own | Bring your own |
 
@@ -191,12 +191,18 @@ Start with `solo`. Switch modes only when the task benefits from extra work.
 | Mode | Use it for |
 | --- | --- |
 | `solo` | Normal coding tasks. Fastest and cheapest path. |
-| `fusion` | Several candidate solutions, checked and merged into one result. |
+| `fusion` | Several candidate solutions, checked against the project's real signal, best one selected (sticky; `/solo` exits). |
 
 ```text
 /mode solo
 /mode fusion
 ```
+
+Solo already self-corrects: after a file-changing turn it reruns the project's checks and fixes
+failures. On a *verified* failure it escalates once to Fusion best-of-N automatically (`/escalation`
+toggles this). Use `/review` for an independent refute-reviewer over your diff, and `/deep <task>` for
+an adaptive AB-MCTS search. Any mode that cannot beat Solo at equal tokens is deleted — see
+[`docs/multimind.md`](docs/multimind.md).
 
 ## Commands
 
@@ -225,6 +231,10 @@ ob1 --version       print the version
 /map                  show the ranked repository map
 /mcp                  list connected MCP servers and tools
 /skills               list available skills
+/mode solo|fusion     switch agent mode (fusion is sticky; /solo exits)
+/review               refute-review the current diff
+/deep <task>          adaptive AB-MCTS search
+/escalation on|off    escalate verified failures to Fusion (default on)
 /eval [modes…]        run compute-matched evals
 /clear                reset conversation context
 /exit                 quit
@@ -286,7 +296,7 @@ src/
   eval/                task harness, runners, parity checks, reports
   mcp/                 MCP clients and server manager
   memory/              fact store, embeddings, ranking, reflection, export
-  multimind/           Fusion, Council, Personas, Adaptive routing, worker orchestration
+  multimind/           Fusion best-of-N, verified escalation, refute-review, deep search, subagents, worker orchestration
   providers/           OpenAI-compatible model gateway
   safety/              shell policy, validation, and OS sandbox integration
   skills/              on-demand markdown skill registry
