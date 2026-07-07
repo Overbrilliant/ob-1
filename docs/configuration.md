@@ -25,11 +25,33 @@ back to disk.
 | `OB1_PERMISSION` | `autopilot`, `ask` | Tool approval mode. |
 | `OB1_SANDBOX` | `off`, `workspace-write`, `read-only` | OS sandbox mode. |
 | `OB1_EFFORT` | `low`, `medium`, `high` | Reasoning effort hint. |
-| `OB1_AUTO_ROUTE` | `on`, `off` | Adaptive solo-to-multi-agent routing. |
-| `OB1_SUBAGENTS` | `on`, `off` | Read-only subagent planning/reporting. |
+| `OB1_SUBAGENTS` | `on`, `off` | Read-only subagent planning/reporting. On by default. |
+| `OB1_ESCALATION` | `on`, `off` | On verified failure (checks still failing after Solo's self-fix rounds), escalate the turn to Fusion best-of-N. On by default. |
 | `OB1_REPO_MAP` | `on`, `off` | Automatic repository map context. |
 | `OB1_CHECKPOINT` | `on`, `off` | Shadow-git checkpoints and `/rewind`. |
 | `OB1_QUALITY` | `off`, `normal`, `strict` | Task-quality reminders and verification pressure. |
+
+## Multi-Agent Modes
+
+These refine the multi-agent paths; none is required for a good result. Fusion and Deep auto-detect
+the strongest objective signal for the project (a test suite, else fast compile gates, else syntax)
+with no configuration — these variables only override that default, never gate quality. See
+[Multi-Agent Modes](multimind.md).
+
+| Setting | Values | Purpose |
+|---|---|---|
+| `OB1_SUBAGENTS_WRITE` | `1` | Enable parallel *write*-subagents (disjoint file lanes, gated merge). High-risk; off by default. |
+| `OB1_SUBAGENTS_REPORT` | `0`, `off` | Disable the saved `.ob1/subagents/*.md` report. On by default. |
+| `OB1_FUSION_MODELS` | comma list | Explicit ensemble, used verbatim (otherwise the diversity gate chooses). |
+| `OB1_FUSION_N` | integer | Candidate count (default 3). |
+| `OB1_FUSION_CHECK` | command | Objective check command; `$OB1_FILE` is the candidate's code. |
+| `OB1_FUSION_TEST_CMD` | command | Force a test-tier signal with this command. |
+| `OB1_FUSION_TARGET` | path | Default file path to apply/score a candidate against. |
+| `OB1_FUSION_WORKTREE` | `1` | Score each candidate in a git worktree at HEAD by running real tests. |
+| `OB1_FUSION_MOA` | `1` | Add one Mixture-of-Agents refine layer (candidates see peers). |
+| `OB1_FUSION_JUDGE_MODEL` | model id | Model for the selector/synthesizer. |
+| `OB1_DEEP_BUDGET` | integer | `/deep` worker-call budget (default 9). |
+| `OB1_DEEP_EVAL_BUDGET` | integer | `deep`'s budget under `/eval` (default 4, compute-matched to Fusion). |
 
 ## Memory and Tools
 

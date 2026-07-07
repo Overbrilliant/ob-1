@@ -1,15 +1,13 @@
-// Deterministic test (no API key) for write-capable Council/Fusion workers and the workspace-copy
-// isolation that backs Fusion. Covers: runWorker now RUNS mutating tools (gated by `approve`),
-// createWorkspaceCopy makes an isolated temp-dir copy (non-git) that excludes the data dir and cleans
-// up, Council hands its workers the FULL toolset (read-only only in Plan mode), and Fusion falls back
-// to read-only when no mkTools factory is wired.
+// Deterministic test (no API key) for write-capable Fusion workers and the workspace-copy isolation
+// that backs Fusion. Covers: runWorker now RUNS mutating tools (gated by `approve`), createWorkspaceCopy
+// makes an isolated temp-dir copy (non-git) that excludes the data dir and cleans up, and Fusion falls
+// back to read-only when no mkTools factory is wired.
 // Usage: bun run scripts/worker-write-smoke.ts
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runWorker } from "../src/multimind/runtime.ts";
 import { createWorkspaceCopy } from "../src/multimind/worktree.ts";
-import { runCouncil } from "../src/multimind/council.ts";
 import { runFusion } from "../src/multimind/fusion.ts";
 import { loadConfig } from "../src/config.ts";
 import type { Tool } from "../src/agent/tools.ts";
@@ -77,19 +75,7 @@ wt.cleanup();
 check("cleanup removes the copy", !existsSync(wt.path));
 rmSync(base, { recursive: true, force: true });
 
-// --- 5. Council hands workers the FULL toolset; Plan mode is read-only ---
-let councilTools: Map<string, Tool> | undefined;
-const capCouncil = (cap: (m: Map<string, Tool>) => void) => (async (o: any): Promise<WorkerResult> => {
-  if (o.label === "author") cap(o.tools);
-  return { label: o.label, text: o.label.startsWith("reviewer:") ? "ok\nVERDICT: OK" : "x\nVERDICT: ACCEPT", inputTokens: 1, outputTokens: 1, ok: true };
-}) as any;
-await runCouncil({ task: "t", cfg, tools: fullMap, rounds: 1, _run: capCouncil((m) => { councilTools = m; }) });
-check("council gives workers full (mutating) tools", !!councilTools?.has("write_file") && !!councilTools?.has("read_file"));
-let planTools: Map<string, Tool> | undefined;
-await runCouncil({ task: "t", cfg, tools: fullMap, rounds: 1, planMode: true, _run: capCouncil((m) => { planTools = m; }) });
-check("council Plan mode → read-only (no mutating tools)", !planTools?.has("write_file") && !!planTools?.has("read_file"));
-
-// --- 6. Fusion without mkTools → candidates stay read-only (back-compat) ---
+// --- 5. Fusion without mkTools → candidates stay read-only (back-compat) ---
 let candTools: Map<string, Tool> | undefined;
 await runFusion({
   task: "t", cfg, tools: fullMap, n: 1,
@@ -101,4 +87,4 @@ await runFusion({
 check("fusion without mkTools → candidate read-only", !candTools?.has("write_file") && !!candTools?.has("read_file"));
 
 if (fail) { console.error("\n✗ worker-write smoke FAILED"); process.exit(1); }
-console.log("\n✓ worker-write smoke passed (gated mutating workers + workspace-copy isolation + council full-tools / plan read-only + fusion read-only fallback)");
+console.log("\n✓ worker-write smoke passed (gated mutating workers + workspace-copy isolation + fusion read-only fallback)");

@@ -1,7 +1,7 @@
 // Regression guard: every user command advertised in /help must also be reachable from the TUI slash
 // menu (SLASH_COMMANDS in src/cli/tui.tsx). These two lists are maintained by hand in different files,
 // so it's easy to wire a command into the dispatch + /help but forget the menu — which is exactly how
-// /rewind (and /autoroute) went missing. Pure text comparison (no imports → no module side effects).
+// /rewind once went missing. Pure text comparison (no imports → no module side effects).
 // Usage: bun run scripts/slash-menu-smoke.ts
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -32,9 +32,8 @@ const ALIAS = new Set(["/model" /* → /models */, "/quit" /* → /exit */]);
 const missing = [...helpCmds].filter((cmd) => !menu.has(cmd) && !ALIAS.has(cmd));
 check(`every /help command is in the slash menu${missing.length ? ` (missing: ${missing.join(", ")})` : ""}`, missing.length === 0);
 
-// Explicit pins for the two that regressed (so this exact bug can't come back).
+// Explicit pin for the one that regressed (so this exact bug can't come back).
 check("/rewind is in the slash menu", menu.has("/rewind"));
-check("/autoroute is in the slash menu", menu.has("/autoroute"));
 
 // Sanity: the menu shouldn't advertise commands /help never mentions (catches typos / dead entries).
 const stray = [...menu].filter((cmd) => !helpCmds.has(cmd) && !ALIAS.has(cmd));

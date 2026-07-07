@@ -7,7 +7,7 @@ import type { Provider } from "./providers/types.ts";
 import { normalizeBaseUrl, profileById } from "./providers/profiles.ts";
 import { validateSettings } from "./config-validate.ts";
 
-export type Mode = "solo" | "fusion" | "council" | "personas" | "adaptive";
+export type Mode = "solo" | "fusion";
 export type SandboxMode = "off" | "read-only" | "workspace-write";
 export type QualityMode = "off" | "normal" | "strict";
 /** Routing strategy for the embedded free-models router (src/providers/free). Kept as a local string union
@@ -226,14 +226,16 @@ export interface Config {
    *  than left at the built-in default. The trust gate downgrades only an IMPLICIT autopilot in an
    *  untrusted folder, so a user who explicitly chose autopilot keeps it. Runtime-only (never persisted). */
   permissionModeExplicit: boolean;
-  /** Solo auto-routing. ON → a Solo turn may escalate to a deeper mode (Fusion/Council), but ONLY when
-   *  the task warrants deeper analysis (suggestMode) AND Solo fails the objective check. OFF (default) →
-   *  every Solo turn stays pure Solo; nothing auto-escalates. Env override: OB1_AUTO_ROUTE=on|off. */
-  autoRoute: boolean;
   /** Parallel subagents. ON (default) → a Solo turn is offered the `spawn_subagents` tool to fan out
    *  independent read-only sub-tasks in parallel (the agent decides when; read-only, so low-risk). OFF →
    *  not offered. Env override: OB1_SUBAGENTS=on|off. */
   subagents: boolean;
+  /** Verified escalation. ON (default) → when a Solo turn's auto-verify self-fix loop STILL fails after
+   *  its round budget, the turn escalates to Fusion best-of-N with the failure report as context (so
+   *  candidates FIX rather than restart). The objective SIGNAL decides this, not an LLM — no extra model
+   *  call to route. OFF → never escalate; the changes are left for the user to review (the legacy
+   *  behavior). Forced off on apply turns + Plan mode. Env override: OB1_ESCALATION=on|off. */
+  escalation: boolean;
   /** Auto repo map. ON (default) → a fresh, budgeted codebase map is injected into every system prompt
    *  so the model always knows the structure (rebuilt after file changes). OFF → not injected (the
    *  repo_map tool still works on demand). Env override: OB1_REPO_MAP=on|off. */
@@ -284,8 +286,8 @@ export interface PersistedSettings {
   model?: string;
   mode?: Mode;
   planMode?: boolean;
-  autoRoute?: boolean;
   subagents?: boolean;
+  escalation?: boolean;
   repoMap?: boolean;
   memEvolve?: boolean;
   memReflect?: boolean;
@@ -311,7 +313,7 @@ export interface PersistedSettings {
 }
 
 const SETTINGS_FILE = "settings.json";
-const MODES: Mode[] = ["solo", "fusion", "council", "personas", "adaptive"];
+const MODES: Mode[] = ["solo", "fusion"];
 const SANDBOXES: SandboxMode[] = ["off", "read-only", "workspace-write"];
 const QUALITY_MODES: QualityMode[] = ["off", "normal", "strict"];
 
@@ -427,8 +429,8 @@ export function saveSettings(cfg: Config): void {
     model: envActive || envSet("OB1_MODEL") ? prev.model : supportedProvider ? cfg.model : prev.model,
     mode: cfg.mode,
     planMode: cfg.planMode,
-    autoRoute: envSet("OB1_AUTO_ROUTE") ? prev.autoRoute : cfg.autoRoute,
     subagents: envSet("OB1_SUBAGENTS") ? prev.subagents : cfg.subagents,
+    escalation: envSet("OB1_ESCALATION") ? prev.escalation : cfg.escalation,
     repoMap: envSet("OB1_REPO_MAP") ? prev.repoMap : cfg.repoMap,
     memEvolve: envSet("OB1_MEM_EVOLVE") ? prev.memEvolve : cfg.memEvolve,
     memReflect: envSet("OB1_MEM_REFLECT") ? prev.memReflect : cfg.memReflect,
@@ -485,7 +487,7 @@ export function hasPersistedSettings(settingsDir: string): boolean {
   }
 }
 
-/** Raw persisted settings (pre-migration) — used at boot to show the one-time adaptive→Solo note. */
+/** Raw persisted settings (pre-migration) — used at boot to show the one-time retired-mode→Solo note. */
 export function persistedSettings(settingsDir: string): PersistedSettings {
   return loadPersisted(settingsDir);
 }
@@ -591,14 +593,14 @@ export function loadConfig(): Config {
   // built-in default. A fresh install has no saved permissionMode → implicit → the trust gate may downgrade
   // it to "ask" in an untrusted folder (index.ts), so a first `ob1` in a real repo never runs autopilot unasked.
   const permissionModeExplicit = envPerm !== undefined || saved.permissionMode != null;
-  const envAutoRoute = /^(1|true|on)$/i.test(process.env.OB1_AUTO_ROUTE ?? "")
-    ? true
-    : /^(0|false|off)$/i.test(process.env.OB1_AUTO_ROUTE ?? "")
-      ? false
-      : undefined;
   const envSubagents = /^(1|true|on)$/i.test(process.env.OB1_SUBAGENTS ?? "")
     ? true
     : /^(0|false|off)$/i.test(process.env.OB1_SUBAGENTS ?? "")
+      ? false
+      : undefined;
+  const envEscalation = /^(1|true|on)$/i.test(process.env.OB1_ESCALATION ?? "")
+    ? true
+    : /^(0|false|off)$/i.test(process.env.OB1_ESCALATION ?? "")
       ? false
       : undefined;
   const envRepoMap = /^(1|true|on)$/i.test(process.env.OB1_REPO_MAP ?? "")
@@ -640,11 +642,12 @@ export function loadConfig(): Config {
   const envFreeStrategy = FREE_STRATEGIES.includes(process.env.OB1_FREE_STRATEGY as FreeStrategy)
     ? (process.env.OB1_FREE_STRATEGY as FreeStrategy)
     : undefined;
-  // Migration: `adaptive` is retired as an interactive mode — it's now the off-by-default Solo
-  // auto-route toggle. Collapse ANY persisted adaptive workspace to Solo; a deliberate autoRoute:true
-  // is preserved independently below, so "Solo + auto-route on" reproduces the old adaptive behaviour.
-  let mode: Mode = saved.mode && MODES.includes(saved.mode) ? saved.mode : "solo";
-  if (mode === "adaptive") mode = "solo";
+  // Migration (multimind v2): the only interactive modes are now solo|fusion. The retired heavy modes
+  // (council/personas) and the old adaptive router are gone — collapse ANY persisted mode that is not
+  // solo|fusion back to Solo. MODES excludes them, so this ternary does the collapse; a later
+  // saveSettings rewrites the file to mode:"solo". (config-validate accepts the legacy values so they
+  // reach here rather than being dropped as invalid.)
+  const mode: Mode = saved.mode && MODES.includes(saved.mode) ? saved.mode : "solo";
   return {
     provider: p.provider,
     model,
@@ -668,8 +671,8 @@ export function loadConfig(): Config {
       (saved.freeStrategy && FREE_STRATEGIES.includes(saved.freeStrategy) ? saved.freeStrategy : "balanced"),
     mode,
     planMode: saved.planMode ?? false,
-    autoRoute: envAutoRoute ?? saved.autoRoute ?? false,
     subagents: envSubagents ?? saved.subagents ?? true,
+    escalation: envEscalation ?? saved.escalation ?? true,
     repoMap: envRepoMap ?? saved.repoMap ?? true,
     memEvolve: envMemEvolve ?? saved.memEvolve ?? false,
     memReflect: envMemReflect ?? saved.memReflect ?? false,

@@ -11,7 +11,12 @@ import { extractCode, scoreCandidate } from "../multimind/fusion.ts";
 import type { EvalTask } from "./tasks.ts";
 
 export interface RunOutput { text: string; inputTokens: number; outputTokens: number }
-export type ModeRunner = (taskPrompt: string) => Promise<RunOutput>;
+// A runner takes the task PROMPT (verbatim, as it always has) and OPTIONALLY the full EvalTask — so a mode
+// that consults the per-task objective check (e.g. `escalate` deciding whether to escalate, or `fusion`
+// grounding its selection) can read `task.check`. Existing prompt-only runners stay source-compatible: they
+// simply ignore the second argument. The harness still grades every mode INDEPENDENTLY afterward, so a mode
+// reading its own check can't grade itself green.
+export type ModeRunner = (taskPrompt: string, task?: EvalTask) => Promise<RunOutput>;
 
 export interface Outcome {
   taskId: string;
@@ -37,7 +42,7 @@ export async function runEval(opts: {
       for (let t = 0; t < trials; t++) {
         let pass = false, checked = false, inTok = 0, outTok = 0;
         try {
-          const out = await runner(task.prompt);
+          const out = await runner(task.prompt, task);
           inTok = out.inputTokens; outTok = out.outputTokens;
           const { code, lang } = extractCode(out.text);
           const score = await scoreCandidate(code, { langHint: lang ?? task.lang, check: task.check, cwd: opts.cwd });

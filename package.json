@@ -51,6 +51,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
+    "test": "bun test",
     "smoke": "bun run scripts/smoke.ts",
     "lint": "biome lint src scripts",
     "format:check": "biome format src scripts --write=false",

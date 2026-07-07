@@ -33,21 +33,19 @@ import { ProcRegistry } from "./agent/procs.ts";
 import { AgentRegistry } from "./agent/agent-registry.ts";
 import { TodoRegistry } from "./agent/todo-registry.ts";
 import { loadMcpServers, makeMcpLoaderTool, type McpLoadResult } from "./mcp/manager.ts";
-import { fanout } from "./multimind/orchestrator.ts";
-import { runLedger } from "./multimind/ledger.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "./agent/codeact.ts";
 import { runFusion } from "./multimind/fusion.ts";
-import { runCouncil } from "./multimind/council.ts";
+import { runDeep, deepNodeLine } from "./multimind/deep.ts";
+import { ensembleModels, detectSignal } from "./multimind/evaluate.ts";
+import { runReview, pickReviewerModel, type Finding } from "./multimind/reviewer.ts";
 import { applySolution as applySolutionStep } from "./multimind/apply.ts";
-import { runPersonas } from "./multimind/personas.ts";
-import { runAdaptive, suggestMode } from "./multimind/router.ts";
 import type { WorkerEvent } from "./multimind/runtime.ts";
 import { appendUsage, loadUsage, aggregate, formatUsage, turnCost } from "./usage/log.ts";
 import { loadTasks } from "./eval/tasks.ts";
 import { buildRunners, ALL_MODES, SELECTABLE_MODES } from "./eval/runners.ts";
 import { runEval, computeMatched, computeCapability } from "./eval/harness.ts";
 import { renderReport, renderCapability } from "./eval/report.ts";
-import { runTurn, describe as describeTool, systemPrompt, type HeavyMode } from "./agent/loop.ts";
+import { runTurn, describe as describeTool, systemPrompt } from "./agent/loop.ts";
 import { runVerification, shellExec } from "./agent/verify.ts";
 import { latestQualityLedger, formatQualityLedger } from "./agent/task-quality.ts";
 import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
@@ -318,11 +316,12 @@ async function runGoalLoop(goal: string): Promise<void> {
     const startLen = history.length;
     const outcome = await runTurn(prompt, history, turnDeps());
     if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
-    const escalatedText = outcome?.escalate ? await runEscalatedTurn(prompt, outcome.escalate) : undefined;
-    if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
-    rememberTurn(prompt, startLen, outcome?.escalate ? `goal→${outcome.escalate.mode}` : "goal");
+    // Verified escalation (default ON): loop.ts asked to escalate this iteration → hand it to Fusion once
+    // (the apply turn inside can't re-escalate — one escalation per iteration). Tag the episode "escalate".
+    if (outcome.escalate) await runEscalatedTurn(prompt, outcome.escalate);
+    rememberTurn(prompt, startLen, outcome.escalate ? "escalate" : "goal");
     persistSession();
-    const txt = escalatedText ?? lastAssistantText();
+    const txt = lastAssistantText();
     if (/\bGOAL_MET\b/.test(txt)) { console.log(c.green(`  ✓ goal achieved after ${i + 1} iteration(s)`)); activeGoal = null; return; }
     console.log(c.dim(`  ↻ goal iteration ${i + 1}/${maxIters} — not yet met, continuing…`));
   }
@@ -415,17 +414,9 @@ function workerProgress(ev: WorkerEvent): void {
 async function applySolution(task: string, solution: string): Promise<void> {
   await applySolutionStep({
     task, solution, planMode: cfg.planMode,
-    run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canEscalate: false, canSpawn: false, canSpawnWrite: false })); }, // applying a mode's result must not re-escalate or re-spawn
+    run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canSpawn: false, canSpawnWrite: false, canEscalateOnFailure: false })); }, // applying a mode's result must not re-spawn OR re-escalate (one escalation per user turn)
     log: console.log, note: c.dim,
   });
-}
-
-async function runEscalatedTurn(task: string, esc: { mode: HeavyMode; reason: string }): Promise<string | undefined> {
-  const { mode, reason } = esc;
-  console.log(c.dim(`  ↗ Solo routed this to ${modeColor(mode)(mode)} — ${reason}`));
-  if (mode === "fusion") return await fusionTurn(task);
-  if (mode === "council") return await councilTurn(task);
-  return await personasTurn(task);
 }
 
 let activeAbort: AbortController | null = null; // the current turn's cancel handle (ESC); null when idle
@@ -447,7 +438,7 @@ async function autoVerify(): Promise<{ ran: boolean; ok: boolean; report: string
   } catch { return null; }
 }
 
-function turnDeps(overrides?: { canEscalate?: boolean; canSpawn?: boolean; canSpawnWrite?: boolean }) {
+function turnDeps(overrides?: { canSpawn?: boolean; canSpawnWrite?: boolean; canEscalateOnFailure?: boolean }) {
   return {
     cfg, tools, store, readCache, approve: ui.approve, interactive: Boolean(stdin.isTTY), log: ui.log, gap: ui.gap, onText: ui.onText, endText: ui.endText,
     onReasoning: ui.onReasoning, endReasoning: ui.endReasoning, onUsage: ui.onUsage, onResolvedModel: ui.onResolvedModel, onErrorAction: ui.onErrorAction,
@@ -461,23 +452,24 @@ function turnDeps(overrides?: { canEscalate?: boolean; canSpawn?: boolean; canSp
     approvals,
     hooks: hooks.hooks,
     hookExec,
-    // The LLM router: offer Solo the escalate tool only when auto-route is on. Callers can force it off
-    // (apply turns) so a heavier mode's own result can't recursively re-escalate.
-    canEscalate: overrides?.canEscalate ?? cfg.autoRoute,
     // Parallel subagents: offer the spawn tool only when enabled; forced off on apply turns (no nesting).
     // Per-subagent progress drives both the inline meter (workerProgress) and the footer registry.
     canSpawn: overrides?.canSpawn ?? cfg.subagents,
     // Write-subagents: opt-in via OB1_SUBAGENTS_WRITE, high-risk (parallel edits). Forced off on apply turns.
     canSpawnWrite: overrides?.canSpawnWrite ?? /^(1|true|on)$/i.test(process.env.OB1_SUBAGENTS_WRITE ?? ""),
+    // Verified escalation: a failed-verification Solo turn returns { escalate } → dispatched to Fusion.
+    // Forced FALSE on apply turns (the override below) so an escalated Fusion's apply can't re-escalate —
+    // at most ONE escalation per user turn (loop.ts also gates on !planMode).
+    canEscalateOnFailure: overrides?.canEscalateOnFailure ?? cfg.escalation,
     onWorkerEvent: workerProgress,
     agentReg,
   };
 }
 
 /** Parse a positive-integer env override, falling back to `def` for missing OR malformed values. A bare
- *  Number()/Math.max(1, Number()) yields NaN for e.g. "two", and NaN then poisons the mode loops — Council's
- *  `for (r=1; r<=NaN; …)` never runs, leaving an empty rounds[] and a `rounds[len-1]` crash; eval/personas
- *  trial/round counts behave the same way. */
+ *  Number()/Math.max(1, Number()) yields NaN for e.g. "two", and NaN then poisons the loops it feeds —
+ *  a `for (i=0; i<NaN; …)` never runs, and eval trial counts / Fusion candidate counts behave the same
+ *  way — so a malformed override silently breaks the run instead of falling back to the default. */
 function envInt(name: string, def: number): number {
   const v = process.env[name];
   if (v == null || v === "") return def;
@@ -501,8 +493,8 @@ ${c.bold("Commands")}
 
   ${c.bold("Model & mode")}
   ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} give 150+ free models across 20+ providers, frontier models need a subscription
-  ${c.cyan("/mode")} ${c.dim("[m]")}             pick a mode ${c.dim("(↑↓ · Enter)")} or /mode solo|fusion|council|personas ${c.dim("— heavy modes stay on (sticky); /solo exits")}
-  ${c.cyan("/solo")}                 exit a heavy mode (fusion/council/personas) → back to Solo
+  ${c.cyan("/mode")} ${c.dim("[m]")}             pick a mode ${c.dim("(↑↓ · Enter)")} or /mode solo|fusion ${c.dim("— fusion stays on (sticky); /solo exits")}
+  ${c.cyan("/solo")}                 exit Fusion mode → back to Solo
   ${c.cyan("/plan")} ${c.dim("|")} ${c.cyan("/act")}           toggle read-only Plan vs Act mode
   ${c.cyan("/effort")} ${c.dim("[low|medium|high]")}  reasoning effort ${c.dim("(↑↓ · Enter)")} — thinking budget for models that support it ${c.dim("(default medium)")}
 
@@ -538,12 +530,10 @@ ${c.bold("Commands")}
 
   ${c.bold("Orchestration modes")}
   ${c.cyan("/goal")} ${c.dim("<condition>")}     keep working until a condition is met ${c.dim("(bounded loop · ESC or /goal stop)")}
-  ${c.cyan("/autoroute")} ${c.dim("[on|off]")}   Solo auto-routing ${c.dim("(↑↓ · Enter)")} — Solo itself decides (via the escalate tool) when a turn needs a heavier mode ${c.dim("(off by default)")}
   ${c.cyan("/subagents")} ${c.dim("[on|off]")}   parallel subagents ${c.dim("(↑↓ · Enter)")} — Solo may fan out independent read-only sub-tasks; watch them in the footer ${c.dim("(on by default)")}
-  ${c.cyan("/route")} <task>         one-shot adaptive: Solo first, escalate only if the task warrants it AND the check fails
-  ${c.cyan("/fanout")} <task>        multi-mind: N isolated workers + synthesis (~Nx tokens)
-  ${c.cyan("/council")} <task>       author ↔ reviewer revise rounds (≤3) → comprehensive finalizer
-  ${c.cyan("/personas")} <task>      goal → expert panel dialogue → facilitator finalizes
+  ${c.cyan("/escalation")} ${c.dim("[on|off]")}  on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N ${c.dim("(on by default)")}
+  ${c.cyan("/review")}               independent refute-reviewer over your current diff ${c.dim("— reports only correctness bugs it can't refute, then offers to fix them")}
+  ${c.cyan("/deep")} ${c.dim("<task>")}          adaptive AB-MCTS search ${c.dim("(Thompson-sampled generate-vs-refine across the model ensemble, graded by the real verifier · stops on a full pass)")}
   ${c.cyan("/eval")} ${c.dim("[modes…]")}        compute-matched eval: does each mode beat Solo at equal tokens?
   ${c.cyan("/codeact")} <task>       run a task in code-as-action mode (model emits code, sandboxed)
 
@@ -1044,18 +1034,12 @@ async function pickModel(): Promise<void> {
 // One-line description of what each mode does — shown after a switch and as a picker hint.
 function modeNote(m: Mode): string {
   return m === "fusion" ? "each task → N same-prompt candidates, auto-scored, synthesizer merges the best parts"
-    : m === "council" ? "each task → author ↔ reviewer revise rounds, then a comprehensive finalizer"
-    : m === "personas" ? "each goal → a tailored expert panel dialogue, then facilitator synthesis"
-    : m === "adaptive" ? "Solo first; escalate only when the task warrants deeper analysis AND the objective check fails"
     : "one model, one pass — the frugal default";
 }
-// Rough cost multiplier shown in the per-turn "still in <mode>" reminder — these modes fan out into
+// Rough cost multiplier shown in the per-turn "still in <mode>" reminder — Fusion fans out into
 // several model calls, so a stray heavy turn is expensive. Approximate, by design (depends on the task).
 function modeCostHint(m: Mode): string {
-  return m === "fusion" ? "~3× cost — candidates + synthesis"
-    : m === "council" ? "~3× cost — author ↔ reviewer rounds"
-    : m === "personas" ? "~5× cost — multi-expert panel"
-    : "";
+  return m === "fusion" ? "~3× cost — candidates + synthesis" : "";
 }
 /** Set when a heavy mode is freshly selected, so the FIRST turn after selection skips the "still in …"
  *  reminder (the user just chose it); every later turn shows it. Consumed in processLine. */
@@ -1099,7 +1083,7 @@ function setQualityMode(q: QualityMode): void {
 // shows the keys, so titles stay terse.
 async function pickMode(): Promise<void> {
   if (!ui.pick) return;
-  const topo: Mode[] = ["solo", "fusion", "council", "personas"];
+  const topo: Mode[] = ["solo", "fusion"];
   const items: { label: string; hint?: string; value: string }[] = topo.map((x) => ({ label: x, hint: modeNote(x), value: x }));
   // Plan/act is part of HOW a turn runs, so it lives in the mode picker (not a separate setting).
   items.push({
@@ -1141,14 +1125,6 @@ async function pickEffort(): Promise<void> {
   ], cfg.effort ?? "medium");
   if (e) setEffort(e as Effort);
 }
-async function pickAutoRoute(): Promise<void> {
-  if (!ui.pick) return;
-  const a = await ui.pick("Solo auto-route", [
-    { label: "off", hint: "always stay Solo (default) — never auto-escalate", value: "off" },
-    { label: "on", hint: "Solo may route a hard/high-stakes turn to Fusion/Council/Personas (it decides)", value: "on" },
-  ], cfg.autoRoute ? "on" : "off");
-  if (a) { cfg.autoRoute = a === "on"; console.log(`  auto-route ${cfg.autoRoute ? c.yellow("ON") : "off"}${c.dim(" — Solo decides per-turn whether to route to a heavier mode")}`); }
-}
 async function pickSubagents(): Promise<void> {
   if (!ui.pick) return;
   const a = await ui.pick("Subagents (parallel)", [
@@ -1156,6 +1132,14 @@ async function pickSubagents(): Promise<void> {
     { label: "off", hint: "no spawn_subagents tool", value: "off" },
   ], cfg.subagents ? "on" : "off");
   if (a) { cfg.subagents = a === "on"; console.log(`  subagents ${cfg.subagents ? c.yellow("ON") : "off"}${c.dim(" — Solo may spawn parallel read-only subagents for big, splittable tasks")}`); }
+}
+async function pickEscalation(): Promise<void> {
+  if (!ui.pick) return;
+  const a = await ui.pick("escalation", [
+    { label: "on", hint: "on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N (default)", value: "on" },
+    { label: "off", hint: "never escalate", value: "off" },
+  ], cfg.escalation ? "on" : "off");
+  if (a) { cfg.escalation = a === "on"; console.log(`  escalation ${cfg.escalation ? c.yellow("ON") : "off"}${c.dim(" — on verified failure, hand a Solo turn to fusion best-of-N")}`); }
 }
 async function pickRepoMap(): Promise<void> {
   if (!ui.pick) return;
@@ -1507,9 +1491,9 @@ async function handleCommand(line: string): Promise<boolean> {
     case "rewind": await rewindCmd(rest); break;
     case "mode": {
       const m = rest[0] as Mode;
-      if (["solo", "fusion", "council", "personas"].includes(m)) setMode(m);
+      if (["solo", "fusion"].includes(m)) setMode(m);
       else if (!rest[0] && ui.pick) await pickMode();   // bare /mode opens the picker on a TTY
-      else console.log(c.red("  usage: /mode solo|fusion|council|personas"));
+      else console.log(c.red("  usage: /mode solo|fusion"));
       break;
     }
     case "solo": setMode("solo"); break; // quick exit from a sticky heavy mode
@@ -1521,54 +1505,15 @@ async function handleCommand(line: string): Promise<boolean> {
       console.log(c.dim(`\n  ${map.totalFiles} files · ${map.totalSymbols} symbols\n`));
       break;
     }
-    case "fanout": {
-      if (!modelReachable()) { console.log(c.yellow("  /fanout needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /fanout <task>")); break; }
-      // Optional dual-ledger controller (item #11): act → assess → re-plan-on-stall, bounded. Default
-      // OFF; OB1_ORCH_LEDGER=1 routes /fanout through it instead of the single-shot fan-out.
-      if (process.env.OB1_ORCH_LEDGER === "1") {
-        console.log(c.dim("  dual-ledger orchestration (act → assess → re-plan on stall)…"));
-        const lr = await runLedger({ ledger: { task: arg, facts: [], guesses: [], plan: [arg] }, cfg, tools, onEvent: workerProgress, signal: activeAbort?.signal });
-        if (activeAbort?.signal.aborted) break;
-        const status = lr.satisfied ? c.green("satisfied") : lr.stalledOut ? c.yellow("stalled out (recovery exhausted)") : c.yellow("round cap reached");
-        console.log("\n" + c.bold("Ledger result:") + "\n" + lr.finalText + "\n");
-        console.log(c.dim(`  [${status} · ${lr.rounds} rounds · ${lr.replans} re-plans · ~${lr.totalInputTokens} in / ${lr.totalOutputTokens} out tokens]`));
-        break;
-      }
-      console.log(c.dim("  spawning isolated workers (multi-mind — uses ~Nx tokens)…"));
-      const r = await fanout({ task: arg, cfg, tools, onEvent: workerProgress, signal: activeAbort?.signal });
-      if (activeAbort?.signal.aborted) break; // ESC
-      // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-      for (const w of r.workers) console.log(c.dim(`  • ${w.label}: ${w.outputTokens} out tok${w.ok ? "" : c.yellow(" (incomplete)")}`));
-      console.log("\n" + c.bold("Synthesis:") + "\n" + r.synthesis + "\n");
-      console.log(c.dim(`  [${r.workers.length} workers + synthesizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens total]`));
-      // Persist the synthesized result like Fusion/Council/Personas do: the fan-out workers run read-only
-      // in isolated contexts, so without this the synthesis is only PRINTED and never lands on disk. Gated
-      // by shouldApply (only writes when the synthesis carries code, and never in Plan mode).
-      await applySolution(arg, r.synthesis);
-      break;
-    }
-    case "council": {
-      if (!modelReachable()) { console.log(c.yellow("  /council needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /council <task>")); break; }
-      await councilTurn(arg);
-      break;
-    }
-    case "personas": {
-      if (!modelReachable()) { console.log(c.yellow("  /personas needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /personas <task>")); break; }
-      await personasTurn(arg);
-      break;
-    }
-    case "route": {
-      if (!modelReachable()) { console.log(c.yellow("  /route needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /route <task>")); break; }
-      await adaptiveTurn(arg);
-      break;
-    }
     case "eval": {
       if (!modelReachable()) { console.log(c.yellow("  /eval needs a model provider (a key, or a configured endpoint via /models)")); break; }
       await evalTurn(rest);
+      break;
+    }
+    case "review": await reviewTurn(); break; // refute-reviewer over the current diff (Bugbot pattern)
+    case "deep": {
+      if (!arg) { console.log(c.red("  usage: /deep <task>")); break; }
+      await deepTurn(arg); // AB-MCTS-lite adaptive search (deepTurn guards modelReachable)
       break;
     }
     case "mcp": {
@@ -1682,7 +1627,7 @@ async function handleCommand(line: string): Promise<boolean> {
       // /settings was a menu that just duplicated the slash commands. It's gone — every setting is now a
       // first-class command. Keep a friendly redirect so old muscle memory isn't a dead "unknown command".
       console.log(c.dim("  settings are now individual commands — press / to browse them:"));
-      console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /autoroute · /subagents · /repomap · /quality · /trust · /allow"));
+      console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /subagents · /escalation · /repomap · /quality · /trust · /allow"));
       break;
     case "free": {
       // Manage the shared free-models pool (works regardless of the active profile): keys file, routing
@@ -1741,20 +1686,20 @@ async function handleCommand(line: string): Promise<boolean> {
       } else console.log(c.red(`  usage: /quality normal|strict|off|show|scenarios (current: ${cfg.qualityMode})`));
       break;
     }
-    case "autoroute": {
-      if (rest[0] === "on" || rest[0] === "off") {
-        cfg.autoRoute = rest[0] === "on";
-        console.log(`  auto-route ${cfg.autoRoute ? c.yellow("ON") : "off"}`);
-      } else if (!rest[0] && ui.pick) await pickAutoRoute();  // bare /autoroute opens an on/off picker on a TTY
-      else console.log(c.red(`  usage: /autoroute on|off (current: ${cfg.autoRoute ? "on" : "off"})`));
-      break;
-    }
     case "subagents": {
       if (rest[0] === "on" || rest[0] === "off") {
         cfg.subagents = rest[0] === "on";
         console.log(`  subagents ${cfg.subagents ? c.yellow("ON") : "off"}`);
       } else if (!rest[0] && ui.pick) await pickSubagents();  // bare /subagents opens an on/off picker on a TTY
       else console.log(c.red(`  usage: /subagents on|off (current: ${cfg.subagents ? "on" : "off"})`));
+      break;
+    }
+    case "escalation": case "escalate": {
+      if (rest[0] === "on" || rest[0] === "off") {
+        cfg.escalation = rest[0] === "on";
+        console.log(`  escalation ${cfg.escalation ? c.yellow("ON") : "off"}`);
+      } else if (!rest[0] && ui.pick) await pickEscalation();  // bare /escalation opens an on/off picker on a TTY
+      else console.log(c.red(`  usage: /escalation on|off (current: ${cfg.escalation ? "on" : "off"})`));
       break;
     }
     case "effort": {
@@ -1870,79 +1815,216 @@ async function handleCommand(line: string): Promise<boolean> {
   return false;
 }
 
-async function fusionTurn(task: string): Promise<string | undefined> {
+/** Verified escalation (Wave 3, default ON): a Solo turn whose objective checks STILL fail after the
+ *  auto-verify self-fix budget hands ITSELF to Fusion best-of-N. The SIGNAL decided this in loop.ts (no
+ *  LLM router); here we just narrate the one-line reason and run Fusion ONCE, passing the failure report
+ *  as escalationContext so candidates FIX rather than restart. HARD RULE — at most one escalation per user
+ *  turn: fusionTurn's own apply turn runs with escalation OFF (canEscalateOnFailure:false, in applySolution),
+ *  and this function never loops. */
+async function runEscalatedTurn(task: string, esc: { reason: string; report: string }): Promise<void> {
+  console.log(c.yellow("  ↗ verified failure — escalating to fusion") + c.dim(` — ${esc.reason}`));
+  // Cheap HEAD-before/after diff so we only auto-review when the escalated apply ACTUALLY wrote something
+  // (applySolution reports whether it dispatched the gated turn, not whether that turn changed files — so
+  // we compare the working diff instead of trusting a dispatch bool). Plan mode never writes → skip both.
+  const before = cfg.planMode ? "" : await collectWorkingDiff();
+  await fusionTurn(task, { escalationContext: esc.report });
+  // Auto-review — the Bugbot pattern on the RISKY path: an escalated best-of-N apply is exactly where an
+  // independent refuter earns its keep. Runs AT MOST ONCE per escalated turn (never on the fix turn below),
+  // so it can't loop. Skipped in plan mode, on ESC, and when the apply wrote nothing new.
+  if (cfg.planMode || activeAbort?.signal.aborted) return;
+  const after = await collectWorkingDiff();
+  if (!after || after === before) return; // nothing was written → nothing to review
+  console.log(c.dim("  ↳ auto-reviewing the escalated apply (independent refuter · read-only)…"));
+  const r = await runReview({ cfg, tools, diff: after, task, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return;
+  printReview(r);
+  await maybeApplyReviewFixes(r); // ONE gated fix turn (canEscalateOnFailure:false), never re-reviewed
+}
+
+// ── /review — the refute-reviewer over the current diff (reviewer.ts) ─────────────────────────────
+/** Quote a path for a bash `-c` command line (single-quote, escaping embedded quotes) so filenames with
+ *  spaces/specials in the untracked list can't break the per-file diff command. */
+function shQuote(p: string): string { return `'${p.replace(/'/g, "'\\''")}'`; }
+
+/** The current WORKING-TREE diff: tracked staged+unstaged changes vs HEAD, PLUS untracked files rendered as
+ *  new-file diffs — computed WITHOUT touching the index. `git diff --no-index /dev/null <file>` never uses
+ *  the index (provably index-neutral), unlike the `add -N` / `reset` trick which would clobber the user's
+ *  staged state. Errors are swallowed (2>/dev/null) → a non-git dir yields "" (the caller gates on that). */
+async function collectWorkingDiff(): Promise<string> {
+  const git = (command: string) => shellExec({ cwd: cfg.cwd, sandbox: "off", command, signal: activeAbort?.signal });
+  const tracked = (await git("git -c core.quotePath=false --no-pager diff HEAD --no-color 2>/dev/null")).output;
+  const others = (await git("git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null")).output
+    .split("\n").map((s) => s.trim()).filter(Boolean);
+  let untracked = "";
+  for (const f of others) {
+    // --no-index against /dev/null renders the whole file as an added new-file diff; it exits 1 (differences
+    // found) which shellExec reports without throwing — take the output regardless.
+    untracked += (await git(`git --no-pager diff --no-index --no-color -- /dev/null ${shQuote(f)} 2>/dev/null`)).output;
+  }
+  return (tracked + untracked).trim();
+}
+
+/** What /review should review: the working-tree diff when there is one; otherwise (clean tree) the last
+ *  commit as a fallback so `/review` is still useful right after a commit. A non-git dir returns an error. */
+async function collectReviewDiff(): Promise<{ diff: string; source: string } | { error: string }> {
+  const inside = (await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git rev-parse --is-inside-work-tree 2>/dev/null", signal: activeAbort?.signal })).output.trim();
+  if (inside !== "true") return { error: "not a git repository (or git unavailable) — /review needs git to compute a diff" };
+  const working = await collectWorkingDiff();
+  if (working) return { diff: working, source: "working tree (staged + unstaged + untracked)" };
+  const show = (await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git --no-pager show HEAD --no-color 2>/dev/null", signal: activeAbort?.signal })).output.trim();
+  if (!show) return { error: "nothing to review — the tree is clean and there is no commit to fall back to" };
+  return { diff: show, source: "last commit (working tree is clean) — git show HEAD" };
+}
+
+/** Print a review result: findings as a numbered list (file:line · summary · scenario), a green all-clear on
+ *  NONE, or the raw text dimmed as UNPARSED when the response was garbled (never a false green). */
+function printReview(r: { findings: Finding[]; none: boolean; raw: string; totalInputTokens: number; totalOutputTokens: number }): void {
+  if (r.none) { console.log(c.green("  ✓ reviewer found nothing it couldn't refute")); return; }
+  if (!r.findings.length) {
+    const raw = r.raw.trim();
+    if (!raw) { console.log(c.dim("  reviewer produced no output")); return; }
+    console.log(c.dim("  reviewer response (unparsed — no strict FINDING lines; treat as unreviewed, not clean):"));
+    console.log(raw.split("\n").map((l) => c.dim("  │ " + l)).join("\n"));
+    return;
+  }
+  console.log("\n" + c.bold(`  ${r.findings.length} finding${r.findings.length === 1 ? "" : "s"} that survived refutation:`));
+  r.findings.forEach((f, i) => {
+    const loc = f.line != null ? `${f.file}:${f.line}` : f.file;
+    console.log(`  ${c.cyan(`${i + 1}.`)} ${c.bold(loc)} ${c.dim("—")} ${f.summary}`);
+    console.log(c.dim(`     scenario: ${f.scenario}`));
+  });
+  console.log(c.dim(`  [reviewer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+}
+
+/** The fix-turn message: the reviewer's findings VERBATIM, framed so the agent must either fix each or
+ *  justify it as a false positive (no silent dismissals). Shared by /review and the escalated auto-review. */
+function reviewFixPrompt(findings: Finding[]): string {
+  const list = findings.map((f, i) => {
+    const loc = f.line != null ? `${f.file}:${f.line}` : f.file;
+    return `${i + 1}. ${loc} — ${f.summary}\n   Failure scenario: ${f.scenario}`;
+  }).join("\n");
+  return (
+    "An independent reviewer verified these findings on the current diff. Fix each one, or state explicitly " +
+    "why it is a false positive (name the guard, caller, type, or invariant that makes it safe). Do not make " +
+    `unrelated changes.\n\n${list}`
+  );
+}
+
+/** Offer an approval-gated fix turn for the surviving findings (interactive TTY only; non-TTY just leaves
+ *  the findings printed). The fix turn runs with escalation forced OFF and is NEVER re-reviewed — so neither
+ *  /review nor the escalated auto-review can loop. No-op on a clean/garbled result or in plan mode. */
+async function maybeApplyReviewFixes(r: { findings: Finding[]; none: boolean }): Promise<void> {
+  if (r.none || !r.findings.length) return;
+  if (cfg.planMode) { console.log(c.dim("  (plan mode — not applying fixes; /act to let the findings drive edits)")); return; }
+  if (!stdin.isTTY) return; // non-TTY: findings are already printed; no interactive gate to run a fix turn
+  const ok = await ui.approve("apply fixes for these findings");
+  if (!ok) { console.log(c.dim("  left as-is — the findings above are yours to act on")); return; }
+  const startLen = history.length;
+  // canEscalateOnFailure:false — a review-fix turn must not recursively escalate (one escalation per user
+  // turn), and canSpawn off to keep it a single focused pass.
+  await runTurn(reviewFixPrompt(r.findings), history, turnDeps({ canEscalateOnFailure: false, canSpawn: false }));
+  rememberTurn("apply reviewer findings", startLen, "review");
+  persistSession();
+}
+
+async function reviewTurn(): Promise<void> {
+  if (!modelReachable()) { console.log(c.yellow("  /review needs a model provider (a key, or a configured endpoint via /models)")); return; }
+  const collected = await collectReviewDiff();
+  if ("error" in collected) { console.log(c.dim("  " + collected.error)); return; }
+  const model = pickReviewerModel(ensembleModels(cfg), cfg.model);
+  // Budget declared up front (the existing honest-UX pattern): one read-only worker ≈ one Solo pass. Say
+  // whether an INDEPENDENT model is reviewing (decorrelated errors) or the same one with fresh context.
+  const modelNote = model !== cfg.model ? c.dim(` · independent model ${model} (decorrelated errors)`) : c.dim(" · same model, fresh context (fresh-context errors)");
+  console.log(c.dim(`  budget (declared up front): 1 read-only reviewer worker ≈ 1× a Solo investigation${modelNote}`));
+  console.log(c.dim(`  reviewing ${collected.source} — adversarial refuter: reports only bugs it can't refute…`));
+  const r = await runReview({ cfg, tools, diff: collected.diff, model, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return; // ESC: don't render/act on a partial review
+  printReview(r);
+  await maybeApplyReviewFixes(r);
+}
+
+async function fusionTurn(task: string, opts?: { escalationContext?: string }): Promise<string | undefined> {
   if (!modelReachable()) { console.log(c.yellow("  fusion needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const models = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
+  // Env vars REFINE the run but never gate a real signal: the auto verifier signal (evaluate.ts) is the
+  // default; OB1_FUSION_* are honored only as explicit overrides.
+  const envModels = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
+  const models = envModels?.length ? envModels : ensembleModels(cfg); // the diversity gate (frontier ensemble on free)
   const n = process.env.OB1_FUSION_N ? envInt("OB1_FUSION_N", 3) : undefined;
   const check = process.env.OB1_FUSION_CHECK;
   const moa = process.env.OB1_FUSION_MOA === "1";
   const judgeModel = process.env.OB1_FUSION_JUDGE_MODEL;
-  const worktree = process.env.OB1_FUSION_WORKTREE === "1";
+  const worktree = process.env.OB1_FUSION_WORKTREE === "1"; // explicit worktree-at-HEAD override (not required)
   const testCmd = process.env.OB1_FUSION_TEST_CMD;
   const targetPath = process.env.OB1_FUSION_TARGET;
-  const nCand = n ?? Math.max(3, models?.length ?? 0);
-  console.log(c.dim(`  budget (declared up front): ~${nCand + 1 + (moa ? nCand : 0)} model calls ≈ ${nCand + 1 + (moa ? nCand : 0)}× a Solo pass`));
+  const nCand = n ?? Math.max(3, models.length);
+  const calls = nCand + (moa ? nCand : 0); // candidates (+ MoA); a selector/synth call is added only sometimes
+  const sig = detectSignal(cfg);
+  const sigNote = sig.tier === "test" ? `real tests (${sig.testCmd})`
+    : sig.tier === "auto" ? `compile gates (${sig.autoCmds.join(" && ") || "auto"})`
+    : "syntax only (no project checks detected)";
+  console.log(c.dim(`  budget (declared up front): ~${calls}–${calls + 1} model calls ≈ ${calls}× a Solo pass (+1 only when a judge is needed)`));
   const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy each";
-  console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) + auto-score → synthesizer merges the best parts${models?.length ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}${worktree ? ` + worktree real-test (${testCmd ?? "bun test"})` : ""}…`));
-  const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
+  console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) → auto-score [${sigNote}] → select the best (merge only if none pass)${models.length > 1 ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}…`));
+  const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, escalationContext: opts?.escalationContext, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
   if (activeAbort?.signal.aborted) return undefined; // ESC: don't render a partial result or apply it
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
   for (const cnd of r.candidates) {
-    const v = !cnd.score?.checked ? c.gray("unscored") : cnd.score.ok ? c.green("PASS") : c.red("FAIL");
-    console.log(c.dim(`  • ${cnd.label} [${cnd.model}] `) + v + c.dim(`  ${cnd.outputTokens} out tok`));
+    const sc = cnd.score;
+    const v = !sc?.checked ? c.gray("unscored") : sc.ok ? c.green("PASS") : c.red("FAIL");
+    // Partial credit surfaced honestly when a candidate failed but passed SOME tests (e.g. 4/5 → "80%").
+    const frac = sc?.checked && !sc.ok && typeof sc.score === "number" && sc.score > 0 ? c.dim(` ${Math.round(sc.score * 100)}%`) : "";
+    console.log(c.dim(`  • ${cnd.label} [${cnd.model}] `) + v + frac + c.dim(`  ${cnd.outputTokens} out tok`));
   }
-  if (r.reverted) console.log(c.yellow("  synthesis failed the objective check → reverted to a passing candidate"));
+  const tierLabel: Record<string, string> = { "copy-checks": "copy checks (real state)", "worktree-tests": "worktree tests", check: "check command", syntax: "syntax", none: "none" };
+  if (r.selected && r.signalTier === "none") {
+    // All-prose (conversational) answer — nothing to objectively check. Calm + honest; never the red banner.
+    const how = r.selected.method === "vote" ? "agreement" : "judge rating";
+    console.log(c.dim(`  signal: none — no code to check (conversational answer); selected ${c.cyan(r.selected.label)} [${r.selected.model}] by ${how}`));
+  } else if (r.selected) console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · selected ${c.cyan(r.selected.label)} [${r.selected.model}] by ${r.selected.method}`));
+  else console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · no candidate passed → judge-synthesized a merge`));
+  if (r.reverted) console.log(c.yellow("  the merge regressed below the best candidate → reverted to it"));
+  if (r.failing) console.log(c.red("  ⚠ the result STILL FAILS the objective check — treat it as UNVERIFIED and review before trusting it"));
   console.log("\n" + c.bold(modeColor("fusion")("Fusion result:")) + "\n" + r.synthesis + "\n");
-  console.log(c.dim(`  [${r.candidates.length} candidates + synthesizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+  console.log(c.dim(`  [${r.candidates.length} candidates${r.selected ? "" : " + synthesizer"} · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
   await applySolution(task, r.synthesis);
   return r.synthesis;
 }
 
-async function councilTurn(task: string): Promise<string | undefined> {
-  if (!modelReachable()) { console.log(c.yellow("  council needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const models = process.env.OB1_COUNCIL_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
-  const check = process.env.OB1_COUNCIL_CHECK;
-  const arbiterModel = process.env.OB1_COUNCIL_ARBITER_MODEL;
-  const maxR = envInt("OB1_COUNCIL_ROUNDS", 3);
-  const twoModels = (models?.length ?? 0) > 1;
-  // Council workers edit the REAL workspace directly; gate each mutating action with the same approval Solo
-  // uses (autopilot → no prompt; ask → prompt). In Plan mode the workers stay read-only (nothing written).
-  const workerApprove = cfg.permissionMode === "autopilot" ? undefined : (desc: string) => ui.approve(desc);
-  console.log(c.dim(`  budget (declared up front): up to ~${1 + maxR * 2 + 1} model calls (author + ${maxR}×(review + revise) + finalizer), fewer if it converges early`));
-  console.log(c.dim(`  Council: author ↔ reviewer${twoModels ? ` (2 models)` : ""}${check ? " · objective-grounded" : ""} over up to ${maxR} round(s) · ${cfg.planMode ? "read-only (plan mode)" : "editing the workspace directly" + (cfg.permissionMode === "autopilot" ? "" : ", each change gated")}…`));
-  const r = await runCouncil({ task, cfg, tools, rounds: maxR, models, check, arbiterModel, approve: workerApprove, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return undefined; // ESC
+/** /deep — AB-MCTS-lite adaptive search (deep.ts). Thompson-samples, per call, whether to WIDEN (a fresh
+ *  generation) or DEEPEN (refine a promising node), grounded in the SAME auto verifier signal Fusion uses.
+ *  Wired exactly like fusionTurn (mkTools/procs/planMode/workerProgress/ESC) and applies the best node via
+ *  the one gated apply turn — the search never writes the real tree itself. */
+async function deepTurn(task: string): Promise<void> {
+  if (!modelReachable()) { console.log(c.yellow("  /deep needs a model provider (a key, or a configured endpoint via /models)")); return; }
+  const models = ensembleModels(cfg); // the diversity gate (frontier ensemble on the free router; else [cfg.model])
+  const budget = envInt("OB1_DEEP_BUDGET", 9);
+  const sig = detectSignal(cfg);
+  const sigNote = sig.tier === "test" ? `real tests (${sig.testCmd})`
+    : sig.tier === "auto" ? `compile gates (${sig.autoCmds.join(" && ") || "auto"})`
+    : "syntax only (no project checks detected)";
+  // Budget declared up front (the honest-UX pattern): a Deep run spends ~budget worker calls, each ≈ a Solo pass.
+  console.log(c.dim(`  budget (declared up front): ~${budget} model calls (Thompson-sampled generate-vs-refine across ${models.length} model${models.length === 1 ? "" : "s"}) ≈ ~${budget}× a Solo pass`));
+  const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy per call";
+  console.log(c.dim(`  Deep (AB-MCTS-lite): adaptive tree search · ${copyKind} · auto-score [${sigNote}] · widen-vs-deepen by Thompson sampling · stops early on a full pass…`));
+  const r = await runDeep({ task, cfg, tools, budget, models, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return; // ESC: don't render a partial result or apply it
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  for (const rd of r.rounds) {
-    const tag = rd.blocking ? c.red("BLOCK") : c.green("OK");
-    console.log(c.dim(`  • round ${rd.round}: `) + tag + c.dim(rd.revisedThisRound ? " → revised" : " → no revision needed"));
+  console.log("\n" + c.bold(modeColor("fusion")("Deep search tree")) + c.dim(" (widen-vs-deepen · real verifier reward):"));
+  for (const n of r.nodes) {
+    const isBest = r.best != null && n.id === r.best.id;
+    const v = n.ok ? c.green("PASS") : n.score > 0 ? c.yellow(`${Math.round(n.score * 100)}%`) : c.red("fail");
+    console.log(`  ${isBest ? c.cyan("▸") : " "} ${c.dim(deepNodeLine(n))}  ${v}`);
   }
-  const v = r.accepted ? c.green("ACCEPT") : c.yellow("REVISE");
-  console.log("\n" + c.bold(modeColor("council")("Council result")) + " " + v + ":\n" + r.final + "\n");
-  console.log(c.dim(`  [${r.rounds.length} round(s) · author + reviewer + finalizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  // No separate apply step: the workers already wrote their changes to the real workspace as they went.
-  if (cfg.planMode) console.log(c.dim("  (plan mode — council investigated read-only; nothing written. /act to let it edit the workspace.)"));
-  else if (r.accepted) console.log(c.dim("  council edited the workspace directly; changes are in place — review and verify them."));
-  else console.log(c.yellow("  ⚠ council returned REVISE (not ready to ship). Any edits it made are already in the workspace — review them and re-run or refine the task."));
-  return r.final;
-}
-
-async function personasTurn(task: string): Promise<string | undefined> {
-  if (!modelReachable()) { console.log(c.yellow("  personas needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const rounds = envInt("OB1_PERSONAS_ROUNDS", 2);
-  const max = envInt("OB1_PERSONAS_MAX", 6);
-  console.log(c.dim(`  budget (declared up front): up to ~${1 + max * rounds + 1} model calls (former + ≤${max} personas × ${rounds} dialogue rounds + facilitator), or 1 if it collapses to Solo`));
-  console.log(c.dim("  Personas: casting the panel for your goal…"));
-  const r = await runPersonas({ task, cfg, tools, rounds, max, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return undefined; // ESC
-  // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  const names = r.personas.map((p) => (p.title ? `${p.name} (${p.title})` : p.name)).join(", ");
-  if (r.collapsed) console.log(c.dim(`  panel collapsed to a single solver: ${c.bold(names)} (goal didn't warrant a panel)`));
-  else console.log(c.dim(`  panel (${r.personas.length}): `) + c.bold(names) + c.dim(` · ${r.dialogue.turns.length} turns over ${r.rounds} round(s) · facilitator: ${r.personas[0].name}`));
-  console.log("\n" + c.bold(modeColor("personas")("Personas result:")) + "\n" + r.final + "\n");
-  console.log(c.dim(`  [${r.collapsed ? "collapsed→solo" : `${r.personas.length} personas + facilitator`} · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  await applySolution(task, r.final);
-  return r.final;
+  const best = r.best;
+  const tierLabel: Record<string, string> = { "copy-checks": "copy checks (real state)", "worktree-tests": "worktree tests", check: "check command", syntax: "syntax", none: "none" };
+  if (!best) { console.log(c.yellow("  deep produced no candidate (budget 0 or cancelled)")); return; }
+  const verdict = best.ok ? c.green("PASS") : best.score > 0 ? c.yellow(`partial (${Math.round(best.score * 100)}%)`) : c.red("FAIL");
+  console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · best `) + c.cyan(`#${best.id}`) + c.dim(` [${best.model}] → `) + verdict);
+  // Honest verdict — a still-failing best must be announced loudly (never a silent fail), like fusionTurn.
+  if (!best.ok) console.log(c.red("  ⚠ the best candidate STILL FAILS the objective check — treat it as UNVERIFIED and review before trusting it"));
+  console.log("\n" + c.bold(modeColor("fusion")("Deep result:")) + "\n" + best.text + "\n");
+  console.log(c.dim(`  [${r.nodes.length} node(s) · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+  await applySolution(task, best.text); // same one gated apply turn (no re-escalate) fusion uses
 }
 
 async function evalTurn(requested: string[]): Promise<void> {
@@ -1955,30 +2037,8 @@ async function evalTurn(requested: string[]): Promise<void> {
   console.log(c.yellow(`  ⚠ Eval spends real tokens: ${tasks.length} task(s) × ${modes.join(", ")} × ${trials} trial(s)…`));
   const runners = buildRunners(cfg, tools, modes);
   const outcomes = await runEval({ tasks, runners, cwd: cfg.cwd, trials, onProgress: (m) => console.log(c.dim("  · " + m)) });
-  console.log("\n" + c.bold(modeColor("adaptive")("Capability (solve what Solo fails)")) + "\n" + renderCapability(computeCapability(outcomes, { baseline: "solo" })) + "\n");
-  console.log(c.bold(modeColor("council")("Compute-matched (efficiency)")) + "\n" + renderReport(computeMatched(outcomes, { baseline: "solo" })) + "\n");
-}
-
-async function adaptiveTurn(task: string, hint?: { mode: "fusion" | "council" | "personas"; why: string }): Promise<void> {
-  if (!modelReachable()) { console.log(c.yellow("  adaptive needs a model provider (a key, or a configured endpoint via /models)")); return; }
-  const check = process.env.OB1_ROUTE_CHECK;
-  // Escalation target: env override, else derive from the difficulty signal (risk/design → Council's
-  // critique; hard/high-value → Fusion's best-of-N). Council/Fusion are the only escalation topologies.
-  const escalateTo = process.env.OB1_ROUTE_ESCALATE === "council" ? "council"
-    : hint && hint.mode !== "fusion" ? "council" : "fusion";
-  const models = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
-  // If this escalates to Council, its workers edit the REAL tree — gate each mutating action with the
-  // SAME approval Solo/council uses (autopilot → no prompt; ask → prompt), and honor Plan mode (read-only).
-  const workerApprove = cfg.permissionMode === "autopilot" ? undefined : (desc: string) => ui.approve(desc);
-  console.log(c.dim(`  Adaptive${hint ? ` (${hint.why})` : ""}: Solo first; escalate to ${escalateTo} only if the task warrants it AND the objective check fails${check ? "" : c.yellow(" (no OB1_ROUTE_CHECK set → syntax signal only)")}…`));
-  const r = await runAdaptive({ task, cfg, tools, check, escalateTo, models, requireDifficultySignal: true, approve: workerApprove, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return; // ESC
-  // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  const tag = r.path === "solo" ? c.gray("solo (Solo passed → no escalation)") : modeColor(r.path)(`${r.path} (Solo failed the check → escalated)`);
-  console.log(c.dim("  path: ") + tag);
-  console.log("\n" + c.bold(modeColor("adaptive")("Adaptive result:")) + "\n" + r.final + "\n");
-  console.log(c.dim(`  [~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  await applySolution(task, r.final);
+  console.log("\n" + c.bold(modeColor("fusion")("Capability (solve what Solo fails)")) + "\n" + renderCapability(computeCapability(outcomes, { baseline: "solo" })) + "\n");
+  console.log(c.bold(modeColor("solo")("Compute-matched (efficiency)")) + "\n" + renderReport(computeMatched(outcomes, { baseline: "solo" })) + "\n");
 }
 
 // ─── per-line dispatch (shared by REPL + TUI) ───────────────────────────────
@@ -2011,32 +2071,23 @@ async function processLine(line: string): Promise<boolean> {
   // Heavy modes are sticky (persist until switched). To keep that from silently running every later
   // prompt at multiplied cost, show a visible reminder before each heavy turn — except the very first
   // turn right after selection (the user just chose it). `/solo` exits.
-  if (cfg.mode === "fusion" || cfg.mode === "council" || cfg.mode === "personas") {
+  if (cfg.mode === "fusion") {
     if (!modeJustSet) console.log(c.yellow(`  ⚠ still in ${modeColor(cfg.mode)(cfg.mode.toUpperCase())} (${modeCostHint(cfg.mode)}) · ${c.cyan("/solo")} to exit`));
     modeJustSet = false;
   }
   const startLen = history.length;
   if (cfg.mode === "fusion") { await fusionTurn(turnText); rememberTurn(t, startLen, "fusion"); persistSession(); return false; }
-  if (cfg.mode === "council") { await councilTurn(turnText); rememberTurn(t, startLen, "council"); persistSession(); return false; }
-  if (cfg.mode === "personas") { await personasTurn(turnText); rememberTurn(t, startLen, "personas"); persistSession(); return false; }
-  // (no `adaptive` branch — it's retired as a mode; auto-routing is the cfg.autoRoute toggle below)
-  // Auto-route OFF: a pure-regex *nudge* (no extra model call) suggesting a heavier mode — purely advisory.
-  if (!cfg.autoRoute) {
-    const hint = suggestMode(t);
-    if (hint) console.log(c.dim(`  💡 looks ${hint.why} — ${c.cyan("/mode " + hint.mode)} for deeper analysis · auto-route is off (${c.cyan("/autoroute on")} to enable). Continuing in Solo…`));
-  }
-  // Auto-route ON: Solo gets the `escalate` tool (offered via turnDeps.canEscalate) and decides DURING its
-  // normal response whether the task needs a heavier mode. No upfront probe call — an easy turn is one Solo
-  // call; only a genuinely hard turn pays for the heavier mode. If it escalated, forward the whole task.
+  // Solo: one careful pass. Verified escalation (default ON): if the auto-verify self-fix loop STILL fails
+  // after its budget, loop.ts returns { escalate } and we hand the SAME turn to Fusion best-of-N ONCE, with
+  // the failure report as context. HARD RULE — at most one escalation per user turn: the apply turn inside
+  // Fusion runs with escalation OFF, and runEscalatedTurn never loops. ESC after Solo skips the escalation.
   const outcome = await runTurn(turnText, history, turnDeps());
-  if (outcome?.escalate) {
-    await runEscalatedTurn(turnText, outcome.escalate);
-  }
-  rememberTurn(t, startLen, outcome?.escalate ? `solo→${outcome.escalate.mode}` : "solo");
+  if (outcome.escalate && !activeAbort?.signal.aborted) await runEscalatedTurn(turnText, outcome.escalate);
+  rememberTurn(t, startLen, outcome.escalate ? "escalate" : "solo");
   persistSession(); // write the conversation so /resume can reopen it
   // Auto skill learning (opt-in, OFF by default): distil this turn into reusable procedural memory.
-  // One cheap brain call, only on a substantive non-escalated Solo turn. Never blocks/breaks the turn.
-  if (cfg.skillLearn && memBrain && !outcome?.escalate) {
+  // One cheap brain call, only on a substantive Solo turn. Never blocks/breaks the turn.
+  if (cfg.skillLearn && memBrain) {
     try {
       const res = await maybeLearnSkill({ cwd: cfg.cwd, slice: history.slice(startLen), existing: listSkills(cfg.cwd, { includeArchived: true }), ask: memBrain.ask });
       if (res.action !== "none" && res.name) console.log(c.dim(`  💾 ${res.action === "create" ? "learned" : "refined"} skill: ${c.cyan(res.name)}`));
@@ -2339,10 +2390,12 @@ try {
   const a = analyzeBranch(gs);
   if (a.stale) startup.push(c.yellow(`  ⚠ ${a.recommendation}`));
 } catch { /* best-effort — never block boot on git */ }
-// One-time migration note: `adaptive` mode is now the Solo auto-route toggle. loadConfig collapsed any
-// adaptive workspace to Solo, so this is always accurate; saveSettings rewrites mode:"solo" → shows once.
-if (persistedSettings(cfg.settingsDir).mode === "adaptive") {
-  startup.push(c.yellow(`  note: 'adaptive' mode is now a Solo auto-route toggle — you're in Solo (auto-route ${cfg.autoRoute ? "on" : "off"}). Change it with /autoroute.`));
+// One-time migration note: the retired heavy modes (council/personas) and the old adaptive router are
+// gone — a workspace persisted in any of them now loads as Solo. loadConfig already collapsed it, so this
+// is always accurate; saveSettings rewrites mode:"solo" → the note shows a single time.
+const persistedMode = persistedSettings(cfg.settingsDir).mode as string | undefined;
+if (persistedMode && persistedMode !== "solo" && persistedMode !== "fusion") {
+  startup.push(c.yellow(`  note: '${persistedMode}' mode has been retired — you're now in Solo. Use ${c.cyan("/mode fusion")} for best-of-N, or ${c.cyan("/eval")} to compare modes.`));
   saveSettings(cfg);
 }
 // The embedded free-models router has no process to start — it routes in-process. Kick a best-effort,

@@ -37,12 +37,12 @@ const SMOKES = [
   "hooks-smoke.ts",           // programmable hooks: Pre/Post/PostFailure matching + block/allow/feedback
   "lsp-smoke.ts",             // LSP diagnostics: message framing + client flow vs a mock server + fallback
   "parity-harness-smoke.ts",  // mock-provider parity: scripted scenarios drive runTurn + assert wire behavior
-  "router-smoke.ts",          // adaptive router (Solo-first / escalate)
-  "goal-router-smoke.ts",     // /goal honors Solo's auto-route escalation
+  "escalation-smoke.ts",      // verified escalation: self-fix budget spent → { escalate } + report; off/plan/apply-turn never escalate
+  "reviewer-smoke.ts",        // refute-reviewer: findings/NONE/garbled parse + read-only worker wiring + model choice + diff bounding
   "fusion-smoke.ts",          // fusion best-of-N + synthesizer + verify-revert
   "fusion-worktree-smoke.ts", // fusion real git-worktree test scoring
-  "council-smoke.ts",         // council author ↔ reviewer revise rounds → finalizer
-  "worker-write-smoke.ts",    // write-capable council/fusion workers (gated mutating tools) + workspace-copy isolation
+  "deep-smoke.ts",            // deep AB-MCTS-lite: Thompson widen-vs-deepen + verified early-stop + ESC partial
+  "worker-write-smoke.ts",    // write-capable fusion workers (gated mutating tools) + workspace-copy isolation
   "rewind-smoke.ts",          // /rewind shadow-git checkpoints: worktree snapshot/restore + real-repo isolation
   "retry-smoke.ts",           // gateway upstream-error retry/backoff + isRetryable classification
   "eval-smoke.ts",            // eval objective checks + Solo@k math
@@ -54,8 +54,6 @@ const SMOKES = [
   "provider-smoke.ts",        // provider translation + token caps + cache_control + vision/image translation
   "vision-smoke.ts",          // vision path: tool {text,images} → tool_result blocks → provider wire, vision-gated
   "multimind-smoke.ts",       // multi-mind runtime (read-only filter + parallel order)
-  "ledger-smoke.ts",          // dual-ledger orchestration: stall detection + bounded re-plan + loop backstop
-  "personas-smoke.ts",        // personas former → panel → blackboard → facilitator
   "skills-smoke.ts",          // skills registry discovery + lazy-load
   "skill-learn-smoke.ts",     // self-learned skills: manage_skill write/patch/delete + provenance + protection + archived
   "skill-distill-smoke.ts",   // auto skill learning: substance gate + decision parse + create/refine via stub brain + guardrails

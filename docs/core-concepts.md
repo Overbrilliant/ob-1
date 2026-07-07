@@ -10,6 +10,23 @@ project instructions, resolves the active model route, and opens an interactive 
 
 Use `/resume` to continue a previous session and `/export` to save the current transcript.
 
+## Agent Modes
+
+The default is Solo: one model, one pass, with an automatic self-fix loop that reruns the project's
+checks after a file-changing turn and corrects failures until they pass or a small round budget is
+spent. OB-1 spends more compute only when it earns its tokens against plain Solo:
+
+- On a *verified* failure (checks still failing after self-fix), the turn escalates once to Fusion
+  best-of-N — the objective signal decides this, not a router model.
+- `/mode fusion` runs best-of-N deliberately, scoring candidates against the project's real checks and
+  selecting a winner rather than merging.
+- `/review` runs an independent refute-reviewer over your diff; `/deep` runs an adaptive search.
+- The model can fan out read-only subagents for independent sub-tasks, but a single writer makes all
+  edits through the gated apply path.
+
+Any mode that cannot beat Solo at equal tokens on the eval suite is deleted. See
+[Multi-Agent Modes](multimind.md).
+
 ## Model Routes
 
 OB-1 has three routes:

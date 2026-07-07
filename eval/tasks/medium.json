@@ -1,0 +1,50 @@
+[
+  {
+    "id": "lru-cache",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript class `LRUCache` (named `export class LRUCache`) with the exact API of LeetCode #146: constructor(capacity: number) where capacity is a positive integer (>= 1); get(key: number): number returns the stored value or -1 if absent, and a successful get marks the key most-recently-used; put(key: number, value: number): void inserts or updates the key and marks it most-recently-used, and if inserting a NEW key would exceed capacity it first evicts the LEAST-recently-used key (updating an existing key never evicts). All keys and values are integers. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const C=m.LRUCache??m.default;if(typeof C!==\"function\")process.exit(2);const eq=(a,b)=>{if(a!==b){console.error(a+\" != \"+b);process.exit(1);}};const c=new C(2);c.put(1,1);c.put(2,2);eq(c.get(1),1);c.put(3,3);eq(c.get(2),-1);eq(c.get(3),3);c.put(4,4);eq(c.get(1),-1);eq(c.get(3),3);eq(c.get(4),4);const d=new C(2);d.put(1,10);d.put(2,20);d.put(1,11);d.put(3,30);eq(d.get(2),-1);eq(d.get(1),11);eq(d.get(3),30);'"
+  },
+  {
+    "id": "topo-sort-kahn",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `topoSort(n: number, edges: number[][]): number[] | null`. The graph has nodes labelled 0..n-1 and directed edges [from, to] meaning `from` must precede `to`. Return a topological ordering containing all n labels. To make it deterministic, use Kahn's algorithm and whenever more than one node currently has in-degree 0, always emit the SMALLEST-numbered such node next. If the graph contains a cycle (no valid ordering exists), return null. Assume there are no duplicate edges and 0 <= from,to < n. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.topoSort??m.default;if(typeof f!==\"function\")process.exit(2);const J=JSON.stringify;const eq=(a,b)=>{if(J(a)!==J(b)){console.error(J(a)+\" != \"+J(b));process.exit(1);}};eq(f(2,[[0,1]]),[0,1]);eq(f(3,[]),[0,1,2]);eq(f(2,[[0,1],[1,0]]),null);eq(f(1,[[0,0]]),null);eq(f(4,[[1,0]]),[1,0,2,3]);eq(f(4,[[0,2],[1,2],[2,3]]),[0,1,2,3]);'"
+  },
+  {
+    "id": "semver-compare",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `compareSemver(a: string, b: string): number` comparing two SemVer 2.0.0 versions, returning -1 if a < b, 1 if a > b, 0 if equal precedence. Each version is MAJOR.MINOR.PATCH (three non-negative integers) optionally followed by '-' and a pre-release string (assume no build metadata). Precedence (SemVer 2.0.0 section 11): (1) compare MAJOR, then MINOR, then PATCH numerically; (2) a version WITHOUT a pre-release has HIGHER precedence than the same core WITH one; (3) compare two pre-releases by their dot-separated identifiers left to right: all-digit identifiers compare numerically, identifiers with letters compare by ASCII order, a numeric identifier is always LOWER than a non-numeric one, and if all shared identifiers are equal the pre-release with MORE identifiers is higher. Assume both inputs are well-formed. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.compareSemver??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(a!==b){console.error(a+\" != \"+b);process.exit(1);}};const V=[\"1.0.0-alpha\",\"1.0.0-alpha.1\",\"1.0.0-alpha.beta\",\"1.0.0-beta\",\"1.0.0-beta.2\",\"1.0.0-beta.11\",\"1.0.0-rc.1\",\"1.0.0\"];for(let i=0;i+1<V.length;i++){eq(f(V[i],V[i+1]),-1);eq(f(V[i+1],V[i]),1);}eq(f(\"1.2.0\",\"1.10.0\"),-1);eq(f(\"1.10.0\",\"1.2.0\"),1);eq(f(\"2.0.0\",\"1.9.9\"),1);eq(f(\"1.0.0\",\"1.0.0\"),0);eq(f(\"1.0.0-alpha\",\"1.0.0-alpha\"),0);'"
+  },
+  {
+    "id": "debounce-sim",
+    "lang": "ts",
+    "prompt": "Implement and export a pure TypeScript function `debounce(timestamps: number[], wait: number): number[]` simulating a TRAILING-edge debounce. `timestamps` is a list of call times in ms in non-decreasing order; `wait` is a positive number. A debounced function fires `wait` ms after a call unless another call arrives within `wait`, which cancels the pending fire and reschedules. Concretely: the call at index i produces a fire at timestamps[i] + wait if and only if it is the last call OR the next call's time is STRICTLY GREATER than timestamps[i] + wait. Return the fire times in increasing order. An empty input returns an empty array. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.debounce??m.default;if(typeof f!==\"function\")process.exit(2);const J=JSON.stringify;const eq=(a,b)=>{if(J(a)!==J(b)){console.error(J(a)+\" != \"+J(b));process.exit(1);}};eq(f([],5),[]);eq(f([5],3),[8]);eq(f([0,10,50],20),[30,70]);eq(f([0,10,20,30],15),[45]);eq(f([0,20],20),[40]);eq(f([0,21],20),[20,41]);'"
+  },
+  {
+    "id": "int-to-roman",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `toRoman(n: number): string` converting an integer n in the inclusive range 1..3999 to its Roman numeral using standard subtractive notation. Symbol values: I=1, V=5, X=10, L=50, C=100, D=500, M=1000, with subtractive pairs IV=4, IX=9, XL=40, XC=90, CD=400, CM=900. The result uses uppercase letters and is the canonical minimal-length form. Assume 1 <= n <= 3999. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.toRoman??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(f(a)!==b){console.error(a+\" => \"+f(a)+\" != \"+b);process.exit(1);}};eq(1,\"I\");eq(3,\"III\");eq(4,\"IV\");eq(9,\"IX\");eq(14,\"XIV\");eq(40,\"XL\");eq(49,\"XLIX\");eq(90,\"XC\");eq(58,\"LVIII\");eq(400,\"CD\");eq(444,\"CDXLIV\");eq(900,\"CM\");eq(1000,\"M\");eq(1994,\"MCMXCIV\");eq(2023,\"MMXXIII\");eq(3999,\"MMMCMXCIX\");'"
+  },
+  {
+    "id": "base64-encode",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `base64Encode(bytes: number[]): string` encoding an array of byte values (each an integer 0..255) into a standard Base64 string (RFC 4648, alphabet A-Za-z0-9+/) INCLUDING '=' padding. Every 3 input bytes map to 4 output characters; when the input length is not a multiple of 3 the final group is padded so the output length is always a multiple of 4 (one '=' when 2 bytes remain, two '=' when 1 byte remains). An empty input returns the empty string. Do NOT use Buffer, btoa, atob, or TextEncoder/TextDecoder; implement the transform directly. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.base64Encode??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(f(a)!==b){console.error(JSON.stringify(a)+\" => \"+f(a)+\" != \"+b);process.exit(1);}};eq([],\"\");eq([77,97,110],\"TWFu\");eq([77,97],\"TWE=\");eq([77],\"TQ==\");eq([102,111,111,98,97,114],\"Zm9vYmFy\");eq([102,111],\"Zm8=\");eq([102],\"Zg==\");eq([0,0,0],\"AAAA\");eq([255,255,255],\"////\");eq([255],\"/w==\");'"
+  },
+  {
+    "id": "matrix-spiral",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `spiralOrder(matrix: number[][]): number[]` returning all elements of the m x n matrix in CLOCKWISE spiral order starting from the top-left: top row left-to-right, right column top-to-bottom, bottom row right-to-left, left column bottom-to-top, then spiral inward, visiting each element exactly once. The input is rectangular (every row has the same length). An empty matrix ([]) or a matrix whose rows are empty ([[]]) returns an empty array. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.spiralOrder??m.default;if(typeof f!==\"function\")process.exit(2);const J=JSON.stringify;const eq=(a,b)=>{if(J(a)!==J(b)){console.error(J(a)+\" != \"+J(b));process.exit(1);}};eq(f([[1,2,3],[4,5,6],[7,8,9]]),[1,2,3,6,9,8,7,4,5]);eq(f([[1,2,3,4],[5,6,7,8],[9,10,11,12]]),[1,2,3,4,8,12,11,10,9,5,6,7]);eq(f([[1]]),[1]);eq(f([[1,2],[3,4]]),[1,2,4,3]);eq(f([]),[]);eq(f([[1,2,3]]),[1,2,3]);eq(f([[1],[2],[3]]),[1,2,3]);'"
+  },
+  {
+    "id": "coin-change-min",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `coinChange(coins: number[], amount: number): number` returning the MINIMUM number of coins whose values sum EXACTLY to `amount`, using an unlimited supply of each coin. Coin values are positive integers (possibly unsorted, possibly with duplicates). If amount is 0 return 0. If the amount cannot be formed, return -1. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.coinChange??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(a!==b){console.error(a+\" != \"+b);process.exit(1);}};eq(f([1,2,5],11),3);eq(f([2],3),-1);eq(f([1],0),0);eq(f([1],2),2);eq(f([2,5,10,1],27),4);eq(f([5],5),1);eq(f([3,7],5),-1);eq(f([1,3,4],6),2);eq(f([186,419,83,408],6249),20);'"
+  }
+]

@@ -21,7 +21,7 @@ export interface UsageEntry {
   ts: string;        // ISO-8601 timestamp (stamped by the caller — keeps this module's core Date-free)
   model: string;     // resolved concrete model id (for pricing lookup)
   provider: string;  // "openai" | "anthropic" — attribution
-  mode: string;      // solo | fusion | council | personas — per-feature attribution
+  mode: string;      // solo | fusion — per-feature attribution
   in: number;        // uncached input tokens
   out: number;       // output tokens
   cacheRead: number; // cache-read input tokens (bills ~0.1× input)

@@ -2,10 +2,8 @@
 // prompt, return final text + total tokens. Every mode is held to the same grading contract
 // (one fenced code block) so the objective check can grade them identically.
 import { runWorker, readOnlyTools } from "../multimind/runtime.ts";
-import { runFusion } from "../multimind/fusion.ts";
-import { runCouncil } from "../multimind/council.ts";
-import { runPersonas } from "../multimind/personas.ts";
-import { runAdaptive } from "../multimind/router.ts";
+import { runFusion, extractCode, scoreCandidate } from "../multimind/fusion.ts";
+import { runDeep } from "../multimind/deep.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "../agent/codeact.ts";
 import { shellExec } from "../agent/verify.ts";
 import { callModel } from "../providers/gateway.ts";
@@ -14,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../config.ts";
 import type { Tool } from "../agent/tools.ts";
+import type { EvalTask } from "./tasks.ts";
 import type { ModeRunner, RunOutput } from "./harness.ts";
 
 const GRADE_CONTRACT =
@@ -63,10 +62,32 @@ export async function runCodeActMode(taskPrompt: string, cfg: Config): Promise<R
   return { text, inputTokens: r.totalInputTokens + (ext.usage?.input_tokens ?? 0), outputTokens: r.totalOutputTokens + (ext.usage?.output_tokens ?? 0) };
 }
 
-export const ALL_MODES = ["solo", "fusion", "council", "personas"] as const;
-// `adaptive` is selectable but excluded from the default suite: in a blind eval (no real check) it
-// degenerates to Solo, so running it by default would just duplicate the Solo row.
-export const SELECTABLE_MODES = [...ALL_MODES, "adaptive", "codeact"] as const;
+/** The verified-escalation POLICY as an eval mode — a compute-matched measurement of EXACTLY what the main
+ *  loop does (loop.ts self-fix → runEscalatedTurn): one Solo pass graded by the task's OWN objective check;
+ *  on PASS it's done at Solo's cost (the common, cheap case); on FAIL it escalates to Fusion best-of-N with
+ *  the same check + the Solo failure output as escalationContext (candidates FIX, not restart), and the
+ *  token cost is Solo + Fusion — the real compute this policy spends. The SIGNAL decides, no LLM router.
+ *  The harness re-grades the returned artifact independently, so consulting the check here can't self-grade. */
+export async function runEscalateMode(taskPrompt: string, task: EvalTask | undefined, cfg: Config, tools: Map<string, Tool>): Promise<RunOutput> {
+  const solo = await runSolo(taskPrompt + GRADE_CONTRACT, cfg, tools);
+  const { code, lang } = extractCode(solo.text);
+  const score = await scoreCandidate(code, { langHint: lang ?? task?.lang, check: task?.check, cwd: cfg.cwd });
+  if (score.checked && score.ok) return solo; // Solo already passes the objective check → no escalation
+  const r = await runFusion({ task: taskPrompt + GRADE_CONTRACT, cfg, tools, check: task?.check, escalationContext: score.output });
+  return { text: r.synthesis, inputTokens: solo.inputTokens + r.totalInputTokens, outputTokens: solo.outputTokens + r.totalOutputTokens };
+}
+
+export const ALL_MODES = ["solo", "fusion"] as const;
+export const SELECTABLE_MODES = [...ALL_MODES, "codeact", "escalate", "deep"] as const;
+
+/** Deep's eval budget: total worker calls, default 4 so it is COMPUTE-MATCHED to Fusion's default spend
+ *  (3 candidates + an occasional selector/synth call) — a fair "at equal tokens, does adaptive search win?"
+ *  comparison. OB1_DEEP_EVAL_BUDGET overrides. */
+const deepEvalBudget = (): number => {
+  const v = process.env.OB1_DEEP_EVAL_BUDGET;
+  const n = v ? Number(v) : Number.NaN;
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 4;
+};
 
 const parseModels = (v: string | undefined): string[] | undefined => {
   const ms = (v ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -74,20 +95,23 @@ const parseModels = (v: string | undefined): string[] | undefined => {
 };
 
 /** Build runners for the requested modes, all bound to the same cfg/tools and grading contract.
- *  Per-mode multi-model routing comes from OB1_{FUSION,COUNCIL}_MODELS (round-robin). Personas is
- *  intentionally single-model: a heterogeneous panel measurably *hurt* it (weak members poisoned
- *  the lead synthesis — 100%→40% at 29× tokens on atoi), the multi-agent fragility R5 warns of. */
+ *  Fusion multi-model routing comes from OB1_FUSION_MODELS (round-robin). NOTE: heterogeneous panels
+ *  (council/personas) were measured HARMFUL (100%→40% accuracy at 29× tokens) and deleted 2026-07; see
+ *  git history. */
 export function buildRunners(cfg: Config, tools: Map<string, Tool>, modes: string[]): Record<string, ModeRunner> {
   const fusionModels = parseModels(process.env.OB1_FUSION_MODELS);
-  const councilModels = parseModels(process.env.OB1_COUNCIL_MODELS);
   const out: Record<string, ModeRunner> = {};
   for (const m of modes) {
     if (m === "solo") out.solo = (t) => runSolo(t + GRADE_CONTRACT, cfg, tools);
-    else if (m === "fusion") out.fusion = (t) => runFusion({ task: t + GRADE_CONTRACT, cfg, tools, models: fusionModels, moa: process.env.OB1_FUSION_MOA === "1", judgeModel: process.env.OB1_FUSION_JUDGE_MODEL }).then((r) => ({ text: r.synthesis, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
-    else if (m === "council") out.council = (t) => runCouncil({ task: t + GRADE_CONTRACT, cfg, tools, models: councilModels, check: process.env.OB1_COUNCIL_CHECK, arbiterModel: process.env.OB1_COUNCIL_ARBITER_MODEL }).then((r) => ({ text: r.final, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
-    else if (m === "personas") out.personas = (t) => runPersonas({ task: t + GRADE_CONTRACT, cfg, tools }).then((r) => ({ text: r.final, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
-    else if (m === "adaptive") out.adaptive = (t) => runAdaptive({ task: t + GRADE_CONTRACT, cfg, tools, check: process.env.OB1_ROUTE_CHECK, models: fusionModels, escalateTo: process.env.OB1_ROUTE_ESCALATE === "council" ? "council" : "fusion" }).then((r) => ({ text: r.final, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
+    // Fusion consults the task's per-task check (t.check) so its best-of-N SELECTION runs against the real
+    // objective signal — symmetric with `escalate` (both may read the check; the harness still grades
+    // independently afterward). See eval/tasks/README.md.
+    else if (m === "fusion") out.fusion = (t, task) => runFusion({ task: t + GRADE_CONTRACT, cfg, tools, models: fusionModels, check: task?.check, moa: process.env.OB1_FUSION_MOA === "1", judgeModel: process.env.OB1_FUSION_JUDGE_MODEL }).then((r) => ({ text: r.synthesis, inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
     else if (m === "codeact") out.codeact = (t) => runCodeActMode(t, cfg); // develops+verifies via sandboxed execution, then extracts
+    else if (m === "escalate") out.escalate = (t, task) => runEscalateMode(t, task, cfg, tools); // Solo → (on failed check) Fusion, tokens = Solo + Fusion
+    // Deep (AB-MCTS-lite): reads the task's check for its per-node reward (symmetric with fusion/escalate; the
+    // harness still grades the returned best node independently). Budget matched to Fusion for a fair race.
+    else if (m === "deep") out.deep = (t, task) => runDeep({ task: t + GRADE_CONTRACT, cfg, tools, models: fusionModels, check: task?.check, budget: deepEvalBudget() }).then((r) => ({ text: r.best?.text ?? "", inputTokens: r.totalInputTokens, outputTokens: r.totalOutputTokens }));
   }
   return out;
 }

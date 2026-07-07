@@ -31,9 +31,6 @@ export const c = {
 export function modeColor(mode: string): (s: string) => string {
   switch (mode) {
     case "fusion": return c.blue;
-    case "council": return c.magenta;
-    case "personas": return c.cyan;
-    case "adaptive": return c.green;
     default: return c.gray; // solo
   }
 }

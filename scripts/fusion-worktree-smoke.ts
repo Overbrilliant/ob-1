@@ -78,22 +78,21 @@ if (sandboxAvailable()) {
 const wtCount = () => new TextDecoder().decode(Bun.spawnSync(["git", "worktree", "list"], { cwd: repo, stdout: "pipe" }).stdout).trim().split("\n").filter(Boolean).length;
 check("worktree: candidate worktrees cleaned up", wtCount() === 1);
 
-// --- runFusion end-to-end with worktree scoring (injected runner) ---
+// --- runFusion end-to-end with explicit worktree-at-HEAD scoring (injected runner) → SELECTION-FIRST ---
 const block = (code: string) => "```ts sum.ts\n" + code + "\n```";
 const W = (label: string, text: string): WorkerResult => ({ label, text, inputTokens: 1, outputTokens: 1, ok: true });
-let judgeSawTests = false;
+const labels: string[] = [];
 const f = await runFusion({
   task: "fix add", cfg, tools: new Map(), worktree: true, testCmd, targetPath: "sum.ts",
-  _run: (async (o: { label: string; task: string }) => {
-    if (o.label === "cand-1") return W(o.label, block(GOOD));
-    if (o.label.startsWith("cand-")) return W(o.label, block(BAD));
-    if (o.label === "synthesizer") { judgeSawTests = o.task.includes("<test-output>") || o.task.includes("<diff>"); return W(o.label, block(GOOD)); }
-    return W(o.label, "?");
+  _run: (async (o: { label: string }) => {
+    labels.push(o.label);
+    return W(o.label, block(o.label === "cand-1" ? GOOD : BAD));
   }) as any,
 });
 check("F-wt: candidates graded by real tests (≥1 pass, ≥1 fail)", f.candidates.some((x) => x.score?.ok) && f.candidates.some((x) => x.score && !x.score.ok));
-check("F-wt: judge fed real test output/diff", judgeSawTests);
-check("F-wt: passing synthesis not reverted", f.reverted === false && f.synthesisScore?.ok === true);
+check("F-wt: the passing candidate is SELECTED verbatim (no merge)", f.selected?.label === "cand-1" && f.synthesis.includes("a + b") && !f.failing);
+check("F-wt: no synthesizer call on the passing path", !labels.includes("synthesizer"));
+check("F-wt: signal tier reported (worktree-tests)", f.signalTier === "worktree-tests");
 check("F-wt: all worktrees cleaned up after full run", wtCount() === 1);
 
 // --- worktree mode + a path-less candidate and no OB1_FUSION_TARGET → UNSCORED, not syntax-graded ---
@@ -103,6 +102,17 @@ const fNoPath = await runFusion({
 });
 check("F-wt: path-less candidates → UNSCORED (no silent syntax downgrade)", fNoPath.candidates.every((x) => x.score && x.score.checked === false));
 check("F-wt: path-less worktrees cleaned up", wtCount() === 1);
+
+// --- COPY-CHECKS tier: mkTools wired → each candidate gets a private copy graded by the REAL suite in it.
+// Injected workers don't edit the copy, so the wrong HEAD stub fails the suite → all FAIL → synth fallback.
+const fCopy = await runFusion({
+  task: "fix add", cfg, tools: new Map(), mkTools: () => new Map(),
+  _run: (async (o: { label: string }) => W(o.label, block(o.label === "synthesizer" ? GOOD : BAD))) as any,
+});
+check("F-wt: copy-checks tier used when mkTools wired", fCopy.signalTier === "copy-checks");
+check("F-wt: candidates graded in their copies (all FAIL on the HEAD stub)", fCopy.candidates.length === 3 && fCopy.candidates.every((x) => x.score?.checked && !x.score.ok));
+check("F-wt: 0 passing → synthesizer merge fallback", fCopy.selected === undefined);
+check("F-wt: copy-check worktrees cleaned up", wtCount() === 1);
 
 rmSync(repo, { recursive: true, force: true });
 

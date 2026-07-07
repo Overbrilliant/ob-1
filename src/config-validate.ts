@@ -10,17 +10,22 @@ import { PROFILES } from "./providers/profiles.ts";
 
 const ENUMS: Record<string, readonly string[]> = {
   provider: ["openai", "free"],
-  mode: ["solo", "fusion", "council", "personas", "adaptive"],
+  mode: ["solo", "fusion"],
   permissionMode: ["ask", "autopilot"],
   sandbox: ["off", "read-only", "workspace-write"],
   effort: ["low", "medium", "high"],
   qualityMode: ["off", "normal", "strict"],
   freeStrategy: ["priority", "balanced", "smartest", "fastest", "reliable"],
 };
+// Modes retired in the multimind v2 rework (council/personas + the old adaptive router). Still ACCEPTED
+// by the validator (not dropped as invalid) so the persisted value SURVIVES to loadConfig, whose one-time
+// migration collapses it to Solo and rewrites the file. Mirrors LEGACY_PROVIDER_PROFILES below; the error
+// message for a genuinely bad mode still lists only the CURRENT modes.
+const LEGACY_MODE_VALUES = ["council", "personas", "adaptive"];
 const BOOLS = [
   "planMode",
-  "autoRoute",
   "subagents",
+  "escalation",
   "repoMap",
   "memEvolve",
   "memReflect",
@@ -66,7 +71,10 @@ export function validateSettings(raw: unknown): ValidationReport {
   for (const [key, val] of Object.entries(raw)) {
     if (val === undefined || val === null) continue; // absent → default, not an error
     if (key in ENUMS) {
-      if (typeof val === "string" && ENUMS[key].includes(val)) value[key] = val;
+      // A retired mode value validates (survives for loadConfig's collapse-to-Solo migration) even though
+      // it's no longer a current mode — see LEGACY_MODE_VALUES.
+      const legacyMode = key === "mode" && typeof val === "string" && LEGACY_MODE_VALUES.includes(val);
+      if (typeof val === "string" && (ENUMS[key].includes(val) || legacyMode)) value[key] = val;
       else
         errors.push({
           field: key,

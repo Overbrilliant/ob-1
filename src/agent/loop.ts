@@ -64,7 +64,8 @@ export interface TurnDeps {
    *  (typecheck/compile). If it returns ran && !ok, the loop feeds the failures back and the model
    *  self-corrects. Always wired in Act mode; undefined in read-only Plan mode (no command execution). */
   verify?: () => Promise<{ ran: boolean; ok: boolean; report: string; timedOut?: boolean } | null>;
-  /** Max self-correction rounds before giving up and leaving the changes for the user (default 3). */
+  /** Max self-correction rounds before giving up and leaving the changes for the user (default 3;
+   *  OB1_AUTOFIX_MAX overrides — 0 is valid and means "escalate/stop on the first verified failure"). */
   autofixMax?: number;
   /** Declarative policy rules (from .ob1/policy.json) evaluated before the approval gate: a "deny" rule
    *  blocks a tool call, "allow" auto-approves it (no prompt), "warn" tags the prompt. Empty/undefined
@@ -79,15 +80,17 @@ export interface TurnDeps {
   hookExec?: HookExec;
   /** External cancellation (ESC) — stops the turn between/within model calls. */
   signal?: AbortSignal;
-  /** When true, Solo is offered the `escalate` tool — it may hand the whole turn to a heavier mode
-   *  (set from cfg.autoRoute). Suppressed on apply turns so a mode's own result can't re-escalate. */
-  canEscalate?: boolean;
   /** When true, Solo is offered the `spawn_subagents` tool — it may fan out independent read-only
    *  sub-tasks in parallel (set from cfg.subagents). Suppressed on apply turns (no nested spawn). */
   canSpawn?: boolean;
   /** When true, Solo is offered the `spawn_write_subagents` tool — parallel EDITS in isolated worktrees
    *  (set from OB1_SUBAGENTS_WRITE). High-risk, default off; suppressed on apply turns. */
   canSpawnWrite?: boolean;
+  /** Verified escalation (set from cfg.escalation; default on). When true, a turn whose auto-verify
+   *  self-fix loop STILL fails after autofixMax rounds returns { escalate } instead of just leaving the
+   *  changes — the dispatcher then hands it to Fusion best-of-N. The SIGNAL decides (no LLM router, no
+   *  regex). Forced FALSE on apply turns + Plan mode so at most ONE escalation happens per user turn. */
+  canEscalateOnFailure?: boolean;
   /** Live per-worker progress for spawned subagents (the inline meter — the orchestrator's workerProgress). */
   onWorkerEvent?: (ev: WorkerEvent) => void;
   /** Footer progress tracker for spawned subagents (the TUI renders each agent's live status). */
@@ -98,39 +101,27 @@ export interface TurnDeps {
   _runWorker?: typeof runWorker;
 }
 
-/** A heavier multi-agent mode Solo can route a hard turn to (the escalation targets). */
-export type HeavyMode = "fusion" | "council" | "personas";
+/** What a Solo turn yields back to the dispatcher. `escalate` is the VERIFIED-escalation signal (Wave 3):
+ *  the auto-verify self-fix loop ran its full budget and the checks STILL fail, so an objective SIGNAL
+ *  (not an LLM, not a regex) asks the dispatcher to hand this turn to Fusion best-of-N. There is no `mode`
+ *  field — Fusion is the only escalation target. Undefined ⇒ an ordinary turn (or escalation disabled /
+ *  suppressed). Kept a named, extensible interface so runTurn's signature and every caller stay stable. */
+export interface TurnOutcome {
+  escalate?: { reason: string; report: string };
+}
 
-/** What a Solo turn yields back to the dispatcher. `escalate` set ⇒ Solo judged the task too
- *  complex for one pass and the caller should re-run it in the named mode. */
-export interface TurnOutcome { escalate?: { mode: HeavyMode; reason: string } }
-
-// The LLM router: instead of a brittle regex guessing difficulty up front (and paying a probe call),
-// Solo decides DURING the response it was already making. If the task is too hard/high-stakes for a
-// single pass, it calls `escalate` and the dispatcher forwards the whole turn — otherwise it just
-// answers, so an easy turn costs exactly one Solo call. Only advertised when canEscalate (autoRoute on).
-const ESCALATE_TOOL: ToolDef = {
-  name: "escalate",
-  description:
-    "Hand THIS task off to a heavier multi-agent mode when solving it well in a single pass is unlikely. " +
-    "Call it BEFORE doing the work (it forwards the whole task; you won't continue). Default to answering " +
-    "directly — only escalate when one pass would be wrong or shallow. Pick the mode by failure shape: " +
-    "fusion = a hard/tricky algorithm or performance problem (parallel best-of-N, then merge); " +
-    "council = a correctness-, security-, or risk-critical change (author ↔ reviewer revise rounds, then a finalizer); " +
-    "personas = an open-ended design / architecture / trade-off question (a tailored expert-panel dialogue).",
-  input_schema: {
-    type: "object",
-    properties: {
-      mode: { type: "string", enum: ["fusion", "council", "personas"], description: "the heavier mode to route to" },
-      reason: { type: "string", description: "one concise phrase on why a single Solo pass is insufficient" },
-    },
-    required: ["mode", "reason"],
-  },
-};
+/** The verified-escalation decision — PURE (no I/O) so it can be unit-tested in isolation. Its PRECONDITION
+ *  (checked by the caller) is a genuine verified failure: the auto-verify self-fix loop ran its full budget
+ *  and the objective check STILL fails. Given that, escalate ONLY when (a) the turn is allowed to escalate
+ *  (canEscalateOnFailure — wired from cfg.escalation, forced FALSE on apply turns so one escalation happens
+ *  per user turn), (b) we're not in read-only Plan mode, and (c) the turn wasn't ESC-aborted. No LLM and no
+ *  regex participate — the objective SIGNAL plus these three policy flags fully determine the outcome. */
+export function shouldEscalate(state: { canEscalateOnFailure?: boolean; planMode: boolean; aborted?: boolean }): boolean {
+  return !!state.canEscalateOnFailure && !state.planMode && !state.aborted;
+}
 
 // Decomposition parallelism: Solo splits a big task into INDEPENDENT read-only sub-tasks and runs them
-// concurrently, getting each one's findings back to synthesize. Distinct from escalate (which forwards a
-// whole turn to a heavier mode). Only advertised when canSpawn (cfg.subagents on).
+// concurrently, getting each one's findings back to synthesize. Only advertised when canSpawn (cfg.subagents on).
 const SPAWN_TOOL: ToolDef = {
   name: "spawn_subagents",
   description:
@@ -430,7 +421,6 @@ export function describe(name: string, input: any): string {
     // ── PRs · orchestration ──
     case "create_pr": return `Opening PR: ${oneline(i.title)}`;
     case "pr_checks": return i.pr ? `Checking PR #${i.pr}` : "Checking PR status";
-    case "escalate": return `Escalating to ${i.mode} mode`;
     case "spawn_subagents": { const n = Array.isArray(i.subtasks) ? i.subtasks.length : 0; return `Spawning ${n} subagent${n === 1 ? "" : "s"}`; }
     case "spawn_write_subagents": { const n = Array.isArray(i.subtasks) ? i.subtasks.length : 0; return `Spawning ${n} write subagent${n === 1 ? "" : "s"}`; }
 
@@ -559,9 +549,10 @@ function looksLikeToolCapabilityRefusal(text: string): boolean {
 export async function runTurn(userInput: string, history: Message[], deps: TurnDeps): Promise<TurnOutcome> {
   const { cfg, tools, store, approve, log } = deps;
   const call = deps._callModel ?? callModel;
-  // A model is reachable with an API key OR a configured provider profile — a keyless Custom/LAN endpoint
-  // (key optional) has no key but is fully usable (the OpenAI-compatible path just omits the auth header).
-  if (!cfg.apiKey && !cfg.providerProfile) {
+  // A model is reachable with an API key OR a configured provider profile OR a runtime env route
+  // (OB1_BASE_URL) — a keyless Custom/LAN endpoint (key optional) has no key but is fully usable (the
+  // OpenAI-compatible path just omits the auth header). Mirror index.ts's modelReachable().
+  if (!cfg.apiKey && !cfg.providerProfile && !cfg.envProviderSource) {
     log(c.yellow("No model provider configured — run `ob1 login`, or use /models to connect one (a key, or a local/LAN endpoint). Memory and /commands still work."));
     return {};
   }
@@ -578,7 +569,12 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   const callCounts = new Map<string, number>(); // exact (tool+input) signatures → executions, for the loop-breaker
   let stepsWithTools = 0;        // steps that emitted ≥1 tool call — for degenerate-no-op detection
   let noopRetries = 0;           // one-time retry when a turn ends having taken no action + given no answer
-  const autofixMax = deps.autofixMax ?? 3;
+  // Self-fix round budget: explicit dep ▸ OB1_AUTOFIX_MAX env (0 is valid — escalate on the FIRST verified
+  // failure; used to demo/measure the escalation trigger deterministically) ▸ default 3. A malformed env
+  // value falls back to the default rather than poisoning the comparison below with NaN.
+  const envAutofixRaw = process.env.OB1_AUTOFIX_MAX?.trim();
+  const envAutofix = envAutofixRaw ? Number(envAutofixRaw) : Number.NaN; // "" ⇒ NaN ⇒ default (Number("")===0!)
+  const autofixMax = deps.autofixMax ?? (Number.isFinite(envAutofix) && envAutofix >= 0 ? Math.floor(envAutofix) : 3);
   // Consecutive mid-stream model failures (e.g. the free router falling back to another model
   // after we'd already streamed output — which the gateway can't safely retry). Resets on any success;
   // when it trips we re-issue the step instead of killing the whole turn. OB1_STEP_RETRIES overrides.
@@ -595,8 +591,6 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   const addStable = (s: string) => { system[0].text += "\n\n" + s; };
   const addVolatile = (s: string) => { system[1].text += "\n\n" + s; };
   if (quality) addVolatile(renderTaskQualityContract(quality.ledger.profile, qualityMode));
-  if (deps.canEscalate)
-    addStable("Auto-route is ON: you have the `escalate` tool. If this turn is too hard or high-stakes to solve well in a single pass, call escalate FIRST to forward it to a heavier mode; otherwise just answer (don't escalate routine work).");
   if (deps.canSpawn)
     addStable("Subagents are ON: you have the `spawn_subagents` tool. For a big task that splits into INDEPENDENT parts (investigate several files/areas, research several options, audit several modules), call it with one self-contained sub-task per part to run them in parallel and get each one's findings; then synthesize and act yourself. Don't use it for small, serial, or interdependent work.");
   if (deps.canSpawnWrite)
@@ -646,7 +640,6 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
 
     // Recompute each step so tools activated mid-turn (e.g. via load_mcp_tool) become available.
     const toolDefs: ToolDef[] = [...tools.values()].map((t) => t.def);
-    if (deps.canEscalate) toolDefs.push(ESCALATE_TOOL); // LLM router: Solo-only, advertised only when autoRoute is on
     if (deps.canSpawn) toolDefs.push(SPAWN_TOOL);        // parallel subagents: Solo-only, advertised only when cfg.subagents on
     if (deps.canSpawnWrite) toolDefs.push(SPAWN_WRITE_TOOL); // parallel write-subagents: opt-in (OB1_SUBAGENTS_WRITE)
     let resp;
@@ -789,6 +782,15 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
             mutated = false; // a fresh fix attempt re-arms verification
             continue;        // re-enter the model loop with the failures in context
           }
+          // Verified failure: the self-fix budget is spent and the objective check STILL fails. When
+          // escalation is allowed (default; forced off on apply turns + Plan mode), hand the whole turn to
+          // Fusion best-of-N — the SIGNAL decides this, no LLM router and no regex. The dispatcher runs
+          // Fusion ONCE with this report as context; at most one escalation per user turn. Otherwise (off /
+          // plan / aborted) fall through to the legacy "leave the changes for review" outcome.
+          if (shouldEscalate({ canEscalateOnFailure: deps.canEscalateOnFailure, planMode: cfg.planMode, aborted: deps.signal?.aborted })) {
+            log(c.yellow(`  ↗ verified failure after ${autofixMax} self-fix rounds — escalating to fusion (best-of-N)`));
+            return { escalate: { reason: `verification still failing after ${autofixMax} self-correction rounds`, report: v.report } };
+          }
           log(c.yellow(`  ⚠ checks still failing after ${autofixMax} self-correction round(s) — leaving the changes for you to review`));
         } else if (v?.ran && v.ok) {
           log(c.green("  ✓ verified — checks pass"));
@@ -821,25 +823,6 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
       return {};
     }
     stepsWithTools++; // this step emitted ≥1 tool call — the turn did real work (not a degenerate no-op)
-
-    // LLM router: Solo called `escalate` → judge that this turn needs a heavier mode. Stop here and hand
-    // the whole task back to the dispatcher (which re-runs it in that mode). We still answer EVERY tool_use
-    // in this assistant message with a tool_result so `history` stays valid for the later apply turn.
-    const escTU = deps.canEscalate ? toolUses.find((tu) => tu.name === "escalate") : undefined;
-    if (escTU) {
-      const raw = (escTU.input ?? {}) as { mode?: string; reason?: string };
-      const mode: HeavyMode = raw.mode === "council" || raw.mode === "personas" ? raw.mode : "fusion";
-      const reason = (raw.reason ?? "needs deeper analysis than a single Solo pass").trim();
-      log(c.dim(`  ↗ escalating to ${mode} — ${reason}`));
-      history.push({
-        role: "user",
-        content: toolUses.map((tu) => ({
-          type: "tool_result" as const, tool_use_id: tu.id,
-          content: tu === escTU ? `Task escalated to ${mode} mode; the heavier mode takes over from here.` : "Skipped — task escalated to a heavier mode.",
-        })),
-      });
-      return { escalate: { mode, reason } };
-    }
 
     const results: ContentBlock[] = [];
     for (const tu of toolUses) {

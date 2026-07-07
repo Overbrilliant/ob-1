@@ -29,10 +29,10 @@ f = strip(lastFrame() ?? "");
 check("token meter updates live", f.includes("1.5k in") && f.includes("0.5k out"));
 check("cost estimate appears once tokens spent", f.includes("$"));
 
-ctrl.setStatus({ mode: "council", plan: true });
+ctrl.setStatus({ mode: "fusion", plan: true });
 await tick();
 f = strip(lastFrame() ?? "");
-check("mode + phase switch reflected", f.includes("council") && f.includes("plan"));
+check("mode + phase switch reflected", f.includes("fusion") && f.includes("plan"));
 
 // Subscription footer: a paid plan shows a monthly credits-REMAINING bar (drains as you spend) and HIDES
 // the $ cost (subscribers pay a flat plan); free/custom keeps the $ cost and shows no credits bar. Reuse
@@ -67,7 +67,11 @@ ctrl.stream("a streamed line\n");    // a completed line → goes to the turn vi
 ctrl.setStatus({ autopilot: true });
 await tick();
 f = strip(lastFrame() ?? "");
-check("busy shows the working loader (+ Esc-to-stop hint)", f.includes("working") && f.includes("Esc to stop"));
+// The loader renders `⣾ working · N tok↑ · Esc to stop`. At the mock terminal's fixed width the leading
+// "working" word can wrap across the flex-column boundary (where it splits depends on the mode label's
+// length), so assert on the stable tail — the live token counter + the Esc-to-stop hint, both unique to
+// the busy loader — instead of the wrap-fragile "working" word.
+check("busy shows the working loader (+ Esc-to-stop hint)", f.includes("tok↑") && f.includes("Esc to stop"));
 check("loader shows a live ~token counter that builds as text streams", f.includes("tok") && ctrl.genChars === "a streamed line\n".length);
 check("streamed line renders in the live turn viewport", f.includes("a streamed line"));
 check("turn line is buffered (not yet in <Static> scrollback)", ctrl.turnBuf.some((l) => l.text.includes("a streamed line")) && !ctrl.lines.some((l) => l.text.includes("a streamed line")));
@@ -168,14 +172,14 @@ check("approval resolves to the given answer", ans === true);
   await tick();
   check("menu Enter runs the highlighted command (not the raw partial text)", dispatched === "/clear");
   check("menu Enter cleared the input (didn't write the name in)", !strip(lf() ?? "").includes("› /clear"));
-  // An arg-taking command (/fanout) instead COMPLETES so its task can be typed.
+  // An arg-taking command (/goal) instead COMPLETES so its task can be typed.
   let dispatched2: string | null = null;
   ctrl2.onSubmit = (line) => { dispatched2 = line; };
-  stdin.write("/fanout");     // exact name typed; menu still open
+  stdin.write("/goal");     // exact name typed; menu still open
   await tick();
   stdin.write("\r");
   await tick();
-  check("arg-taking command runs on a full-typed name + Enter", dispatched2 === "/fanout");
+  check("arg-taking command runs on a full-typed name + Enter", dispatched2 === "/goal");
 }
 
 // ── ⌃C: a non-empty prompt is CLEARED first (never arms/exits); an empty prompt is a TWO-STAGE exit
