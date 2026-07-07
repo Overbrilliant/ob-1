@@ -2,6 +2,39 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.0] - 2026-07-07
+
+Verified multi-agent rework. OB-1 now spends extra compute only when it can prove the extra compute was
+needed, and it grounds every multi-agent decision in your project's own checks instead of a model's
+self-opinion.
+
+- Fusion v2 is selection-first best-of-N: it generates N candidate attempts and picks the winner by an
+  objective verifier signal auto-detected from your project (build, typecheck, tests, linters — whatever
+  the repo actually has), with zero configuration. When no signal exists it falls back to synthesis rather
+  than guessing.
+- Verified escalation is ON by default: a turn runs a single agent first, and only escalates to best-of-N
+  after automated checks prove that single-agent attempt failed. Easy work stays 1× — the extra agents are
+  spent when, and only when, a check says the first attempt did not pass.
+- Added `/review`: an independent reviewer that reviews the working diff and tries to REFUTE each of its own
+  findings before reporting them, so you get the surviving issues instead of a wall of speculation. It also
+  runs automatically after an escalated apply.
+- Added `/deep`: adaptive generate-vs-refine search for hard problems, using AB-MCTS-style Thompson sampling
+  to decide at each step whether to widen (try a new approach) or deepen (refine an existing one), with
+  verified early-stop.
+- Removed the modes our own compute-matched evaluations showed did not beat a single agent given the same
+  budget: personas, council, fanout, ledger, and the adaptive router. `/review` and `/deep` remain because
+  they earned their place.
+- Added a 42-task evaluation suite (every check proven to actually discriminate) and adopted the policy that
+  a mode which cannot beat compute-matched Solo gets deleted.
+- Added the first unit-test suite: 83 tests across the multi-agent core (fusion, reviewer, deep, evaluate)
+  and the agent loop.
+- Fusion now handles honest prose answers (a candidate that correctly says "nothing to change" is no longer
+  penalized against candidates that edited files).
+- Free-models router now fails a fusion candidate over to the next provider on a 429 instead of aborting the
+  candidate.
+- Fixed keyless custom endpoints: an env/custom OpenAI-compatible endpoint with no API key is now treated as
+  reachable instead of being skipped.
+
 ## [0.2.0] - 2026-07-06
 
 - Free models: replaced the external FreeLLMAPI service with an embedded free-models router that runs
