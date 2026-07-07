@@ -60,10 +60,12 @@ const LOGIN_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes to finish in the browser
  *  one-shot loopback HTTP listener; once the user authenticates, the server redirects the browser to that
  *  listener with a freshly-minted token, which we save. mode:"signup" just preselects the Create-account
  *  tab. No credentials are entered in the terminal. */
-export async function runLogin(opts: { mode?: "signup" | "login"; source?: string } = {}): Promise<void> {
+export async function runLogin(opts: { mode?: "signup" | "login"; source?: string; out?: (s: string) => void; write?: (s: string) => void; setExitCode?: boolean } = {}): Promise<boolean> {
   const server = ob1ServerUrl();
   const mode = opts.mode ?? "login";
   const source = opts.source ?? CLI_SOURCE;
+  const out = opts.out ?? ((s: string) => console.log(s));
+  const write = opts.write ?? ((s: string) => process.stdout.write(s));
   const state = crypto.randomUUID();
 
   let resolveToken!: (t: string | null) => void;
@@ -88,16 +90,16 @@ export async function runLogin(opts: { mode?: "signup" | "login"; source?: strin
       },
     });
   } catch (e) {
-    console.error(`\n  ✗ Could not start the local sign-in listener (${(e as Error).message}). Run \`ob1 login\` to try again.`);
-    process.exitCode = 1;
-    return;
+    out(`\n  ✗ Could not start the local sign-in listener (${(e as Error).message}). Run \`ob1 login\` to try again.`);
+    if (opts.setExitCode !== false) process.exitCode = 1;
+    return false;
   }
 
   const url = `${server}/activate?port=${srv.port}&state=${encodeURIComponent(state)}&mode=${mode}&source=${encodeURIComponent(source)}`;
-  console.log(`\n  ${mode === "signup" ? "Create your account" : "Sign in"} in your browser to connect the CLI.`);
-  console.log(`  If it doesn’t open automatically, visit:\n\n    ${url}\n`);
+  out(`\n  ${mode === "signup" ? "Create your account" : "Sign in"} in your browser to connect the CLI.`);
+  out(`  If it doesn’t open automatically, visit:\n\n    ${url}\n`);
   openBrowser(url);
-  process.stdout.write("  Waiting for you to finish in the browser…  (Ctrl-C to cancel)");
+  write("  Waiting for you to finish in the browser…  (Ctrl-C to cancel)");
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const token = await Promise.race([
@@ -108,12 +110,13 @@ export async function runLogin(opts: { mode?: "signup" | "login"; source?: strin
   srv.stop(true); // safe to force now: the 200ms resolve delay already flushed the success page
 
   if (!token) {
-    console.error("\n\n  ✗ Login didn’t complete (timed out or cancelled). Run `ob1 login` to try again.");
-    process.exitCode = 1;
-    return;
+    out("\n\n  ✗ Login didn’t complete (timed out or cancelled). Run `ob1 login` to try again.");
+    if (opts.setExitCode !== false) process.exitCode = 1;
+    return false;
   }
   writeAuthToken(token);
-  console.log(`\n\n  ✓ Signed in. Token saved to ${authFile()}\n    You're ready — run \`ob1\`.`);
+  out(`\n\n  ✓ Signed in. Token saved to ${authFile()}\n    You're ready — run \`ob1\`.`);
+  return true;
 }
 
 export function runLogout(): void {

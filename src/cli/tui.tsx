@@ -790,12 +790,15 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/models", "pick a model or provider (↑↓ · Enter)"],
   ["/mode", "pick a mode (↑↓ · Enter)"],
   ["/solo", "exit a heavy mode → back to Solo"],
-  ["/plan", "read-only plan mode"],
+  ["/plan", "toggle Plan/Act mode"],
   ["/act", "act mode (allow edits)"],
   ["/effort", "reasoning effort: low/medium/high (↑↓ · Enter)"],
   // ── provider & plan ──
+  ["/login", "sign in through the browser"],
+  ["/logout", "remove the local OB-1 sign-in token"],
   ["/free", "manage the free-models pool: keys, strategy, health (↑↓ · Enter)"],
   ["/upgrade", "subscribe / manage your plan (opens pricing, signed in)"],
+  ["/subscribe", "open the subscription page"],
   // ── permissions & safety ──
   ["/permission", "approval mode: ask / autopilot (↑↓ · Enter)"],
   ["/sandbox", "pick sandbox level (↑↓ · Enter)"],

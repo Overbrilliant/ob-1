@@ -499,8 +499,10 @@ ${c.bold("Commands")}
   ${c.cyan("/effort")} ${c.dim("[low|medium|high]")}  reasoning effort ${c.dim("(↑↓ · Enter)")} — thinking budget for models that support it ${c.dim("(default medium)")}
 
   ${c.bold("Provider & plan")}
+  ${c.cyan("/login")}                sign in through the browser
+  ${c.cyan("/logout")}               remove the local OB-1 sign-in token
   ${c.cyan("/free")}                 manage the free-models pool ${c.dim("(↑↓ · Enter)")} — keys file, routing strategy, provider health
-  ${c.cyan("/upgrade")}              subscribe or manage your plan — opens pricing already signed in to your account
+  ${c.cyan("/upgrade")} ${c.dim("|")} ${c.cyan("/subscribe")}   subscribe or manage your plan — opens pricing already signed in to your account
 
   ${c.bold("Permissions & safety")}
   ${c.cyan("/permission")} ${c.dim("[ask|autopilot]")}  approval mode ${c.dim("(↑↓ · Enter)")}: ask before each change, or autopilot (no prompts)
@@ -756,6 +758,25 @@ function switchToManaged(model: string): void {
   ctrl?.setStatus({ model, resolvedModel: undefined, estTok: false, free: false }); // managed route bills per token
   persistSubscription(cfg.settingsDir, model); // clears the profile on disk; keeps the per-provider cred map
   console.log(`  model → ${c.cyan(model)}  ${c.dim(describeModel(model))}`);
+}
+
+function onManagedRoute(): boolean {
+  return !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
+}
+
+function syncAuthStateFromDisk(): void {
+  const token = loadAuthToken();
+  if (onManagedRoute()) cfg.apiKey = token;
+  if (!process.env.OB1_SEARXNG_URL && !process.env.OB1_SEARXNG_KEY) {
+    cfg.searxngKey = token;
+    cfg.searxngBearer = true;
+  }
+}
+
+function setPlanPhase(next: boolean): void {
+  cfg.planMode = next;
+  ctrl?.setStatus({ plan: cfg.planMode });
+  console.log(cfg.planMode ? c.yellow("  Plan mode (read-only)") : c.green("  Act mode"));
 }
 
 /** Set up a URL+key provider profile (OpenRouter, Ollama, Custom, …): the setup "tab" prompts
@@ -1093,7 +1114,7 @@ async function pickMode(): Promise<void> {
   });
   const m = await ui.pick("Mode", items, cfg.mode);
   if (!m) return;
-  if (m === "__phase__") { cfg.planMode = !cfg.planMode; console.log(cfg.planMode ? c.yellow("  Plan mode (read-only)") : c.green("  Act mode")); }
+  if (m === "__phase__") setPlanPhase(!cfg.planMode);
   else setMode(m as Mode);
 }
 async function pickSandbox(): Promise<void> {
@@ -1497,8 +1518,14 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     }
     case "solo": setMode("solo"); break; // quick exit from a sticky heavy mode
-    case "plan": cfg.planMode = true; console.log(c.yellow("  Plan mode (read-only)")); break;
-    case "act": cfg.planMode = false; console.log(c.green("  Act mode")); break;
+    case "plan": {
+      const sub = rest[0]?.toLowerCase();
+      if (sub === "on") setPlanPhase(true);
+      else if (sub === "off") setPlanPhase(false);
+      else setPlanPhase(!cfg.planMode);
+      break;
+    }
+    case "act": setPlanPhase(false); break;
     case "map": {
       const map = buildRepoMap(cfg.cwd);
       console.log("\n" + renderRepoMap(map, { maxFiles: 20 }));
@@ -1629,6 +1656,30 @@ async function handleCommand(line: string): Promise<boolean> {
       console.log(c.dim("  settings are now individual commands — press / to browse them:"));
       console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /subagents · /escalation · /repomap · /quality · /trust · /allow"));
       break;
+    case "login": {
+      const { runLogin, CLI_SOURCE } = await import("./cli/login.ts");
+      const ok = await runLogin({
+        mode: "login",
+        source: `${CLI_SOURCE}_login`,
+        out: (s) => console.log(s),
+        write: (s) => console.log(s),
+        setExitCode: false,
+      });
+      if (ok) {
+        syncAuthStateFromDisk();
+        await refreshSubscriptionFooter();
+      }
+      break;
+    }
+    case "logout": {
+      const { runLogout } = await import("./cli/login.ts");
+      runLogout();
+      syncAuthStateFromDisk();
+      if (subWatch) { clearInterval(subWatch); subWatch = undefined; }
+      if (process.env.OB1_TOKEN) console.log(c.yellow("  OB1_TOKEN is set in this shell, so this session still has an auth token. Unset it to fully log out."));
+      await refreshSubscriptionFooter();
+      break;
+    }
     case "free": {
       // Manage the shared free-models pool (works regardless of the active profile): keys file, routing
       // strategy, provider health, and a status summary.

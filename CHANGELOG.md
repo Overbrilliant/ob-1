@@ -2,6 +2,12 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.1] - 2026-07-07
+
+- Added in-session `/login` and `/logout` browser auth commands.
+- Added `/subscribe` as a visible alias for opening the signed-in subscription page.
+- Changed `/plan` into a Plan/Act toggle; `/plan on`, `/plan off`, and `/act` remain explicit paths.
+
 ## [0.3.0] - 2026-07-07
 
 Verified multi-agent rework. OB-1 now spends extra compute only when it can prove the extra compute was
