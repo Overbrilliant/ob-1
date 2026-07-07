@@ -222,14 +222,14 @@ try:
     check("arrow + Enter selects a model from the picker (locked → pricing)", picked)
 
     # 3d) BARE /mode (no argument) opens the same arrow-key picker — the no-typing selection flow.
-    #     Mode is "fusion" here (set in step 3), so one ↓ lands deterministically on "council".
+    #     Mode is "fusion" here (set in step 3), so one ↑ lands deterministically on "solo".
     submit("/mode")
     mode_picker = wait_for(["one model, one pass"], timeout=8.0)  # solo's hint — only the mode picker renders it
     check("bare /mode opens an interactive picker (no typing)", mode_picker)
-    send("\x1b[B")   # fusion → council
+    send("\x1b[A")   # fusion → solo
     pump(0.4)
     send("\r")
-    mode_set = wait_for(["mode → council"], timeout=6.0)
+    mode_set = wait_for(["mode → solo"], timeout=6.0)
     check("arrow + Enter selects a mode from the picker", mode_set)
 
     # 3e) BARE /sandbox opens its picker too. Sandbox is "off" here, so one ↓ lands on "read-only".
