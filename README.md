@@ -73,7 +73,7 @@ The installer picks the right macOS/Linux archive for arm64 or x64, verifies it 
 Pin a release:
 
 ```sh
-curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.3.2
+curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.3.3
 ```
 
 ### npm
@@ -186,22 +186,25 @@ Update checks are non-blocking and skip CI. Set `OB1_NO_UPDATE_CHECK=1` to disab
 
 ## Agent Modes
 
-Start with `solo`. Switch modes only when the task benefits from extra work.
+Use `/mode` for the execution posture:
 
 | Mode | Use it for |
 | --- | --- |
-| `solo` | Normal coding tasks. Fastest and cheapest path. |
-| `fusion` | Several candidate solutions, checked against the project's real signal, best one selected (sticky; `/solo` exits). |
+| `auto` | No questions asked: edits and commands run automatically. |
+| `act` | Edits allowed, but OB-1 asks before mutating tools. |
+| `plan` | Read-only investigation; no file or shell mutations. |
 
 ```text
-/mode solo
-/mode fusion
+/mode auto
+/mode act
+/mode plan
 ```
 
-Solo already self-corrects: after a file-changing turn it reruns the project's checks and fixes
-failures. On a *verified* failure it escalates once to Fusion best-of-N automatically (`/escalation`
-toggles this). Use `/review` for an independent refute-reviewer over your diff, and `/deep <task>` for
-an adaptive AB-MCTS search. Any mode that cannot beat Solo at equal tokens is deleted — see
+The normal orchestration path is still Solo: after a file-changing turn it reruns the project's checks and
+fixes failures. On a *verified* failure it escalates once to Fusion best-of-N automatically (`/escalation`
+toggles this). Use `/fusion` to force best-of-N for future turns, `/review` for an independent
+refute-reviewer over your diff, and `/deep <task>` for an adaptive AB-MCTS search. Any mode that cannot
+beat Solo at equal tokens is deleted — see
 [`docs/multimind.md`](docs/multimind.md).
 
 ## Commands
@@ -222,7 +225,7 @@ ob1 --version       print the version
 
 ```text
 /help                 show help
-/plan | /act          switch between planning and execution
+/mode auto|act|plan   switch execution mode
 /permission ask|autopilot  toggle per-action approvals
 /sandbox <mode>       switch shell sandbox mode
 /memory               inspect memory
@@ -231,7 +234,8 @@ ob1 --version       print the version
 /map                  show the ranked repository map
 /mcp                  list connected MCP servers and tools
 /skills               list available skills
-/mode solo|fusion     switch agent mode (fusion is sticky; /solo exits)
+/fusion               switch future turns to Fusion best-of-N
+/solo                 exit Fusion back to Solo
 /review               refute-review the current diff
 /deep <task>          adaptive AB-MCTS search
 /escalation on|off    escalate verified failures to Fusion (default on)
@@ -254,7 +258,7 @@ assets.
 Verify an artifact:
 
 ```sh
-gh release download v0.3.2 --repo Overbrilliant/ob-1 --pattern ob1-darwin-arm64.tar.gz
+gh release download v0.3.3 --repo Overbrilliant/ob-1 --pattern ob1-darwin-arm64.tar.gz
 gh attestation verify ob1-darwin-arm64.tar.gz --repo Overbrilliant/ob-1
 ```
 

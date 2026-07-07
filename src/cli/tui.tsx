@@ -640,6 +640,11 @@ function modeColor(mode: string): string {
   return mode === "fusion" ? "blue" : mode === "council" ? "magenta" : mode === "personas" ? "cyan" : mode === "adaptive" ? "green" : "gray";
 }
 
+function executionMode(s: Status): "auto" | "act" | "plan" {
+  if (s.plan) return "plan";
+  return s.autopilot ? "auto" : "act";
+}
+
 // Context-usage bar: how much of the MODEL's context window the current conversation occupies.
 // Filled portion + percentage are colored green <80% · yellow <90% · red ≥90% (the user's thresholds).
 const CTX_BAR_WIDTH = 8;
@@ -730,8 +735,10 @@ function StatusBar({ s, reasoning, procs, agents, busy, stopping, genChars = 0, 
         <Text dimColor> {modelLabel} · </Text>
         <Text color={modeColor(s.mode)}>{s.mode}</Text>
         <Text dimColor> · </Text>
-        <Text color={s.plan ? "yellow" : "green"}>{s.plan ? "plan" : "act"}</Text>
-        {s.autopilot ? <Text color="yellow"> · ⚡autopilot</Text> : null}
+        {(() => {
+          const x = executionMode(s);
+          return <Text color={x === "act" ? "green" : "yellow"}>{x}</Text>;
+        })()}
         {procs ? <Text color="yellow"> · ⚙{procs} proc{procs > 1 ? "s" : ""} ⌃P</Text> : null}
         {agents ? <Text color="cyan"> · 🤖{agents} agent{agents > 1 ? "s" : ""}</Text> : null}
         {busy ? (stopping
@@ -788,10 +795,9 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/exit", "exit the session"],
   // ── model & mode ──
   ["/models", "pick a model or provider (↑↓ · Enter)"],
-  ["/mode", "pick a mode (↑↓ · Enter)"],
+  ["/mode", "execution mode: auto / act / plan (↑↓ · Enter)"],
+  ["/fusion", "run future turns as Fusion best-of-N"],
   ["/solo", "exit a heavy mode → back to Solo"],
-  ["/plan", "toggle Plan/Act mode"],
-  ["/act", "act mode (allow edits)"],
   ["/effort", "reasoning effort: low/medium/high (↑↓ · Enter)"],
   // ── provider & plan ──
   ["/login", "sign in through the browser"],

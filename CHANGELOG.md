@@ -2,6 +2,13 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.3] - 2026-07-07
+
+- Changed `/mode` to the user-facing execution picker: `auto`, `act`, and `plan`.
+- Added Auto mode as the no-questions-asked path: mutating tools run without prompts.
+- Kept Plan and Act as compatibility shortcuts, but removed them from the primary slash menu.
+- Moved forced best-of-N orchestration to `/fusion`; `/solo` exits it.
+
 ## [0.3.2] - 2026-07-07
 
 - Fixed installed `/login` being hijacked by a stale `OB1_SERVER=http://localhost:8787` shell export.

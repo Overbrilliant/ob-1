@@ -60,11 +60,11 @@ check("endStream commits stream into scrollback + clears live region",
 
 // busy → an animated "working" loader + a live token counter that climbs as text streams; the input
 // box STAYS pinned (streamed lines render in a bounded viewport above it, not in <Static>), queued
-// prompts, and the autopilot marker.
+// prompts, and the auto execution-mode marker.
 ctrl.setBusy(true);
 ctrl.enqueue("queued task alpha");
 ctrl.stream("a streamed line\n");    // a completed line → goes to the turn viewport (not <Static>)
-ctrl.setStatus({ autopilot: true });
+ctrl.setStatus({ plan: false, autopilot: true });
 await tick();
 f = strip(lastFrame() ?? "");
 // The loader renders `⣾ working · N tok↑ · Esc to stop`. At the mock terminal's fixed width the leading
@@ -77,7 +77,7 @@ check("streamed line renders in the live turn viewport", f.includes("a streamed 
 check("turn line is buffered (not yet in <Static> scrollback)", ctrl.turnBuf.some((l) => l.text.includes("a streamed line")) && !ctrl.lines.some((l) => l.text.includes("a streamed line")));
 check("queued prompt listed while busy", f.includes("queued #1: queued task alpha"));
 check("input box stays pinned + editable while busy (queue hint)", f.includes("queue another task"));
-check("autopilot marker shows in status bar", f.includes("autopilot"));
+check("auto mode marker shows in status bar", f.includes("auto"));
 ctrl.endStream(); ctrl.dequeue(); ctrl.setBusy(false); ctrl.setStatus({ autopilot: false });
 await tick();
 f = strip(lastFrame() ?? "");
@@ -93,22 +93,22 @@ check("markdown bold emits a bold SGR", md.includes("[1mstrongly"));
 ctrl.endStream();
 await tick();
 
-// interactive list picker — the shared ↑↓ + Enter selection used by /settings, /models, and the
+// interactive list picker — the shared ↑↓ + Enter selection used by /models and the
 // bare /mode · /sandbox · /skill · /agents commands (no typing).
 const pk = ctrl.pick("Mode  ↑↓ · Enter · Esc", [
-  { label: "solo", hint: "one model, one pass", value: "solo" },
-  { label: "fusion", hint: "best-of-N candidates", value: "fusion" },
-], "solo");
+  { label: "auto", hint: "no questions asked", value: "auto" },
+  { label: "act", hint: "ask before edits", value: "act" },
+], "auto");
 await tick();
 f = strip(lastFrame() ?? "");
-check("picker renders title + items + hints", f.includes("Mode") && f.includes("solo") && f.includes("one model, one pass"));
-check("picker highlights the current value", f.includes("❯ solo"));
+check("picker renders title + items + hints", f.includes("Mode") && f.includes("auto") && f.includes("no questions asked"));
+check("picker highlights the current value", f.includes("❯ auto"));
 ctrl.pickerMove(1);                       // ↓ — what the down-arrow key drives on a real terminal
 await tick();
-check("pickerMove changes the highlight (↓)", strip(lastFrame() ?? "").includes("❯ fusion"));
+check("pickerMove changes the highlight (↓)", strip(lastFrame() ?? "").includes("❯ act"));
 ctrl.pickerConfirm();                      // Enter
 const chosen = await pk;
-check("pickerConfirm resolves with the highlighted value", chosen === "fusion");
+check("pickerConfirm resolves with the highlighted value", chosen === "act");
 await tick();                              // let the close re-render flush
 check("picker closes after confirm (input restored)", strip(lastFrame() ?? "").includes("type a task, or /"));
 // Esc cancels → resolves null, leaving state unchanged.

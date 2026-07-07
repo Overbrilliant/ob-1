@@ -53,7 +53,7 @@ enable it with `OB1_SUBAGENTS_WRITE=1`. Prefer editing yourself for small or int
 
 ### Fusion (best-of-N with a real selector)
 
-`/mode fusion` (sticky) or a verified escalation runs Fusion. It fans the task out to N candidates
+`/fusion` (sticky) or a verified escalation runs Fusion. It fans the task out to N candidates
 (default 3, raised to the ensemble size when more models are supplied) that all get the *same* prompt;
 the only intended variance is sampling and, on the free router, one frontier model per worker. Each
 candidate works with the full toolset in its own writable copy of the project (a git worktree at HEAD,

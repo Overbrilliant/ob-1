@@ -364,6 +364,13 @@ interface UI {
 let ui: UI;                            // set by runRepl()/runTui() before any turn runs
 let ctrl: TuiController | null = null; // present only in TUI mode (drives the live meter)
 
+type ExecutionMode = "auto" | "act" | "plan";
+
+function executionModeLabel(): ExecutionMode {
+  if (cfg.planMode) return "plan";
+  return cfg.permissionMode === "autopilot" ? "auto" : "act";
+}
+
 /** Accrue tokens into the live status meter (TUI only; a no-op under the REPL) AND persist one line to
  *  `<dataDir>/usage.jsonl` for `/usage` analytics. This is the single chokepoint every model call flows
  *  through (Solo turns via onUsage + every multi-mind worker step), so logging here captures the whole
@@ -479,8 +486,9 @@ function envInt(name: string, def: number): number {
 
 function promptStr(): string {
   const m = modeColor(cfg.mode);
-  const phase = cfg.planMode ? c.yellow("plan") : c.green("act");
-  return `${m(cfg.mode)} ${c.dim("·")} ${phase} ${c.cyan("›")} `;
+  const phase = executionModeLabel();
+  const phaseText = phase === "plan" ? c.yellow("plan") : phase === "auto" ? c.yellow("auto") : c.green("act");
+  return `${m(cfg.mode)} ${c.dim("·")} ${phaseText} ${c.cyan("›")} `;
 }
 
 const HELP = `
@@ -493,9 +501,7 @@ ${c.bold("Commands")}
 
   ${c.bold("Model & mode")}
   ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} give 150+ free models across 20+ providers, frontier models need a subscription
-  ${c.cyan("/mode")} ${c.dim("[m]")}             pick a mode ${c.dim("(↑↓ · Enter)")} or /mode solo|fusion ${c.dim("— fusion stays on (sticky); /solo exits")}
-  ${c.cyan("/solo")}                 exit Fusion mode → back to Solo
-  ${c.cyan("/plan")} ${c.dim("|")} ${c.cyan("/act")}           toggle read-only Plan vs Act mode
+  ${c.cyan("/mode")} ${c.dim("[auto|act|plan]")} pick execution mode ${c.dim("(↑↓ · Enter)")}: auto = no prompts, act = ask before edits, plan = read-only
   ${c.cyan("/effort")} ${c.dim("[low|medium|high]")}  reasoning effort ${c.dim("(↑↓ · Enter)")} — thinking budget for models that support it ${c.dim("(default medium)")}
 
   ${c.bold("Provider & plan")}
@@ -532,6 +538,8 @@ ${c.bold("Commands")}
 
   ${c.bold("Orchestration modes")}
   ${c.cyan("/goal")} ${c.dim("<condition>")}     keep working until a condition is met ${c.dim("(bounded loop · ESC or /goal stop)")}
+  ${c.cyan("/fusion")}               run future turns as Fusion best-of-N ${c.dim("(sticky; /solo exits)")}
+  ${c.cyan("/solo")}                 exit Fusion mode → back to Solo
   ${c.cyan("/subagents")} ${c.dim("[on|off]")}   parallel subagents ${c.dim("(↑↓ · Enter)")} — Solo may fan out independent read-only sub-tasks; watch them in the footer ${c.dim("(on by default)")}
   ${c.cyan("/escalation")} ${c.dim("[on|off]")}  on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N ${c.dim("(on by default)")}
   ${c.cyan("/review")}               independent refute-reviewer over your current diff ${c.dim("— reports only correctness bugs it can't refute, then offers to fix them")}
@@ -773,10 +781,23 @@ function syncAuthStateFromDisk(): void {
   }
 }
 
-function setPlanPhase(next: boolean): void {
-  cfg.planMode = next;
-  ctrl?.setStatus({ plan: cfg.planMode });
-  console.log(cfg.planMode ? c.yellow("  Plan mode (read-only)") : c.green("  Act mode"));
+function setExecutionMode(next: ExecutionMode): void {
+  cfg.planMode = next === "plan";
+  if (next === "auto") {
+    cfg.permissionMode = "autopilot";
+    cfg.permissionModeExplicit = true;
+  } else if (next === "act") {
+    cfg.permissionMode = "ask";
+    cfg.permissionModeExplicit = true;
+  }
+  ctrl?.setStatus({ plan: cfg.planMode, autopilot: cfg.permissionMode === "autopilot" });
+  const note = next === "auto"
+    ? "no prompts — edits and commands run automatically"
+    : next === "act"
+      ? "edits allowed — ask before mutating tools"
+      : "read-only — no file or shell mutations";
+  const color = next === "act" ? c.green : c.yellow;
+  console.log(`  mode → ${color(next)}${c.dim(`  (${note})`)}`);
 }
 
 /** Set up a URL+key provider profile (OpenRouter, Ollama, Custom, …): the setup "tab" prompts
@@ -1069,6 +1090,7 @@ let modeJustSet = false;
 function setMode(m: Mode): void {
   cfg.mode = m;
   modeJustSet = true;
+  ctrl?.setStatus({ mode: cfg.mode });
   const sticky = m === "solo" ? "" : c.dim("  · stays on until you switch (/solo to exit)");
   console.log(`  mode → ${modeColor(m)(m)}${m === "solo" ? "" : c.dim("  (" + modeNote(m) + ")") + sticky}`);
 }
@@ -1104,18 +1126,14 @@ function setQualityMode(q: QualityMode): void {
 // shows the keys, so titles stay terse.
 async function pickMode(): Promise<void> {
   if (!ui.pick) return;
-  const topo: Mode[] = ["solo", "fusion"];
-  const items: { label: string; hint?: string; value: string }[] = topo.map((x) => ({ label: x, hint: modeNote(x), value: x }));
-  // Plan/act is part of HOW a turn runs, so it lives in the mode picker (not a separate setting).
-  items.push({
-    label: cfg.planMode ? "→ switch to Act" : "→ switch to Plan (read-only)",
-    hint: `phase: currently ${cfg.planMode ? "plan — investigate only" : "act — edits allowed"}`,
-    value: "__phase__",
-  });
-  const m = await ui.pick("Mode", items, cfg.mode);
+  const items: { label: string; hint?: string; value: string }[] = [
+    { label: "auto", hint: "no questions asked — edits and commands run automatically", value: "auto" },
+    { label: "act", hint: "edits allowed, but ask before mutating tools", value: "act" },
+    { label: "plan", hint: "read-only investigation; no file or shell mutations", value: "plan" },
+  ];
+  const m = await ui.pick("Mode", items, executionModeLabel());
   if (!m) return;
-  if (m === "__phase__") setPlanPhase(!cfg.planMode);
-  else setMode(m as Mode);
+  setExecutionMode(m as ExecutionMode);
 }
 async function pickSandbox(): Promise<void> {
   if (!ui.pick) return;
@@ -1511,21 +1529,24 @@ async function handleCommand(line: string): Promise<boolean> {
     }
     case "rewind": await rewindCmd(rest); break;
     case "mode": {
-      const m = rest[0] as Mode;
-      if (["solo", "fusion"].includes(m)) setMode(m);
-      else if (!rest[0] && ui.pick) await pickMode();   // bare /mode opens the picker on a TTY
-      else console.log(c.red("  usage: /mode solo|fusion"));
+      const m = rest[0]?.toLowerCase();
+      if (m === "auto" || m === "act" || m === "plan") setExecutionMode(m);
+      else if (m === "solo" || m === "fusion") setMode(m);
+      else if (!m && ui.pick) await pickMode();   // bare /mode opens the picker on a TTY
+      else if (!m) console.log(`  mode: ${executionModeLabel()}${c.dim("  (/mode auto|act|plan)")}`);
+      else console.log(c.red("  usage: /mode auto|act|plan"));
       break;
     }
     case "solo": setMode("solo"); break; // quick exit from a sticky heavy mode
+    case "fusion": setMode("fusion"); break;
+    case "auto": setExecutionMode("auto"); break;
     case "plan": {
       const sub = rest[0]?.toLowerCase();
-      if (sub === "on") setPlanPhase(true);
-      else if (sub === "off") setPlanPhase(false);
-      else setPlanPhase(!cfg.planMode);
+      if (sub === "off") setExecutionMode("act");
+      else setExecutionMode("plan");
       break;
     }
-    case "act": setPlanPhase(false); break;
+    case "act": setExecutionMode("act"); break;
     case "map": {
       const map = buildRepoMap(cfg.cwd);
       console.log("\n" + renderRepoMap(map, { maxFiles: 20 }));
@@ -2423,10 +2444,10 @@ if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restor
       cfg.permissionMode = "ask";
       // Non-interactive (piped / non-TTY stdin) can't show an approval prompt, so ask mode would silently
       // auto-deny EVERY mutating tool with no explanation. Say so up front, and point at the fixes that
-      // actually apply without a TTY (autopilot env, or run interactively) — the /trust · /autopilot
+      // actually apply without a TTY (autopilot env, or run interactively) — the /trust · /mode auto
       // slash-command advice below is useless with no interactive prompt.
       if (!stdin.isTTY) startup.push(c.yellow("  ⚠ Non-interactive session in an untrusted folder: edits/commands will be auto-denied (no way to approve). Set OB1_PERMISSION=autopilot or run interactively to approve."));
-      else startup.push(c.yellow("  ⚠ new/untrusted folder — starting in ask mode (each edit/command asks first). Run /trust to enable autopilot here, or /autopilot to switch now."));
+      else startup.push(c.yellow("  ⚠ new/untrusted folder — starting in act mode (each edit/command asks first). Run /mode auto for no prompts."));
     }
   }
   if (policy.rules.length) startup.push(c.dim(`  policy: ${policy.rules.length} rule(s) from .ob1/policy.json`));
@@ -2446,7 +2467,7 @@ try {
 // is always accurate; saveSettings rewrites mode:"solo" → the note shows a single time.
 const persistedMode = persistedSettings(cfg.settingsDir).mode as string | undefined;
 if (persistedMode && persistedMode !== "solo" && persistedMode !== "fusion") {
-  startup.push(c.yellow(`  note: '${persistedMode}' mode has been retired — you're now in Solo. Use ${c.cyan("/mode fusion")} for best-of-N, or ${c.cyan("/eval")} to compare modes.`));
+  startup.push(c.yellow(`  note: '${persistedMode}' orchestration mode has been retired — you're now in Solo. Use ${c.cyan("/fusion")} for best-of-N, or ${c.cyan("/eval")} to compare modes.`));
   saveSettings(cfg);
 }
 // The embedded free-models router has no process to start — it routes in-process. Kick a best-effort,

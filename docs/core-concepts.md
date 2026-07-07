@@ -10,6 +10,16 @@ project instructions, resolves the active model route, and opens an interactive 
 
 Use `/resume` to continue a previous session and `/export` to save the current transcript.
 
+## Execution Modes
+
+Use `/mode` to choose how much autonomy OB-1 has:
+
+| Mode | Behavior |
+|---|---|
+| `auto` | No questions asked: mutating tools run automatically. |
+| `act` | Edits and commands are allowed, but OB-1 asks before mutating tools. |
+| `plan` | Read-only investigation; writes and mutating shell commands are blocked. |
+
 ## Agent Modes
 
 The default is Solo: one model, one pass, with an automatic self-fix loop that reruns the project's
@@ -18,7 +28,7 @@ spent. OB-1 spends more compute only when it earns its tokens against plain Solo
 
 - On a *verified* failure (checks still failing after self-fix), the turn escalates once to Fusion
   best-of-N — the objective signal decides this, not a router model.
-- `/mode fusion` runs best-of-N deliberately, scoring candidates against the project's real checks and
+- `/fusion` runs best-of-N deliberately, scoring candidates against the project's real checks and
   selecting a winner rather than merging.
 - `/review` runs an independent refute-reviewer over your diff; `/deep` runs an adaptive search.
 - The model can fan out read-only subagents for independent sub-tasks, but a single writer makes all
@@ -49,7 +59,7 @@ Switch routes with `/models`. Runtime env keys such as `OPENROUTER_API_KEY`, `GE
 | `autopilot` | Runs approved tool classes without prompting. This is the default for speed. |
 | `ask` | Prompts before actions that can mutate files, run commands, or use sensitive tools. |
 
-Inside the CLI, use `/permission` or `/auto` to adjust behavior.
+Inside the CLI, use `/mode auto` for no prompts, `/mode act` to ask before edits, or `/permission` for the lower-level approval setting.
 
 ## Sandbox
 
