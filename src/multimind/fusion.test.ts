@@ -9,6 +9,9 @@ import {
   normalizeCode,
   similarity,
   groupBySimilarity,
+  hasCodeFence,
+  isFailingArtifact,
+  candidateFallbackModels,
   type Candidate,
   type CandidateScore,
 } from "./fusion.ts";
@@ -181,4 +184,117 @@ test("runFusion — escalationContext preamble prepended to every candidate task
   expect(seen).toMatch(/previous single-agent attempt failed verification/i);
   expect(seen).toContain("TS2322 nope");
   expect(seen).toContain("IMPLEMENT THING");
+});
+
+// ── DEFECT 1: prose candidates are UNSCORABLE, not "syntax FAIL" ─────────────────
+test("hasCodeFence — true for a fenced block, false for plain conversational prose", () => {
+  expect(hasCodeFence("```ts\nexport const x = 1;\n```")).toBe(true);
+  expect(hasCodeFence("```\nhi\n```")).toBe(true);
+  expect(hasCodeFence("Hi! I'm doing well, thanks for asking. How can I help?")).toBe(false);
+  expect(hasCodeFence("here is `inline` code but no fence")).toBe(false);
+});
+
+test("isFailingArtifact — checked+failed → true; unchecked/passed/undefined → false (no banner without a real check)", () => {
+  expect(isFailingArtifact({ ok: false, checked: true, exitCode: 1, output: "" })).toBe(true);
+  expect(isFailingArtifact({ ok: false, checked: false, exitCode: -1, output: "" })).toBe(false); // unscored prose
+  expect(isFailingArtifact({ ok: true, checked: true, exitCode: 0, output: "" })).toBe(false);
+  expect(isFailingArtifact(undefined)).toBe(false);
+});
+
+test("runFusion — all-prose candidates: unscored (never syntax-checked), vote-selected verbatim, NO judge/synth, tier none, not failing", async () => {
+  const labels: string[] = [];
+  const PROSE = "Hi! I'm doing well, thanks for asking.";
+  const r = await runFusion({
+    task: "how are you", cfg, tools: new Map(),
+    _run: (async (o: { label: string }) => { labels.push(o.label); return W(o.label, PROSE); }) as any,
+  });
+  expect(r.candidates.length).toBe(3);
+  expect(r.candidates.every((c) => c.score?.checked === false)).toBe(true); // prose is NOT fed to a syntax check
+  expect(r.candidates.every((c) => c.score?.output === "no code block — nothing to check")).toBe(true);
+  expect(r.signalTier).toBe("none");
+  expect(r.selected?.method).toBe("vote");
+  expect(r.selected?.label).toBe("cand-1"); // largest agreeing group's earliest member
+  expect(r.synthesis).toBe(PROSE); // returned VERBATIM — no code fence wrapped around a greeting
+  expect(r.failing).toBe(false); // calm, honest — never the red "STILL FAILS" banner
+  expect(labels).not.toContain("synthesizer"); // no merge
+  expect(labels).not.toContain("judge"); // majority agreement → zero extra model calls
+});
+
+test("runFusion — all-prose with no majority (all distinct) → judge picks; still not synthesized/failing", async () => {
+  const labels: string[] = [];
+  const distinct: Record<string, string> = {
+    "cand-1": "The sky is bright blue today.",
+    "cand-2": "Quantum entanglement puzzles physicists.",
+    "cand-3": "Fresh sourdough needs patient folding.",
+  };
+  const r = await runFusion({
+    task: "q", cfg, tools: new Map(),
+    _run: (async (o: { label: string }) => { labels.push(o.label); if (o.label === "judge") return W(o.label, "cand-2: 5"); return W(o.label, distinct[o.label] ?? "x"); }) as any,
+  });
+  expect(r.signalTier).toBe("none");
+  expect(r.selected?.method).toBe("judge");
+  expect(r.selected?.label).toBe("cand-2"); // the judge's top-rated
+  expect(labels).toContain("judge");
+  expect(labels).not.toContain("synthesizer");
+  expect(r.failing).toBe(false);
+});
+
+test("runFusion — mixed prose + code: the code candidate is scored (syntax), the prose one is unscored", async () => {
+  const r = await runFusion({
+    task: "t", cfg, tools: new Map(), n: 2,
+    _run: (async (o: { label: string }) => {
+      if (o.label === "cand-1") return W(o.label, block("export const x = 1;")); // real code
+      return W(o.label, "Sure — here's my reasoning, but no code block."); // prose
+    }) as any,
+  });
+  const c1 = r.candidates.find((c) => c.label === "cand-1")!;
+  const c2 = r.candidates.find((c) => c.label === "cand-2")!;
+  expect(c1.score?.checked).toBe(true); // code candidate WAS checked
+  expect(c1.score?.ok).toBe(true);
+  expect(c2.score?.checked).toBe(false); // prose candidate was NOT checked (not a dishonest FAIL)
+  expect(r.signalTier).toBe("syntax"); // strongest tier that actually ran
+  expect(r.selected?.label).toBe("cand-1"); // the passing code candidate is selected, prose never competes
+  expect(r.failing).toBe(false);
+});
+
+// ── DEFECT 2: free-router per-candidate model failover ───────────────────────────
+test("candidateFallbackModels — free chains pin → next ensemble peer → auto; non-free stays single-model", () => {
+  const freeCfg = { ...cfg, provider: "free" as const };
+  expect(candidateFallbackModels(freeCfg, ["A", "B", "C"], "A")).toEqual(["A", "B", "auto"]);
+  expect(candidateFallbackModels(freeCfg, ["A"], "A")).toEqual(["A", "auto"]); // no distinct peer available
+  expect(candidateFallbackModels({ ...cfg, provider: "openai" as const }, ["A", "B"], "A")).toEqual(["A"]); // non-free: gateway retry covers it
+});
+
+test("runFusion (free) — retryable candidate error fails over to the next ensemble model; candidate labeled by who answered", async () => {
+  const freeCfg = { ...cfg, provider: "free" as const };
+  const seen: string[] = [];
+  const r = await runFusion({
+    task: "t", cfg: freeCfg, tools: new Map(), n: 1, models: ["A", "B"],
+    _run: (async (o: { label: string; model?: string }) => {
+      seen.push(`${o.label}:${o.model}`);
+      if (o.label === "cand-1" && o.model === "A") throw new Error("API 429: rate limited"); // pin quota-outs
+      return W(o.label, block("export const x = 1;"));
+    }) as any,
+  });
+  expect(seen).toContain("cand-1:A"); // tried the pin first
+  expect(seen).toContain("cand-1:B"); // failed over to the next Frontier peer
+  expect(r.candidates[0].model).toBe("B"); // labeled with the model that ACTUALLY answered
+  expect(r.candidates[0].score?.ok).toBe(true);
+});
+
+test("runFusion (free) — NON-retryable candidate error does NOT cascade; keeps the pinned model", async () => {
+  const freeCfg = { ...cfg, provider: "free" as const };
+  const seen: string[] = [];
+  const r = await runFusion({
+    task: "t", cfg: freeCfg, tools: new Map(), n: 1, models: ["A", "B"],
+    _run: (async (o: { label: string; model?: string }) => {
+      seen.push(`${o.label}:${o.model}`);
+      if (o.label === "cand-1") throw new Error("API 400: bad request"); // client error — won't fix itself
+      return W(o.label, block("export const x = 1;"));
+    }) as any,
+  });
+  expect(seen).toContain("cand-1:A");
+  expect(seen).not.toContain("cand-1:B"); // 400 is non-retryable → no cascade
+  expect(r.candidates[0].model).toBe("A"); // stays the assigned pin
+  expect(r.candidates[0].score?.checked).toBe(false); // errored → empty text → unscored, never a fake FAIL
 });

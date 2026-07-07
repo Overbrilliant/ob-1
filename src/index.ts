@@ -1976,7 +1976,11 @@ async function fusionTurn(task: string, opts?: { escalationContext?: string }): 
     console.log(c.dim(`  • ${cnd.label} [${cnd.model}] `) + v + frac + c.dim(`  ${cnd.outputTokens} out tok`));
   }
   const tierLabel: Record<string, string> = { "copy-checks": "copy checks (real state)", "worktree-tests": "worktree tests", check: "check command", syntax: "syntax", none: "none" };
-  if (r.selected) console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · selected ${c.cyan(r.selected.label)} [${r.selected.model}] by ${r.selected.method}`));
+  if (r.selected && r.signalTier === "none") {
+    // All-prose (conversational) answer — nothing to objectively check. Calm + honest; never the red banner.
+    const how = r.selected.method === "vote" ? "agreement" : "judge rating";
+    console.log(c.dim(`  signal: none — no code to check (conversational answer); selected ${c.cyan(r.selected.label)} [${r.selected.model}] by ${how}`));
+  } else if (r.selected) console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · selected ${c.cyan(r.selected.label)} [${r.selected.model}] by ${r.selected.method}`));
   else console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · no candidate passed → judge-synthesized a merge`));
   if (r.reverted) console.log(c.yellow("  the merge regressed below the best candidate → reverted to it"));
   if (r.failing) console.log(c.red("  ⚠ the result STILL FAILS the objective check — treat it as UNVERIFIED and review before trusting it"));

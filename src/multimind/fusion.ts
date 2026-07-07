@@ -21,6 +21,7 @@ import { runWorker, runParallel, readOnlyTools, type WorkerResult, type WorkerEv
 import { createWorktree, createWorkspaceCopy, isGitRepo, type Worktree } from "./worktree.ts";
 import { detectSignal, evaluateInDir, ensembleModels, type CandidateScore } from "./evaluate.ts";
 import { wrapCommand } from "../safety/sandbox.ts";
+import { isRetryable } from "../providers/gateway.ts";
 import type { Config } from "../config.ts";
 import type { Tool } from "../agent/tools.ts";
 import type { ProcRegistry } from "../agent/procs.ts";
@@ -71,6 +72,14 @@ export function extractCandidateFile(text: string): { code: string; lang?: strin
     if (fc) { path = fc[1].trim(); code = code.split("\n").slice(1).join("\n").trim(); }
   }
   return { code, lang, path };
+}
+
+/** True when `text` contains a fenced code block. A candidate with NO fence is UNSCORABLE conversational
+ *  PROSE — the fusion scoring site must NOT syntax-check it as code (that dishonestly reports every greeting
+ *  as a FAIL). This is an explicit gate AT the scoring site: extractCode/extractCandidateFile keep their
+ *  whole-text fallback for the eval harness / apply paths that legitimately grade prose-wrapped code. */
+export function hasCodeFence(text: string): boolean {
+  return /```[a-zA-Z0-9_+-]*[^\n]*\n[\s\S]*?```/.test(text);
 }
 
 function guessLang(code: string, hint?: string): string {
@@ -288,6 +297,42 @@ export function pickFallback(
   return { synthesis: merge.text, reverted: false, finalScore: ms };
 }
 
+/** Should the loud red "STILL FAILS" banner fire? ONLY when a REAL check RAN on the final artifact and it
+ *  FAILED. An UNSCORED artifact (a prose/conversational answer, or a merge with no resolvable test target) is
+ *  UNVERIFIED, not failed — never shout at something no check ever graded. Pure + unit-tested. */
+export function isFailingArtifact(score: CandidateScore | undefined): boolean {
+  return score?.checked === true && !score.ok;
+}
+
+/** The free-router failover CHAIN for ONE candidate (pure, unit-tested). On the free router a pinned Frontier
+ *  model can 429 / quota-out mid-run; callFree's OWN failover would then drop to STRATEGY order, which can
+ *  land on a weak (Medium/Small) model that POISONS selection (Self-MoA). So Fusion instead retries once with
+ *  the next distinct model in the (Frontier-only) ensemble, then once via the router's `auto` routing as a
+ *  last resort — and labels the candidate with whichever model actually answered. Non-free providers get no
+ *  extra hops here (the gateway's own retry/backoff already covers transient errors for them). */
+export function candidateFallbackModels(cfg: Config, ensemble: string[], pinned: string): string[] {
+  if (cfg.provider !== "free") return [pinned];
+  const next = ensemble.find((m) => m !== pinned); // best remaining Frontier peer (ensemble is Frontier-only)
+  return [...new Set([pinned, ...(next ? [next] : []), "auto"])]; // dedupe: pinned may equal "auto"/the sole model
+}
+
+/** The SELECTOR judge: RATE each candidate 0-5 (authors NO new content) and return the top-rated. Breaks a
+ *  legitimate tie — among PASSING candidates the vote+diff couldn't separate, or among all-PROSE answers with
+ *  no majority. Unparseable ratings fall back to the first candidate. `framing` sets the situation. */
+async function judgePick(cands: Candidate[], framing: string, run: typeof runWorker, cfg: Config, judgeModel?: string): Promise<Candidate> {
+  const block = cands.map((c) => `## ${c.label} [${c.model}]\n${c.code ?? c.text}`).join("\n\n");
+  const j = await run({
+    label: "judge",
+    task: `${framing} Rate each 0-5 for quality (do NOT write any new content). Output exactly one line per candidate: \`<label>: <score>\`.\n\n${block}`,
+    system: "You are OB-1's Fusion selector. You do NOT author anything; you only RATE the given candidates 0-5 and pick the best. Be terse.",
+    cfg, tools: new Map(), model: judgeModel,
+  });
+  const scores = parseJudgePicks(j.text, cands.map((c) => c.label));
+  let winner = cands[0], best = -1;
+  for (const c of cands) { const s = scores[c.label] ?? -1; if (s > best) { best = s; winner = c; } }
+  return winner;
+}
+
 // Every candidate gets this exact prompt — sampling (and optionally the model) is the only variance.
 // Exported so deep.ts (AB-MCTS-lite) reuses the SAME candidate contract for its GEN arms (spec: "GEN uses
 // the fusion candidate prompt") — one source of truth for what a candidate must emit.
@@ -401,6 +446,9 @@ export async function runFusion(opts: {
    *  ▸ auto worktree-at-HEAD (only when a copy was INTENDED — so eval's single-file grading never runs the
    *  host's suite) ▸ $OB1_FILE check ▸ syntax. Returns the tier used alongside the score. */
   const scoreArtifact = async (text: string, label: string, autoWorktree: boolean): Promise<{ score?: CandidateScore; tier: FusionSignalTier }> => {
+    // A candidate with NO fenced code block is UNSCORABLE conversational PROSE — never feed it to a syntax
+    // check (that dishonestly FAILs every greeting as "TS"). Mark it unchecked; selection votes on the text.
+    if (!hasCodeFence(text)) return { score: { ok: false, exitCode: -1, output: "no code block — nothing to check", checked: false }, tier: "none" };
     const { code, lang, path } = extractCandidateFile(text);
     if (!code) return { score: undefined, tier: "none" };
     const target = path || resolvedTarget;
@@ -418,13 +466,34 @@ export async function runFusion(opts: {
 
   const candidates: Candidate[] = [];
   const usedTiers = new Set<FusionSignalTier>();
+
+  // DEFECT 2 — free-router per-candidate failover. Each candidate STARTS on its assigned (Frontier) model but
+  // can fall over WITHIN the ensemble when that model errors, so a quota-throttled pin doesn't silently drag
+  // the ensemble down to a weak model (or waste the slot). answeredModels[i] tracks who actually answered so
+  // the UI labels the candidate honestly. See candidateFallbackModels for the chain + rationale.
+  const answeredModels = specs.map((s) => s.model);
+  const runCandidate = async (spec: { model: string }, i: number): Promise<WorkerResult> => {
+    const chain = candidateFallbackModels(opts.cfg, baseModels, spec.model);
+    let last: WorkerResult | undefined;
+    for (let a = 0; a < chain.length; a++) {
+      const model = chain[a];
+      let r: WorkerResult;
+      // runWorker itself never throws (it returns ok:false), but guard the seam so an injected _run that
+      // throws is classified the same way as a returned error.
+      try { r = await run({ label: `cand-${i + 1}`, task: candidateTask, system: candSystem(i), cfg: candCfg(i), tools: candTools(i), model }); }
+      catch (e) { r = { label: `cand-${i + 1}`, text: "", inputTokens: 0, outputTokens: 0, ok: false, error: (e as Error).message }; }
+      last = r;
+      if (r.ok) { answeredModels[i] = model; return r; } // label the candidate with the model that answered
+      // Cascade ONLY on the free router, for a retryable/provider error, and never on ESC or a no-error stop
+      // (step budget). A non-retryable error (400/401/403/404) is returned as-is — no cascade, keep the pin.
+      if (opts.cfg.provider !== "free" || opts.signal?.aborted || !r.error || !isRetryable(new Error(r.error))) break;
+    }
+    return last!; // all hops failed → keep the assigned model label; the failure surfaces in the candidate score
+  };
+
   try {
     // 1. Generate candidates in parallel from the SAME prompt (isolated contexts/copies, maybe different models).
-    let raw = await runParallel(
-      specs,
-      (s, i) => run({ label: `cand-${i + 1}`, task: candidateTask, system: candSystem(i), cfg: candCfg(i), tools: candTools(i), model: s.model }),
-      opts.concurrency ?? n,
-    );
+    let raw = await runParallel(specs, (s, i) => runCandidate(s, i), opts.concurrency ?? n);
 
     // Optional Mixture-of-Agents refine layer: each candidate sees the peers' drafts and improves once
     // (continuing in its own copy, so it can re-run/test the grafted result). Escalation context carries through.
@@ -438,7 +507,7 @@ export async function runFusion(opts: {
           system: `${candSystem(i)} You are in the refinement layer (Mixture-of-Agents): aggregate the best peer ideas; do not regress correctness; ignore verbosity.`,
           cfg: candCfg(i),
           tools: candTools(i),
-          model: s.model,
+          model: answeredModels[i], // refine on the model that actually answered round 1 (post-failover)
         }),
         opts.concurrency ?? n,
       );
@@ -465,7 +534,7 @@ export async function runFusion(opts: {
         tier = r.tier;
       }
       usedTiers.add(tier);
-      candidates.push({ ...raw[i], model: specs[i].model, code, score });
+      candidates.push({ ...raw[i], model: answeredModels[i], code, score });
     }
   } finally {
     // Reap any background proc a candidate left running INSIDE its copy (kill-by-cwd) BEFORE removing the
@@ -489,18 +558,7 @@ export async function runFusion(opts: {
     if (choice.method === "judge") {
       // The vote + smallest-diff couldn't break the tie → the judge PICKS by rating (0–5 per candidate,
       // authors no new code). Parsed strictly; garbage tolerated by falling back to the first passing.
-      const tied = choice.tied.map((i) => passing[i]);
-      const block = tied.map((c) => `## ${c.label} [${c.model}]\n\`\`\`\n${c.code ?? c.text}\n\`\`\``).join("\n\n");
-      const j = await run({
-        label: "judge",
-        task: `${tied.length} candidate solutions ALL passed the objective check. Rate each 0-5 for correctness and overall quality (do NOT write any new code). Output exactly one line per candidate: \`<label>: <score>\`.\n\n${block}`,
-        system: "You are OB-1's Fusion selector. You do NOT author code; you only RATE the given candidates 0-5 and pick the best. Be terse.",
-        cfg: opts.cfg, tools: new Map(), model: opts.judgeModel,
-      });
-      const scores = parseJudgePicks(j.text, tied.map((c) => c.label));
-      winner = tied[0];
-      let bestScore = -1;
-      for (const c of tied) { const s = scores[c.label] ?? -1; if (s > bestScore) { bestScore = s; winner = c; } }
+      winner = await judgePick(choice.tied.map((i) => passing[i]), `${choice.tied.length} candidate solutions ALL passed the objective check.`, run, opts.cfg, opts.judgeModel);
       method = "judge";
     } else {
       winner = passing[choice.index];
@@ -510,6 +568,32 @@ export async function runFusion(opts: {
       candidates, synthesis: winner.text, synthesisScore: winner.score, reverted: false, failing: false,
       selected: { label: winner.label, model: winner.model, method },
       signalTier, totalInputTokens: inTok, totalOutputTokens: outTok,
+    };
+  }
+
+  // 3b. ALL-PROSE: every candidate is UNCHECKED and fenceless — a conversational answer (e.g. plan-mode
+  //     "how are you"), NOT a failed solution. Never MERGE it or fire the FAILING banner. SELECT by agreement
+  //     over the normalized prose (largest group's EARLIEST member) with NO judge call; a degenerate vote
+  //     (all singletons / no unique majority) is a legitimate tie → the judge's 0-5 pick. signalTier stays
+  //     "none". (The fence guard distinguishes real prose from unscored-but-fenced code, e.g. a worktree run
+  //     with no resolvable target — which still falls through to the merge fallback below.)
+  const allProse = candidates.length > 0 && candidates.every((c) => !c.score?.checked && !hasCodeFence(c.text));
+  if (allProse) {
+    const groups = groupBySimilarity(candidates.map((c) => normalizeCode(c.text)), 0.9).sort((a, b) => b.length - a.length);
+    const top = groups[0];
+    let winner: Candidate;
+    let method: "vote" | "judge";
+    if (top.length >= 2 && (groups.length < 2 || groups[1].length < top.length)) {
+      winner = candidates[Math.min(...top)]; // earliest member of the unique largest agreeing group — no model call
+      method = "vote";
+    } else {
+      winner = await judgePick(candidates, `${candidates.length} candidate answers (no code to objectively check).`, run, opts.cfg, opts.judgeModel);
+      method = "judge";
+    }
+    return {
+      candidates, synthesis: winner.text, synthesisScore: winner.score, reverted: false, failing: false,
+      selected: { label: winner.label, model: winner.model, method },
+      signalTier: "none", totalInputTokens: inTok, totalOutputTokens: outTok,
     };
   }
 
@@ -534,6 +618,6 @@ export async function runFusion(opts: {
   const synthScore = (await scoreArtifact(synth.text, "synthesizer", useCopy || useWorktree)).score;
   const best = [...candidates].filter((c) => c.score?.checked).sort((a, b) => fracOf(b.score) - fracOf(a.score))[0];
   const fb = pickFallback({ text: synth.text, score: synthScore }, best);
-  const failing = !(fb.finalScore?.checked && fb.finalScore.ok); // final artifact still fails → UI must say so
+  const failing = isFailingArtifact(fb.finalScore); // real check ran AND failed → the UI announces it loudly
   return { candidates, synthesis: fb.synthesis, synthesisScore: fb.finalScore, reverted: fb.reverted, failing, signalTier, totalInputTokens: inTok, totalOutputTokens: outTok };
 }

@@ -93,5 +93,18 @@ await runFusion({
 });
 check("F: escalationContext preamble prepended", /previous single-agent attempt failed verification/i.test(candTask) && candTask.includes("TS2322 boom") && candTask.includes("sum evens"));
 
+// ALL-PROSE (conversational answer): candidates emit NO code block → UNSCORED (never syntax-FAILed), selected
+// by AGREEMENT with no synthesizer/judge, tier "none", NOT failing, returned VERBATIM (no fence wrapped on).
+const proseLabels: string[] = [];
+const PROSE = "Hi! I'm doing well, thanks for asking.";
+const fp = await runFusion({
+  task: "how are you", cfg, tools: new Map(),
+  _run: (async (o: { label: string }) => { proseLabels.push(o.label); return W(o.label, PROSE); }) as any,
+});
+check("F: prose candidates are UNSCORED (not syntax-FAILed)", fp.candidates.every((c) => c.score?.checked === false));
+check("F: prose signal tier is none", fp.signalTier === "none");
+check("F: prose selected by vote, verbatim, not failing", fp.selected?.method === "vote" && fp.synthesis === PROSE && fp.failing === false);
+check("F: prose path spends NO synthesizer/judge call", !proseLabels.includes("synthesizer") && !proseLabels.includes("judge"));
+
 if (fail) { console.error("\n✗ fusion smoke FAILED"); process.exit(1); }
-console.log("\n✓ fusion smoke passed (extract/score + selection-first vote/diff + synthesize fallback + FAILING flag + escalation preamble)");
+console.log("\n✓ fusion smoke passed (extract/score + selection-first vote/diff + synthesize fallback + FAILING flag + escalation preamble + all-prose honesty)");
