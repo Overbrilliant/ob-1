@@ -54,6 +54,7 @@ import { callModel } from "./providers/gateway.ts";
 import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning, contextWindowFor } from "./providers/models.ts";
 import { FREE, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
 import { listFreeModels, freeStatus, ensureKeysFile, runFreeHealthCheck, STRATEGIES, type FreeStatus } from "./providers/free/index.ts";
+import { syncFreeCatalogIfStale } from "./providers/free/catalog-sync.ts";
 import { spawn } from "node:child_process";
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
@@ -742,8 +743,9 @@ function watchForSubscription(): void {
     if (isSubscribed(plan)) {
       clearInterval(subWatch!); subWatch = undefined;
       ctrl?.setErrorAction(undefined); // the upgrade banner is no longer relevant
+      await syncFreeCatalogIfStale({ force: true });
       const name = plan!.plan.charAt(0).toUpperCase() + plan!.plan.slice(1);
-      ctrl?.pushLine(c.green(`  ✓ Subscription active — you're on the ${name} plan. Frontier models unlocked.`));
+      ctrl?.pushLine(c.green(`  ✓ Subscription active — you're on the ${name} plan. Frontier models and the live free catalog are unlocked.`));
     }
   }, 5000);
   // Don't let this poller keep the process alive: if the user exits before checkout completes (or the

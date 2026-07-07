@@ -2,6 +2,12 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.6] - 2026-07-08
+
+- When `/upgrade` or `/subscribe` sees a payment clear, the running TUI now force-refreshes the signed
+  Oracle catalog immediately, so the live free-model catalog unlocks in-session without waiting for the
+  normal refresh interval.
+
 ## [0.3.5] - 2026-07-08
 
 - Free models now refresh from OB-1's Oracle catalog endpoint: free/anonymous sessions use the monthly
