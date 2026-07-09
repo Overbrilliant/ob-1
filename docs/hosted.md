@@ -1,6 +1,6 @@
 # Hosted API
 
-The hosted tier is the paid convenience path. The open-source CLI, FreeLLMAPI, and your own endpoints do
+The hosted tier is the paid convenience path. The open-source CLI, free models, and your own endpoints do
 not depend on it.
 
 ## What Subscribers Get
@@ -16,7 +16,7 @@ not depend on it.
 
 Each plan includes a monthly credit balance that spends across frontier models at the per-model prices
 returned by `GET /v1/models` (and shown in the app). One balance, no keys to manage — credits cover key
-custody, subscription billing, prompt-cache routing, usage dashboards, and search. FreeLLMAPI and your
+custody, subscription billing, prompt-cache routing, usage dashboards, and search. Free models and your
 own endpoints stay free.
 
 ## CLI Flow
@@ -27,5 +27,5 @@ ob1 login
 /models
 ```
 
-If hosted credits are exhausted, the CLI should show the pricing/upgrade path. FreeLLMAPI and custom
+If hosted credits are exhausted, the CLI should show the pricing/upgrade path. Free models and custom
 endpoints keep working without a hosted subscription.

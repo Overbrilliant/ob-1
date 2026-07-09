@@ -1,6 +1,6 @@
 {
   "name": "@overbrilliant/ob1",
-  "version": "0.1.5",
+  "version": "0.3.7",
   "description": "OB-1, the CLI coding agent for Overbrilliant",
   "license": "Apache-2.0",
   "author": "Neu Software LLC",
@@ -51,6 +51,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun run --watch src/index.ts",
+    "test": "bun test",
     "smoke": "bun run scripts/smoke.ts",
     "lint": "biome lint src scripts",
     "format:check": "biome format src scripts --write=false",

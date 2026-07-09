@@ -8,7 +8,7 @@ command.
 | Add a provider preset for Together AI | Providers | `bun run scripts/provider-smoke.ts` |
 | Add a provider preset for Fireworks AI | Providers | `bun run scripts/provider-smoke.ts` |
 | Add `/memory export json` docs and smoke | Memory | `bun run scripts/memory-export-smoke.ts` |
-| Improve FreeLLMAPI Docker-missing hint copy | Onboarding | `bun run scripts/onboarding-smoke.ts` |
+| Improve the `~/.ob1/keys.env` template copy (grouping, comments) | Onboarding | `bun run scripts/free-router-smoke.ts` |
 | Add a troubleshooting entry for corporate proxies | Docs | Markdown link from `docs/README.md` |
 | Add a focused smoke for `/upgrade` locked-model copy | Hosted upsell | New smoke plus `bun run scripts/ci-smokes.ts` |
 | Add shell completion investigation notes | CLI polish | `docs/package-managers.md` updated |
@@ -31,4 +31,5 @@ Issue labels:
 - `mcp`
 - `needs-triage`
 
-Do not seed issues that require paid provider keys, secret access, or direct FreeLLMAPI repo edits.
+Do not seed issues that require paid provider keys, secret access, or edits to the embedded free-models
+router's provider credentials.

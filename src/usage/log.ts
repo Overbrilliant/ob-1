@@ -21,7 +21,7 @@ export interface UsageEntry {
   ts: string;        // ISO-8601 timestamp (stamped by the caller — keeps this module's core Date-free)
   model: string;     // resolved concrete model id (for pricing lookup)
   provider: string;  // "openai" | "anthropic" — attribution
-  mode: string;      // solo | fusion | council | personas — per-feature attribution
+  mode: string;      // solo | fusion — per-feature attribution
   in: number;        // uncached input tokens
   out: number;       // output tokens
   cacheRead: number; // cache-read input tokens (bills ~0.1× input)
@@ -41,6 +41,15 @@ export const CACHE_WRITE_MULT = 1.25;
 export function costForUsage(model: string, inTok: number, outTok: number, cacheRead = 0, cacheWrite = 0): number {
   const effIn = inTok + cacheRead * CACHE_READ_MULT + cacheWrite * CACHE_WRITE_MULT;
   return estimateCost(model, effIn, outTok);
+}
+
+/** USD cost for one turn, priced by ROUTE not just model id. The embedded free-models router serves
+ *  genuinely-free models whose ids (e.g. "google/gemini-3-flash-preview") happen to regex-match a priced
+ *  frontier family in MODELS[] — pricing those by the table would print a phantom "~$0.0034" for a $0 call.
+ *  So provider "free" is always $0; every other route prices by the model's table rate. */
+export function turnCost(provider: string, model: string, inTok: number, outTok: number, cacheRead = 0, cacheWrite = 0): number {
+  if (provider === "free") return 0;
+  return costForUsage(model, inTok, outTok, cacheRead, cacheWrite);
 }
 
 /** Append one usage line. Best-effort: creates the dir, never throws into the turn (caller wraps too). */

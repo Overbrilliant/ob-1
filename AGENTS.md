@@ -14,15 +14,15 @@
 
 ### Key files
 - `scripts/delivery-smoke.ts`
-- `src/agent/procs.ts`
-- `src/memory/store.ts`
 - `src/cli/onboarding.ts`
+- `scripts/cli-flags-smoke.ts`
+- `src/memory/store.ts`
+- `src/agent/procs.ts`
 - `src/multimind/personas.ts`
 - `scripts/router-smoke.ts`
 - `src/agent/tools.ts`
 - `scripts/verify-smoke.ts`
-- `src/agent/secrets.ts`
-- `scripts/mock-lsp-server.ts`
+- `src/agent/loop.ts`
 
 ### Topic files
 - Detailed notes live in `.ob1/topics/` when they exist.
@@ -34,14 +34,23 @@
 ### Validated checks
 - (none recorded yet)
 
+### Validated behavior checks
+- (none recorded yet)
+
 ### Durable facts
 - (none promoted yet)
+
+### Quality patterns
+- (none promoted yet)
+
+### Failure patterns
+- (none recorded)
 
 ### Known issues / follow-ups
 - (none recorded)
 
 ### Episodes
-- Last episode: (none yet)
+- Last episode: `2026-07-06T21-03-25-243Z-count-from-1-to-60-comma-separated-no-other-` — Count from 1 to 60, comma separated, no other text. (2026-07-06)
 - Episode files: `.ob1/episodes/*.md` (local, ignored)
 <!-- OB1:END memory -->
 

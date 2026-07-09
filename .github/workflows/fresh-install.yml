@@ -154,7 +154,7 @@ jobs:
 
   free-first-token:
     if: github.event_name != 'pull_request'
-    name: FreeLLMAPI first-token journey
+    name: Free models first-token journey
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -189,11 +189,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          OB1_BIN="$RUNNER_TEMP/ob1-bin/ob1" python3 scripts/freellm-fresh-install-e2e.py
+          OB1_BIN="$RUNNER_TEMP/ob1-bin/ob1" python3 scripts/free-fresh-install-e2e.py
 
   free-first-token-source:
     if: github.event_name == 'pull_request'
-    name: FreeLLMAPI first-token journey (source)
+    name: Free models first-token journey (source)
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
@@ -213,4 +213,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          OB1_BIN="$RUNNER_TEMP/ob1-source" python3 scripts/freellm-fresh-install-e2e.py
+          OB1_BIN="$RUNNER_TEMP/ob1-source" python3 scripts/free-fresh-install-e2e.py

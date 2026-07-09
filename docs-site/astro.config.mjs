@@ -20,7 +20,7 @@ export default defineConfig({
           items: [
             { label: "Quickstart", slug: "getting-started/quickstart" },
             { label: "Install", slug: "getting-started/install" },
-            { label: "FreeLLMAPI", slug: "getting-started/freellmapi" },
+            { label: "Free models", slug: "getting-started/free-models" },
           ],
         },
         {

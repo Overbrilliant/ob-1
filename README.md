@@ -16,7 +16,7 @@
 
 ![OB-1 start-free demo](docs/media/start-free.gif)
 
-*Start free: `ob1` sets up FreeLLMAPI locally — no account or card. Anonymous bootstrap routes can start you; add your own free provider keys for reliable capacity.*
+*Start free: OB-1 works instantly with the free-model catalog — no account or card. Free users get newly released free models after 30 days; hosted plans get them immediately. Add your own provider keys to `~/.ob1/keys.env` for higher limits.*
 
 ![OB-1 completing a task](docs/media/first-task.gif)
 
@@ -30,10 +30,11 @@ OB-1 is a free, open-source CLI coding agent with persistent project memory. Run
 repository and it can read the codebase, build a repo map, edit files, run checks, inspect memory, and
 coordinate deeper multi-agent passes when the task deserves more compute.
 
-The default path is free out of the box: OB-1 sets up
-[FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi), a local OpenAI-compatible gateway, and can
-use anonymous bootstrap routes before you add keys. No API key, card, or account is required to start;
-add your own free provider keys for predictable capacity.
+The default path is free out of the box: OB-1 has an embedded free-models router built into the CLI
+process — no server, no clone, no Docker/Node dependency — backed by a signed free-model catalog.
+Keyless providers answer your first message with no setup. No API key, card, or account is required to
+start; free users get newly released free models after 30 days, hosted plans get them immediately, and
+your own provider keys in `~/.ob1/keys.env` add predictable capacity.
 
 ## What You Get
 
@@ -47,8 +48,8 @@ add your own free provider keys for predictable capacity.
   approvals with `OB1_PERMISSION=ask`, and confine writes/network with `OB1_SANDBOX=workspace-write` or
   `read-only` (or set `permissionMode` / `sandbox` in `settings.json`). Even in autopilot, catastrophic
   commands (e.g. `rm -rf /`) are hard-blocked and destructive actions are flagged.
-- **Free out of the box.** Start with FreeLLMAPI's anonymous bootstrap routes when public pools have
-  capacity, then add free provider keys for better models and predictable monthly capacity.
+- **Free out of the box.** Start instantly on keyless cloud free tiers, then add your own free provider
+  keys to `~/.ob1/keys.env` for better models and predictable monthly capacity.
 - **Provider-neutral routing.** Use your own OpenAI-compatible endpoint, OpenRouter, OpenAI, Gemini,
   Groq, Ollama, LM Studio, llama.cpp, vLLM, or a LAN GPU box.
 - **Release paths people can test.** Homebrew, npm, native archives, checksums, attestations, and
@@ -74,7 +75,7 @@ The installer picks the right macOS/Linux archive for arm64 or x64, verifies it 
 Pin a release:
 
 ```sh
-curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.5
+curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.3.4
 ```
 
 ### npm
@@ -116,10 +117,9 @@ On first run, choose a model route. Pressing Esc at the first picker starts the 
 | **Your endpoint** | Export `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, or set `OB1_BASE_URL` / `OB1_API_KEY`; or use `/models` | Your key or local model | No |
 | **Hosted frontier** | `ob1 login` or choose **Hosted frontier** | Paid subscription | Yes |
 
-Free setup downloads, runs, and wires [FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) for
-you. Anonymous providers are a bootstrap path with variable quality and shared limits. Add provider
-keys in the local dashboard for stronger free-tier coverage; OB-1 keeps using the single local `/v1`
-endpoint.
+Free setup has nothing to install or run — the embedded free-models router is already part of the CLI.
+Keyless providers are a bootstrap path with variable quality and shared limits. Add your own free
+provider keys to `~/.ob1/keys.env` for stronger free-tier coverage; manage the pool with `/free`.
 
 BYOK env routes are runtime-only and are never persisted. For Gemini:
 
@@ -139,12 +139,12 @@ ob1 onboard
 You can change the route later:
 
 ```text
-/models       choose FreeLLMAPI or a subscription-backed model
-/freellm      set up or manage the local FreeLLMAPI proxy
+/models       choose Free models or a subscription-backed model
+/free         manage the free-models pool (keys, routing strategy, health)
 /upgrade      subscribe or manage your plan
 ```
 
-Full launch docs are in [docs/](docs/): quickstart, install, FreeLLMAPI, providers, core concepts,
+Full launch docs are in [docs/](docs/): quickstart, install, free models, providers, core concepts,
 commands, troubleshooting, architecture, distribution, extensions, privacy, and eval notes.
 
 Useful commands:
@@ -166,10 +166,10 @@ Update checks are non-blocking and skip CI. Set `OB1_NO_UPDATE_CHECK=1` to disab
 | Capability | OB-1 | Claude Code | opencode | aider |
 | --- | --- | --- | --- | --- |
 | License | Apache-2.0 | Proprietary | Open source | Open source |
-| Works with no API key | Yes, via FreeLLMAPI | No | No | No |
+| Works with no API key | Yes, via the embedded free-models router (keyless providers) | No | No | No |
 | Local/LAN models | Yes | Limited | Yes | Yes |
 | Persistent visible memory | SQLite + graph inspector | No | No | No |
-| Multi-agent modes | Fusion, Council, Personas | No | No | No |
+| Multi-agent modes | Fusion best-of-N, verified escalation, refute-review, adaptive search | No | No | No |
 | Sandbox/permissions | macOS Seatbelt, Linux bubblewrap, approvals | Yes | Varies | Limited |
 | Hosted convenience tier | Optional paid | Required account | Bring your own | Bring your own |
 
@@ -188,22 +188,26 @@ Update checks are non-blocking and skip CI. Set `OB1_NO_UPDATE_CHECK=1` to disab
 
 ## Agent Modes
 
-Start with `solo`. Switch modes only when the task benefits from extra work.
+Use `/mode` for the execution posture:
 
 | Mode | Use it for |
 | --- | --- |
-| `solo` | Normal coding tasks. Fastest and cheapest path. |
-| `fusion` | Several candidate solutions, checked and merged into one result. |
-| `council` | Author and reviewer rounds before the final answer. |
-| `personas` | A small expert panel for product, design, architecture, or strategy tradeoffs. |
+| `auto` | No questions asked: edits and commands run automatically. |
+| `act` | Edits allowed, but OB-1 asks before mutating tools. |
+| `plan` | Read-only investigation; no file or shell mutations. |
 
 ```text
-/mode solo
-/mode fusion
-/mode council
-/mode personas
-/autoroute on    let Solo route hard turns to a heavier mode
+/mode auto
+/mode act
+/mode plan
 ```
+
+The normal orchestration path is still Solo: after a file-changing turn it reruns the project's checks and
+fixes failures. On a *verified* failure it escalates once to Fusion best-of-N automatically (`/escalation`
+toggles this). Use `/fusion` to force best-of-N for future turns, `/review` for an independent
+refute-reviewer over your diff, and `/deep <task>` for an adaptive AB-MCTS search. Any mode that cannot
+beat Solo at equal tokens is deleted — see
+[`docs/multimind.md`](docs/multimind.md).
 
 ## Commands
 
@@ -223,7 +227,7 @@ ob1 --version       print the version
 
 ```text
 /help                 show help
-/plan | /act          switch between planning and execution
+/mode auto|act|plan   switch execution mode
 /permission ask|autopilot  toggle per-action approvals
 /sandbox <mode>       switch shell sandbox mode
 /memory               inspect memory
@@ -232,6 +236,11 @@ ob1 --version       print the version
 /map                  show the ranked repository map
 /mcp                  list connected MCP servers and tools
 /skills               list available skills
+/fusion               switch future turns to Fusion best-of-N
+/solo                 exit Fusion back to Solo
+/review               refute-review the current diff
+/deep <task>          adaptive AB-MCTS search
+/escalation on|off    escalate verified failures to Fusion (default on)
 /eval [modes…]        run compute-matched evals
 /clear                reset conversation context
 /exit                 quit
@@ -251,7 +260,7 @@ assets.
 Verify an artifact:
 
 ```sh
-gh release download v0.1.5 --repo Overbrilliant/ob-1 --pattern ob1-darwin-arm64.tar.gz
+gh release download v0.3.4 --repo Overbrilliant/ob-1 --pattern ob1-darwin-arm64.tar.gz
 gh attestation verify ob1-darwin-arm64.tar.gz --repo Overbrilliant/ob-1
 ```
 
@@ -293,7 +302,7 @@ src/
   eval/                task harness, runners, parity checks, reports
   mcp/                 MCP clients and server manager
   memory/              fact store, embeddings, ranking, reflection, export
-  multimind/           Fusion, Council, Personas, Adaptive routing, worker orchestration
+  multimind/           Fusion best-of-N, verified escalation, refute-review, deep search, subagents, worker orchestration
   providers/           OpenAI-compatible model gateway
   safety/              shell policy, validation, and OS sandbox integration
   skills/              on-demand markdown skill registry

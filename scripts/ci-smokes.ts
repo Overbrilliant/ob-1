@@ -37,12 +37,12 @@ const SMOKES = [
   "hooks-smoke.ts",           // programmable hooks: Pre/Post/PostFailure matching + block/allow/feedback
   "lsp-smoke.ts",             // LSP diagnostics: message framing + client flow vs a mock server + fallback
   "parity-harness-smoke.ts",  // mock-provider parity: scripted scenarios drive runTurn + assert wire behavior
-  "router-smoke.ts",          // adaptive router (Solo-first / escalate)
-  "goal-router-smoke.ts",     // /goal honors Solo's auto-route escalation
+  "escalation-smoke.ts",      // verified escalation: self-fix budget spent → { escalate } + report; off/plan/apply-turn never escalate
+  "reviewer-smoke.ts",        // refute-reviewer: findings/NONE/garbled parse + read-only worker wiring + model choice + diff bounding
   "fusion-smoke.ts",          // fusion best-of-N + synthesizer + verify-revert
   "fusion-worktree-smoke.ts", // fusion real git-worktree test scoring
-  "council-smoke.ts",         // council author ↔ reviewer revise rounds → finalizer
-  "worker-write-smoke.ts",    // write-capable council/fusion workers (gated mutating tools) + workspace-copy isolation
+  "deep-smoke.ts",            // deep AB-MCTS-lite: Thompson widen-vs-deepen + verified early-stop + ESC partial
+  "worker-write-smoke.ts",    // write-capable fusion workers (gated mutating tools) + workspace-copy isolation
   "rewind-smoke.ts",          // /rewind shadow-git checkpoints: worktree snapshot/restore + real-repo isolation
   "retry-smoke.ts",           // gateway upstream-error retry/backoff + isRetryable classification
   "eval-smoke.ts",            // eval objective checks + Solo@k math
@@ -54,8 +54,6 @@ const SMOKES = [
   "provider-smoke.ts",        // provider translation + token caps + cache_control + vision/image translation
   "vision-smoke.ts",          // vision path: tool {text,images} → tool_result blocks → provider wire, vision-gated
   "multimind-smoke.ts",       // multi-mind runtime (read-only filter + parallel order)
-  "ledger-smoke.ts",          // dual-ledger orchestration: stall detection + bounded re-plan + loop backstop
-  "personas-smoke.ts",        // personas former → panel → blackboard → facilitator
   "skills-smoke.ts",          // skills registry discovery + lazy-load
   "skill-learn-smoke.ts",     // self-learned skills: manage_skill write/patch/delete + provenance + protection + archived
   "skill-distill-smoke.ts",   // auto skill learning: substance gate + decision parse + create/refine via stub brain + guardrails
@@ -79,10 +77,9 @@ const SMOKES = [
   "treesitter-smoke.ts",      // tree-sitter repo-map symbol extraction (+ regex fallback)
   "compiled-startup-smoke.ts",// standalone binary startup: no runtime node_modules assets required
   "git-exclude-smoke.ts",     // startup excludes .ob1/ from repo-local git status without touching .gitignore
-  "settings-persist-smoke.ts",// settings persistence (.ob1/settings.json round-trip + precedence)
-  "freellm-smoke.ts",         // FreeLLMAPI provider: profile registry + url normalization + config round-trip
+  "settings-persist-smoke.ts",// settings persistence (.ob1/settings.json round-trip + precedence + freellmapi→free migration)
   "auth-route-smoke.ts",      // managed-server routing: token precedence + /v1 + web_search bearer/402/401
-  "freellm-manage-smoke.ts",  // OB-1-managed FreeLLMAPI: runtime detect + dashboard setup + unified-key auto-wire
+  "free-router-smoke.ts",     // embedded free-models router: keys/registry/routing/failover + freellmapi→free settings migration
   "onboarding-smoke.ts",      // first-run onboarding gate + provider-choice routing + 'seen' marker
   "verify-smoke.ts",          // self-verification: detect checks + runVerification + auto self-fix loop
   "browser-check-smoke.ts",   // headless-browser behavioral verification: working vs inert toggle + page-error/unreachable

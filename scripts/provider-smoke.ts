@@ -116,7 +116,7 @@ check("describeModel: router alias is 'provider-routed', never 'unknown model'",
 check("describeModel: does not repeat the id (no 'auto —' stutter)", !describeModel("auto").startsWith("auto"));
 check("describeModel: unknown model does not repeat the id", !describeModel("totally-made-up").startsWith("totally-made-up"));
 
-// --- proxy quirk (FreeLLMAPI `auto`): capture the resolved model + estimate tokens when usage is absent ---
+// --- proxy quirk (a free-tier `auto` router): capture the resolved model + estimate tokens when usage is absent ---
 {
   // A local SSE server we fully control: /nousage echoes a resolved model but NEVER sends a usage chunk
   // (the proxy quirk); /withusage sends a real usage chunk. callOpenAI must estimate in the first case.
@@ -129,7 +129,7 @@ check("describeModel: unknown model does not repeat the id", !describeModel("tot
       { model: "deepseek/deepseek-v4-pro", choices: [{ delta: { content: "Hello" } }] },
       { model: "deepseek/deepseek-v4-pro", choices: [{ delta: { content: " world" }, finish_reason: "stop" }] },
     ]);
-    // proxy returns a literal "None" as the text of a tool-calling step (the FreeLLMAPI null artifact)
+    // proxy returns a literal "None" as the text of a tool-calling step (the free-tier null artifact)
     if (path.includes("nullwithtool")) return sse([
       { choices: [{ delta: { content: "None" } }] },
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "run_bash", arguments: "{}" } }] }, finish_reason: "tool_calls" }] },

@@ -29,10 +29,10 @@ f = strip(lastFrame() ?? "");
 check("token meter updates live", f.includes("1.5k in") && f.includes("0.5k out"));
 check("cost estimate appears once tokens spent", f.includes("$"));
 
-ctrl.setStatus({ mode: "council", plan: true });
+ctrl.setStatus({ mode: "fusion", plan: true });
 await tick();
 f = strip(lastFrame() ?? "");
-check("mode + phase switch reflected", f.includes("council") && f.includes("plan"));
+check("mode + phase switch reflected", f.includes("fusion") && f.includes("plan"));
 
 // Subscription footer: a paid plan shows a monthly credits-REMAINING bar (drains as you spend) and HIDES
 // the $ cost (subscribers pay a flat plan); free/custom keeps the $ cost and shows no credits bar. Reuse
@@ -60,20 +60,24 @@ check("endStream commits stream into scrollback + clears live region",
 
 // busy → an animated "working" loader + a live token counter that climbs as text streams; the input
 // box STAYS pinned (streamed lines render in a bounded viewport above it, not in <Static>), queued
-// prompts, and the autopilot marker.
+// prompts, and the auto execution-mode marker.
 ctrl.setBusy(true);
 ctrl.enqueue("queued task alpha");
 ctrl.stream("a streamed line\n");    // a completed line → goes to the turn viewport (not <Static>)
-ctrl.setStatus({ autopilot: true });
+ctrl.setStatus({ plan: false, autopilot: true });
 await tick();
 f = strip(lastFrame() ?? "");
-check("busy shows the working loader (+ Esc-to-stop hint)", f.includes("working") && f.includes("Esc to stop"));
+// The loader renders `⣾ working · N tok↑ · Esc to stop`. At the mock terminal's fixed width the leading
+// "working" word can wrap across the flex-column boundary (where it splits depends on the mode label's
+// length), so assert on the stable tail — the live token counter + the Esc-to-stop hint, both unique to
+// the busy loader — instead of the wrap-fragile "working" word.
+check("busy shows the working loader (+ Esc-to-stop hint)", f.includes("tok↑") && f.includes("Esc to stop"));
 check("loader shows a live ~token counter that builds as text streams", f.includes("tok") && ctrl.genChars === "a streamed line\n".length);
 check("streamed line renders in the live turn viewport", f.includes("a streamed line"));
 check("turn line is buffered (not yet in <Static> scrollback)", ctrl.turnBuf.some((l) => l.text.includes("a streamed line")) && !ctrl.lines.some((l) => l.text.includes("a streamed line")));
 check("queued prompt listed while busy", f.includes("queued #1: queued task alpha"));
 check("input box stays pinned + editable while busy (queue hint)", f.includes("queue another task"));
-check("autopilot marker shows in status bar", f.includes("autopilot"));
+check("auto mode marker shows in status bar", f.includes("auto"));
 ctrl.endStream(); ctrl.dequeue(); ctrl.setBusy(false); ctrl.setStatus({ autopilot: false });
 await tick();
 f = strip(lastFrame() ?? "");
@@ -89,22 +93,22 @@ check("markdown bold emits a bold SGR", md.includes("[1mstrongly"));
 ctrl.endStream();
 await tick();
 
-// interactive list picker — the shared ↑↓ + Enter selection used by /settings, /models, and the
+// interactive list picker — the shared ↑↓ + Enter selection used by /models and the
 // bare /mode · /sandbox · /skill · /agents commands (no typing).
 const pk = ctrl.pick("Mode  ↑↓ · Enter · Esc", [
-  { label: "solo", hint: "one model, one pass", value: "solo" },
-  { label: "fusion", hint: "best-of-N candidates", value: "fusion" },
-], "solo");
+  { label: "auto", hint: "no questions asked", value: "auto" },
+  { label: "act", hint: "ask before edits", value: "act" },
+], "auto");
 await tick();
 f = strip(lastFrame() ?? "");
-check("picker renders title + items + hints", f.includes("Mode") && f.includes("solo") && f.includes("one model, one pass"));
-check("picker highlights the current value", f.includes("❯ solo"));
+check("picker renders title + items + hints", f.includes("Mode") && f.includes("auto") && f.includes("no questions asked"));
+check("picker highlights the current value", f.includes("❯ auto"));
 ctrl.pickerMove(1);                       // ↓ — what the down-arrow key drives on a real terminal
 await tick();
-check("pickerMove changes the highlight (↓)", strip(lastFrame() ?? "").includes("❯ fusion"));
+check("pickerMove changes the highlight (↓)", strip(lastFrame() ?? "").includes("❯ act"));
 ctrl.pickerConfirm();                      // Enter
 const chosen = await pk;
-check("pickerConfirm resolves with the highlighted value", chosen === "fusion");
+check("pickerConfirm resolves with the highlighted value", chosen === "act");
 await tick();                              // let the close re-render flush
 check("picker closes after confirm (input restored)", strip(lastFrame() ?? "").includes("type a task, or /"));
 // Esc cancels → resolves null, leaving state unchanged.
@@ -168,14 +172,14 @@ check("approval resolves to the given answer", ans === true);
   await tick();
   check("menu Enter runs the highlighted command (not the raw partial text)", dispatched === "/clear");
   check("menu Enter cleared the input (didn't write the name in)", !strip(lf() ?? "").includes("› /clear"));
-  // An arg-taking command (/fanout) instead COMPLETES so its task can be typed.
+  // An arg-taking command (/goal) instead COMPLETES so its task can be typed.
   let dispatched2: string | null = null;
   ctrl2.onSubmit = (line) => { dispatched2 = line; };
-  stdin.write("/fanout");     // exact name typed; menu still open
+  stdin.write("/goal");     // exact name typed; menu still open
   await tick();
   stdin.write("\r");
   await tick();
-  check("arg-taking command runs on a full-typed name + Enter", dispatched2 === "/fanout");
+  check("arg-taking command runs on a full-typed name + Enter", dispatched2 === "/goal");
 }
 
 // ── ⌃C: a non-empty prompt is CLEARED first (never arms/exits); an empty prompt is a TWO-STAGE exit
@@ -638,10 +642,10 @@ cctrl.setBusy(false);
   const su = new TuiController({ model: "m", mode: "solo", plan: false, inTok: 0, outTok: 0, cacheTok: 0 });
   let tested: { url: string; key: string } | null = null;
   const sp = su.providerSetup({
-    title: "Set up FreeLLMAPI",
-    blurb: ["aggregates free LLM tiers", "behind one OpenAI-compatible endpoint"],
+    title: "Set up OpenRouter",
+    blurb: ["bring your own OpenRouter key", "for 300+ hosted models"],
     presets: [{ label: "Local", hint: "this machine", url: "http://localhost:3001/v1" }, { label: "Remote", hint: "another host", url: "https://" }],
-    keyPrefix: "freellmapi-",
+    keyPrefix: "sk-or-",
     initialUrl: "http://localhost:3001/v1",
     initialKey: "",
     onTest: async (url, key) => { tested = { url, key }; return "✓ connected — 3 model(s) available"; },
@@ -649,7 +653,7 @@ cctrl.setBusy(false);
   const { lastFrame: sf } = render(<TuiApp ctrl={su} />);
   await tick();
   let fr = strip(sf() ?? "");
-  check("setup tab renders title + blurb (users know what it is)", fr.includes("Set up FreeLLMAPI") && fr.includes("aggregates free LLM tiers"));
+  check("setup tab renders title + blurb (users know what it is)", fr.includes("Set up OpenRouter") && fr.includes("bring your own OpenRouter key"));
   check("setup tab shows the Local/Remote location toggle", fr.includes("Location") && fr.includes("◀ Local ▶"));
   check("setup tab shows the prefilled URL + a masked-empty key", fr.includes("http://localhost:3001/v1") && fr.includes("(none)"));
   check("setup tab shows Test/Save/Cancel actions", fr.includes("Test connection") && fr.includes("Save & use") && fr.includes("Cancel"));
@@ -667,23 +671,23 @@ cctrl.setBusy(false);
   check("cursor lands on the key row", su.setupRowKinds()[su.setup!.index] === "key");
   su.setupActivate(); // open the key editor
   check("activating the key row opens the editor", su.setup?.editing === "key");
-  su.setupEditChange("freellmapi-abc123"); su.setupEditSubmit();
-  check("typed key is stored + editor closed", su.setup?.key === "freellmapi-abc123" && su.setup?.editing === null);
+  su.setupEditChange("sk-or-abc123"); su.setupEditSubmit();
+  check("typed key is stored + editor closed", su.setup?.key === "sk-or-abc123" && su.setup?.editing === null);
   await tick();
-  check("key renders masked (never shows the raw token)", strip(sf() ?? "").includes("•") && !strip(sf() ?? "").includes("freellmapi-abc123"));
+  check("key renders masked (never shows the raw token)", strip(sf() ?? "").includes("•") && !strip(sf() ?? "").includes("sk-or-abc123"));
 
   // run the live test → status line appears
   su.setupMove(1); // key → test
   su.setupActivate();
   await tick();
-  check("Test connection invokes onTest with the entered url/key", !!tested && (tested as any).url === "http://localhost:3001/v1" && (tested as any).key === "freellmapi-abc123");
+  check("Test connection invokes onTest with the entered url/key", !!tested && (tested as any).url === "http://localhost:3001/v1" && (tested as any).key === "sk-or-abc123");
   check("test result renders under the form", strip(sf() ?? "").includes("✓ connected"));
 
   // Save resolves with {url, key}
   su.setupMove(1); // test → save
   su.setupActivate();
   const result = await sp;
-  check("Save resolves with the entered url + key", !!result && result.url === "http://localhost:3001/v1" && result.key === "freellmapi-abc123");
+  check("Save resolves with the entered url + key", !!result && result.url === "http://localhost:3001/v1" && result.key === "sk-or-abc123");
   await tick();
   check("setup tab closes after Save (input restored)", strip(sf() ?? "").includes("type a task, or /"));
 }

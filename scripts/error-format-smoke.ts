@@ -20,7 +20,7 @@ check("402: does NOT offer a pointless retry", e402.retry === false);
 check("402: reset hint pluralised", e402.hint === "Credits reset in 3 days.");
 const e402Exhausted = explainError(`API 402: {"error":"Monthly credits exhausted.","upgrade_url":"http://localhost:8787/upgrade","resets_in_days":1}`);
 check("402 exhausted: names monthly credits", e402Exhausted.title === "Monthly credits exhausted" && e402Exhausted.action?.label === "Upgrade for more credits");
-check("402 exhausted: reminds self-hosted routes still work", /FreeLLMAPI/.test(e402Exhausted.hint ?? "") && /1 day/.test(e402Exhausted.hint ?? ""));
+check("402 exhausted: reminds free + self-hosted routes still work", /Free models/.test(e402Exhausted.hint ?? "") && /1 day/.test(e402Exhausted.hint ?? ""));
 
 // The rendered block: no raw JSON, no naked url when hyperlinks degrade, carries the action label.
 const r402 = renderError(E402);
@@ -32,17 +32,17 @@ check("402 render: shows the URL somewhere reachable (link or fallback)", r402.i
 // 401 → sign-in guidance, no retry.
 const e401 = explainError(`API 401: {"error":"token expired"}`);
 check("401: sign-in title + login hint", e401.title === "Sign-in needed" && /ob1 login/.test(e401.hint ?? "") && e401.retry === false);
-const e401Free = explainError(`API 401: {"error":{"message":"Invalid API key"}}`, { providerProfile: "freellmapi" });
-check("401 FreeLLMAPI: points to /freellm, not ob1 login", e401Free.title === "FreeLLMAPI authentication needed" && /\/freellm/.test(e401Free.hint ?? "") && !/ob1 login/.test(e401Free.hint ?? "") && e401Free.retry === false);
+const e401Free = explainError(`API 401: {"error":{"message":"Invalid API key"}}`, { providerProfile: "free" });
+check("401 free: points to /free, not ob1 login", e401Free.title === "Free provider key rejected" && /\/free/.test(e401Free.hint ?? "") && !/ob1 login/.test(e401Free.hint ?? "") && e401Free.retry === false);
 const e401Custom = explainError(`API 401: {"error":"bad key"}`, { providerProfile: "custom" });
 check("401 Custom API: points to /models, not ob1 login", e401Custom.title === "Provider authentication failed" && /\/models/.test(e401Custom.hint ?? "") && !/ob1 login/.test(e401Custom.hint ?? "") && e401Custom.retry === false);
-const e403Free = explainError(`API 403: {"error":"denied"}`, { providerProfile: "freellmapi" });
-check("403 FreeLLMAPI: points to /freellm", e403Free.title === "FreeLLMAPI access denied" && /\/freellm/.test(e403Free.hint ?? "") && e403Free.retry === false);
+const e403Free = explainError(`API 403: {"error":"denied"}`, { providerProfile: "free" });
+check("403 free: points to /free", e403Free.title === "Free provider access denied" && /\/free/.test(e403Free.hint ?? "") && e403Free.retry === false);
 
 // 429 / 5xx → retryable.
 check("429: rate limited + retryable", explainError(`API 429: {"error":"slow down"}`).retry === true);
-const e429Free = explainError(`API 429: {"error":"anonymous provider rate limit"}`, { providerProfile: "freellmapi" });
-check("429 FreeLLMAPI: explains anonymous pool pressure", e429Free.title === "FreeLLMAPI anonymous pool busy" && /provider key/.test(e429Free.hint ?? "") && e429Free.retry === true);
+const e429Free = explainError(`API 429: {"error":"all free models exhausted"}`, { providerProfile: "free" });
+check("429 free: explains pool pressure + add keys", e429Free.title === "Free models: pool busy" && /provider key/.test(e429Free.hint ?? "") && e429Free.retry === true);
 check("5xx: provider error + retryable", (() => { const e = explainError(`API 503: upstream boom`); return e.title === "Provider error" && e.retry === true; })());
 
 // OpenRouter-style nested error object.

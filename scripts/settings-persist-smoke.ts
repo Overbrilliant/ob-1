@@ -15,7 +15,7 @@ const tmp = mkdtempSync(join(tmpdir(), "ob1-settings-"));
 const origCwd = process.cwd();
 const savedEnv = { ...process.env };
 delete process.env.OPENROUTER_API_KEY; delete process.env.OPENAI_API_KEY; delete process.env.GEMINI_API_KEY; delete process.env.GROQ_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.OB1_BASE_URL; delete process.env.OB1_API_KEY; delete process.env.OB1_PROVIDER; delete process.env.OB1_TOKEN; delete process.env.OB1_SERVER;
-delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_REPO_MAP; delete process.env.OB1_MEM_EVOLVE; delete process.env.OB1_MEM_REFLECT; delete process.env.OB1_MEM_AUTOLINK; delete process.env.OB1_SKILL_LEARN; delete process.env.OB1_QUALITY; delete process.env.OB1_CHECKPOINT;
+delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_PERMISSION; delete process.env.OB1_EFFORT; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_ESCALATION; delete process.env.OB1_REPO_MAP; delete process.env.OB1_MEM_EVOLVE; delete process.env.OB1_MEM_REFLECT; delete process.env.OB1_MEM_AUTOLINK; delete process.env.OB1_SKILL_LEARN; delete process.env.OB1_QUALITY; delete process.env.OB1_CHECKPOINT;
 
 try {
   process.chdir(tmp);
@@ -27,8 +27,8 @@ try {
   const base = loadConfig();
   check("settings live in the global settings dir", base.settingsDir === join(tmp, ".ob1"), base.settingsDir);
   check("fresh workspace → defaults", base.mode === "solo" && base.sandbox === "off" && base.permissionMode === "autopilot");
-  check("auto-route defaults OFF", base.autoRoute === false);
   check("subagents default ON (parallel subagents available out of the box)", base.subagents === true);
+  check("escalation default ON (verified failure escalates to fusion out of the box)", base.escalation === true);
   check("quality mode defaults normal", base.qualityMode === "normal");
   check("no settings file yet", !hasPersistedSettings(base.settingsDir));
 
@@ -36,8 +36,8 @@ try {
   base.mode = "fusion";
   base.sandbox = "read-only";
   base.permissionMode = "ask"; // deliberate ask must survive the autopilot default
-  base.autoRoute = true;
   base.subagents = false; // toggled off → must persist (so the on default doesn't clobber a deliberate off)
+  base.escalation = false; // toggled off → must persist (so the on default doesn't clobber a deliberate off)
   base.qualityMode = "strict";
   base.model = "anthropic/claude-opus-4.8"; // canonical OpenRouter slug, same provider
   saveSettings(base);
@@ -48,8 +48,8 @@ try {
   check("mode restored", restored.mode === "fusion", restored.mode);
   check("sandbox restored", restored.sandbox === "read-only", restored.sandbox);
   check("permission mode restored (deliberate ask survives the autopilot default)", restored.permissionMode === "ask", restored.permissionMode);
-  check("auto-route restored", restored.autoRoute === true);
   check("subagents restored (a deliberate OFF survives the ON default)", restored.subagents === false);
+  check("escalation restored (a deliberate OFF survives the ON default)", restored.escalation === false);
   check("quality mode restored", restored.qualityMode === "strict", restored.qualityMode);
   check("model restored (same provider)", restored.model === "anthropic/claude-opus-4.8", restored.model);
 
@@ -59,24 +59,23 @@ try {
   const envWins = loadConfig();
   check("env OB1_SANDBOX overrides persisted", envWins.sandbox === "off", envWins.sandbox);
   check("env OB1_MODEL overrides persisted", envWins.model === "x-ai/grok-4.3", envWins.model);
-  process.env.OB1_AUTO_ROUTE = "off"; // persisted is true (above) → env must win
-  check("env OB1_AUTO_ROUTE overrides persisted", loadConfig().autoRoute === false);
   process.env.OB1_SUBAGENTS = "on"; // persisted is false (above) → env must win
   check("env OB1_SUBAGENTS overrides persisted", loadConfig().subagents === true);
+  process.env.OB1_ESCALATION = "on"; // persisted is false (above) → env must win
+  check("env OB1_ESCALATION overrides persisted", loadConfig().escalation === true);
   process.env.OB1_QUALITY = "off"; // persisted is strict (above) → env must win
   check("env OB1_QUALITY overrides persisted", loadConfig().qualityMode === "off");
-  delete process.env.OB1_SANDBOX; delete process.env.OB1_MODEL; delete process.env.OB1_AUTO_ROUTE; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_QUALITY;
+  delete process.env.OB1_SANDBOX; delete process.env.OB1_MODEL; delete process.env.OB1_SUBAGENTS; delete process.env.OB1_ESCALATION; delete process.env.OB1_QUALITY;
 
   // 4b) env overrides must NOT become permanent just because a slash command saved settings.
   process.env.OB1_MODEL = "env-only-model";
   process.env.OB1_SANDBOX = "workspace-write";
-  process.env.OB1_AUTO_ROUTE = "off";
   const envOnly = loadConfig();
-  check("env-only model/sandbox/autoroute apply at runtime", envOnly.model === "env-only-model" && envOnly.sandbox === "workspace-write" && envOnly.autoRoute === false, `${envOnly.model}/${envOnly.sandbox}/${envOnly.autoRoute}`);
+  check("env-only model/sandbox apply at runtime", envOnly.model === "env-only-model" && envOnly.sandbox === "workspace-write", `${envOnly.model}/${envOnly.sandbox}`);
   saveSettings(envOnly);
-  delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX; delete process.env.OB1_AUTO_ROUTE;
+  delete process.env.OB1_MODEL; delete process.env.OB1_SANDBOX;
   const afterEnvOnly = loadConfig();
-  check("env-only model/sandbox/autoroute were not persisted", afterEnvOnly.model === "anthropic/claude-opus-4.8" && afterEnvOnly.sandbox === "read-only" && afterEnvOnly.autoRoute === true, `${afterEnvOnly.model}/${afterEnvOnly.sandbox}/${afterEnvOnly.autoRoute}`);
+  check("env-only model/sandbox were not persisted", afterEnvOnly.model === "anthropic/claude-opus-4.8" && afterEnvOnly.sandbox === "read-only", `${afterEnvOnly.model}/${afterEnvOnly.sandbox}`);
 
   process.env.OB1_SANDBOX = "yolo";
   check("invalid OB1_SANDBOX env falls back to persisted/default", loadConfig().sandbox === "read-only", loadConfig().sandbox);
@@ -112,25 +111,20 @@ try {
   const corrupt = loadConfig();
   check("corrupt settings file falls back to defaults", corrupt.mode === "solo" && corrupt.sandbox === "off");
 
-  // 7) migration: a pre-toggle `adaptive` workspace (no autoRoute persisted) lands back in Solo, off.
-  writeFileSync(join(tmp, ".ob1", "settings.json"), JSON.stringify({ provider: "openai", mode: "adaptive" }));
-  const migrated = loadConfig();
-  check("adaptive (no autoRoute) migrates to solo", migrated.mode === "solo", migrated.mode);
-  check("migrated workspace has auto-route off", migrated.autoRoute === false);
-  // `adaptive` is fully retired: ANY persisted adaptive collapses to Solo, but a deliberate
-  // autoRoute:true is preserved — so "Solo + auto-route on" reproduces the old adaptive behaviour.
-  writeFileSync(join(tmp, ".ob1", "settings.json"), JSON.stringify({ provider: "openai", mode: "adaptive", autoRoute: true }));
-  const kept = loadConfig();
-  check("adaptive + autoRoute:true → solo, auto-route preserved on", kept.mode === "solo" && kept.autoRoute === true, `${kept.mode}/${kept.autoRoute}`);
-  // and adaptive + autoRoute:false → solo with auto-route OFF (no contradictory auto-escalation)
-  writeFileSync(join(tmp, ".ob1", "settings.json"), JSON.stringify({ provider: "openai", mode: "adaptive", autoRoute: false }));
-  const keptOff = loadConfig();
-  check("adaptive + autoRoute:false → solo, auto-route off", keptOff.mode === "solo" && keptOff.autoRoute === false, `${keptOff.mode}/${keptOff.autoRoute}`);
+  // 7) migration (multimind v2): the retired modes (adaptive/council/personas) collapse to Solo; the
+  //    surviving modes (solo|fusion) persist as-is. config-validate ACCEPTS the legacy value so it
+  //    reaches loadConfig's collapse rather than being dropped as invalid.
+  for (const legacy of ["adaptive", "council", "personas"]) {
+    writeFileSync(join(tmp, ".ob1", "settings.json"), JSON.stringify({ provider: "openai", mode: legacy }));
+    check(`retired '${legacy}' mode migrates to solo`, loadConfig().mode === "solo", loadConfig().mode);
+  }
+  writeFileSync(join(tmp, ".ob1", "settings.json"), JSON.stringify({ provider: "openai", mode: "fusion" }));
+  check("surviving 'fusion' mode is preserved (not collapsed)", loadConfig().mode === "fusion", loadConfig().mode);
 
   // 8) NO per-folder migration: a <cwd>/.ob1/settings.json is IGNORED by a fresh global dir. Settings
   //    come only from the global dir now — this stops a stale workspace file (e.g. an old remote
   //    FreeLLMAPI URL) from resurrecting itself into a freshly-reset global config.
-  writeFileSync(join(tmp, ".ob1", "settings.json"), JSON.stringify({ provider: "openai", mode: "council", sandbox: "read-only", providerProfile: "freellmapi", providerUrl: "https://stale.example/v1", providerKey: "k-stale" }));
+  writeFileSync(join(tmp, ".ob1", "settings.json"), JSON.stringify({ provider: "openai", mode: "fusion", sandbox: "read-only", providerProfile: "freellmapi", providerUrl: "https://stale.example/v1", providerKey: "k-stale" }));
   const gdir = join(tmp, "global-ob1");
   process.env.OB1_SETTINGS_DIR = gdir; // a fresh, empty global location
   check("global settings empty before load", !hasPersistedSettings(gdir));
@@ -152,6 +146,31 @@ try {
   const subKept = JSON.parse(readFileSync(join(gdir2, "settings.json"), "utf8"));
   check("subscribed (profile-less) global is NOT clobbered by a legacy profile", subKept.providerProfile === undefined, JSON.stringify(subKept.providerProfile));
   check("subscribed config keeps the managed-server provider (no legacy profile)", subCfg.providerProfile === undefined, String(subCfg.providerProfile));
+
+  // 10) freeStrategy (embedded free-models router) round-trips across save/reload.
+  const gdirFS = join(tmp, "global-fs");
+  mkdirSync(gdirFS, { recursive: true });
+  process.env.OB1_SETTINGS_DIR = gdirFS;
+  const fsCfg = loadConfig();
+  check("freeStrategy defaults to balanced", fsCfg.freeStrategy === "balanced", fsCfg.freeStrategy);
+  fsCfg.freeStrategy = "smartest";
+  saveSettings(fsCfg);
+  check("freeStrategy survives a save/reload", loadConfig().freeStrategy === "smartest", loadConfig().freeStrategy);
+
+  // 11) legacy migration: a GLOBAL settings.json with providerProfile "freellmapi" loads as the embedded
+  //     "free" router (model "auto") and the rewrite is persisted. Guards the config-validate ORDERING bug:
+  //     validateSettings must accept the legacy alias so migrateFreellmapiToFree can rewrite it (otherwise the
+  //     value is stripped first and the user is silently un-onboarded).
+  const gdirMig = join(tmp, "global-mig");
+  mkdirSync(gdirMig, { recursive: true });
+  writeFileSync(join(gdirMig, "settings.json"), JSON.stringify({ provider: "openai", providerProfile: "freellmapi", providerUrl: "http://localhost:3001/v1", providerKey: "k", model: "kimi" }));
+  process.env.OB1_SETTINGS_DIR = gdirMig;
+  const migFree = loadConfig();
+  check("legacy freellmapi profile migrates to the embedded free router", migFree.providerProfile === "free" && migFree.provider === "free" && migFree.model === "auto", `${migFree.providerProfile}/${migFree.provider}/${migFree.model}`);
+  check("migration drops the stale FreeLLMAPI endpoint/key from the live config", (migFree.baseUrl ?? "") === "" && !migFree.apiKey, `${migFree.baseUrl}/${migFree.apiKey}`);
+  const migPersisted = JSON.parse(readFileSync(join(gdirMig, "settings.json"), "utf8"));
+  check("migration is persisted to disk (freellmapi → free / auto)", migPersisted.providerProfile === "free" && migPersisted.model === "auto", JSON.stringify(migPersisted.providerProfile));
+  check("migration clears stale providerUrl/providerKey on disk", migPersisted.providerUrl === "" && migPersisted.providerKey === "", `${JSON.stringify(migPersisted.providerUrl)}/${JSON.stringify(migPersisted.providerKey)}`);
 } finally {
   process.chdir(origCwd);
   rmSync(tmp, { recursive: true, force: true });
@@ -160,5 +179,5 @@ try {
 }
 
 if (fail) { console.error("\n✗ settings-persist smoke FAILED"); process.exit(1); }
-console.log("\n✓ settings-persist smoke passed (global round-trip · env precedence · provider guard · corrupt fallback · adaptive + legacy→global migration + subscription not clobbered by legacy profile)");
+console.log("\n✓ settings-persist smoke passed (global round-trip · env precedence · provider guard · corrupt fallback · retired-mode + legacy→global migration + subscription not clobbered · freeStrategy round-trip · freellmapi→free migration)");
 process.exit(0);

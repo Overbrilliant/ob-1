@@ -10,7 +10,7 @@ flowchart TD
   user["User runs ob1"] --> boot["CLI boot and startup checks"]
   boot --> config["Config and provider routing"]
   config --> hosted["Hosted OB-1 server"]
-  config --> free["Managed FreeLLMAPI"]
+  config --> free["Embedded free-models router (in-process)"]
   config --> byok["BYOK or local OpenAI-compatible endpoint"]
   hosted --> loop["Agent loop"]
   free --> loop
@@ -77,8 +77,29 @@ touching schema or retrieval behavior.
 
 ## Multi-Agent Modes
 
-`src/multimind/` owns Fusion, Council, Personas, subagents, worktree isolation, and adaptive routing.
-Keep worker prompts grounded in the same tool/result contract as Solo.
+`src/multimind/` owns the multi-agent paths. See [Multi-Agent Modes](multimind.md) for behavior; this is
+the module map.
+
+- `runtime.ts` — the worker substrate: a headless ReAct loop in an isolated context, plus `runParallel`.
+- `worktree.ts` — isolated writable workspace copies (git worktree at HEAD, or a temp-dir copy).
+- `evaluate.ts` — the auto verifier signal: `detectSignal` picks the strongest objective signal (test →
+  compile gates → none) with zero required env, and `ensembleModels` is the diversity gate.
+- `fusion.ts` — Fusion v2: best-of-N generation, then selection-first (similarity vote → smallest diff →
+  judge picks); judge-synthesis is the fallback only when nothing passed. Selection helpers are pure/tested.
+- `reviewer.ts` — the `/review` refute-reviewer (one read-only worker; findings parsed strictly).
+- `deep.ts` — `/deep` AB-MCTS-lite; the Thompson-sampling core (`sampleBeta`/`armPosterior`/`selectArm`) is
+  pure and injectable.
+- `subagents.ts` / `subagents-write.ts` — read-only decomposition, and opt-in gated parallel edits.
+- `apply.ts` — hands a mode's final single-artifact solution to the main gated apply loop.
+
+Verified escalation lives at the boundary: `loop.ts` `shouldEscalate` (pure) decides on a genuine verified
+failure, and `index.ts` (`runEscalatedTurn`, `fusionTurn`, `deepTurn`, `reviewTurn`) dispatches it. Reviewer
+and deep never write directly; escalation caps at once per turn.
+
+Stable seam: any mode that cannot beat compute-matched Solo@k on the eval suite is deleted — Council,
+Personas, the `fanout` orchestrator, the adaptive router, and the orchestration ledger were removed 2026-07
+after heterogeneous panels measured harmful (100%→40% accuracy at 29× tokens); see git history. Keep worker
+prompts grounded in the same tool/result contract as Solo.
 
 ## MCP
 

@@ -35,7 +35,7 @@ const RECIPES: Record<FailureScenario, Omit<RecoveryRecipe, "scenario">> = {
   },
   auth_failure: {
     summary: "Authentication failed (401/403) — saved credentials were rejected.",
-    steps: ["Reconnect the active provider: managed server uses `ob1 login`, FreeLLMAPI uses `/freellm`, and Custom API uses `/models`.", "Confirm the selected account, API key, endpoint, and model are valid."],
+    steps: ["Reconnect the active provider: managed server uses `ob1 login`, Free models use `/free` (keys file), and Custom API uses `/models`.", "Confirm the selected account, API key, endpoint, and model are valid."],
     autoAttemptable: false,
   },
   mcp_handshake: {

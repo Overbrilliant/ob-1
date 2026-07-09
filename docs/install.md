@@ -14,7 +14,7 @@ ob1
 Pin a release when you need a controlled rollout:
 
 ```sh
-curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.1.5
+curl -fsSL https://github.com/Overbrilliant/ob-1/releases/latest/download/install.sh | sh -s -- --version v0.3.4
 ```
 
 Apple Silicon and Intel macOS release archives are published separately. The installer picks the right
@@ -73,8 +73,9 @@ Start in any Git repository:
 ob1
 ```
 
-Choose **Start free** on first run. OB-1 provisions FreeLLMAPI locally and wires the endpoint into
-`~/.ob1/settings.json`.
+Choose **Start free** on first run. OB-1 provisions nothing external: the free path runs through the
+embedded free-models router, and keyless cloud providers work out of the box. Add your own free
+provider keys to `~/.ob1/keys.env` for more capacity.
 
 Use these checks when debugging an install:
 

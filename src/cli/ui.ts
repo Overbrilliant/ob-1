@@ -31,9 +31,6 @@ export const c = {
 export function modeColor(mode: string): (s: string) => string {
   switch (mode) {
     case "fusion": return c.blue;
-    case "council": return c.magenta;
-    case "personas": return c.cyan;
-    case "adaptive": return c.green;
     default: return c.gray; // solo
   }
 }
@@ -126,15 +123,15 @@ export function explainError(raw: string, ctx: ErrorExplainContext = {}): Friend
         title: exhausted ? "Monthly credits exhausted" : "Subscription required",
         detail: serverMsg || (exhausted ? "Your hosted monthly credits are used up." : "Your plan doesn't cover intelligent models."),
         action: upgradeUrl ? { label: exhausted ? "Upgrade for more credits" : "Upgrade your plan", url: upgradeUrl } : undefined,
-        hint: [resetHint, exhausted ? "FreeLLMAPI and custom endpoints keep working outside hosted credits." : undefined].filter(Boolean).join(" ") || undefined,
+        hint: [resetHint, exhausted ? "Free models and custom endpoints keep working outside hosted credits." : undefined].filter(Boolean).join(" ") || undefined,
         retry: false,
       };
     }
     case 401:
-      if (providerProfile === "freellmapi") return {
-        title: "FreeLLMAPI authentication needed",
-        detail: serverMsg || "The local FreeLLMAPI proxy rejected the saved API key.",
-        hint: "Run `/freellm` to reconnect or refresh the proxy key.", retry: false,
+      if (providerProfile === "free") return {
+        title: "Free provider key rejected",
+        detail: serverMsg || "A free provider rejected a saved API key.",
+        hint: "Fix or remove the key with `/free` (keys file) — keyless providers keep working.", retry: false,
       };
       if (providerProfile === "custom") return {
         title: "Provider authentication failed",
@@ -147,10 +144,10 @@ export function explainError(raw: string, ctx: ErrorExplainContext = {}): Friend
         hint: "Run `ob1 login` to sign back in.", retry: false,
       };
     case 403:
-      if (providerProfile === "freellmapi") return {
-        title: "FreeLLMAPI access denied",
-        detail: serverMsg || "The local FreeLLMAPI proxy rejected this request.",
-        hint: "Run `/freellm` to reconnect, refresh the proxy key, or choose a model you can use.", retry: false,
+      if (providerProfile === "free") return {
+        title: "Free provider access denied",
+        detail: serverMsg || "A free provider rejected this request.",
+        hint: "Check the key with `/free`, or pick another model via `/models` → Free models.", retry: false,
       };
       if (providerProfile === "custom") return {
         title: "Provider access denied",
@@ -167,10 +164,10 @@ export function explainError(raw: string, ctx: ErrorExplainContext = {}): Friend
       detail: serverMsg || "The model or endpoint wasn't found — check the model id.", retry: false,
     };
     case 429:
-      if (providerProfile === "freellmapi") return {
-        title: "FreeLLMAPI anonymous pool busy",
-        detail: serverMsg || "The current anonymous route is throttled or out of shared capacity.",
-        hint: "Wait and retry, or run `/freellm` and add your own provider key for reliable capacity.",
+      if (providerProfile === "free") return {
+        title: "Free models: pool busy",
+        detail: serverMsg || "Every free model is rate-limited or out of capacity right now.",
+        hint: "Add more provider keys with `/free` for headroom, switch strategy, or wait for limits to reset.",
         retry: true,
       };
       return {

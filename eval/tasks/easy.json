@@ -1,0 +1,50 @@
+[
+  {
+    "id": "clamp-number",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `clamp(x: number, lo: number, hi: number): number` that constrains `x` to the inclusive range [lo, hi]. You may assume lo <= hi. Return lo when x < lo, hi when x > hi, otherwise x unchanged. A value exactly equal to a bound is returned as-is. Works for negative and fractional numbers, including a degenerate range where lo === hi. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.clamp??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(a!==b){console.error(a+\" != \"+b);process.exit(1);}};eq(f(5,0,10),5);eq(f(-3,0,10),0);eq(f(99,0,10),10);eq(f(0,0,10),0);eq(f(10,0,10),10);eq(f(-2,-5,-1),-2);eq(f(-9,-5,-1),-5);eq(f(2.5,1,3),2.5);eq(f(1,1,1),1);'"
+  },
+  {
+    "id": "chunk-array",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `chunk<T>(arr: T[], size: number): T[][]` that splits `arr` into consecutive sub-arrays of length `size`, preserving order. Assume `size` is a positive integer (>= 1). The final chunk holds the remaining elements and may be shorter. An empty input returns an empty array. If size >= arr.length (and arr is non-empty) the result is a single chunk containing every element. Do not mutate the input. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.chunk??m.default;if(typeof f!==\"function\")process.exit(2);const J=JSON.stringify;const eq=(a,b)=>{if(J(a)!==J(b)){console.error(J(a)+\" != \"+J(b));process.exit(1);}};eq(f([1,2,3,4,5],2),[[1,2],[3,4],[5]]);eq(f([1,2,3,4],2),[[1,2],[3,4]]);eq(f([],3),[]);eq(f([1,2],5),[[1,2]]);eq(f([1],1),[[1]]);eq(f([\"a\",\"b\",\"c\"],1),[[\"a\"],[\"b\"],[\"c\"]]);'"
+  },
+  {
+    "id": "title-case",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `titleCase(s: string): string`. Split the input on runs of ASCII whitespace, discard empty tokens, and for each word uppercase its FIRST character and lowercase all remaining characters. Join the resulting words with a single space. Leading/trailing whitespace is removed and any internal run of whitespace collapses to one space. An input that is empty or all whitespace returns the empty string. Only the first character of each word is uppercased even if it is not a letter. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.titleCase??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(f(a)!==b){console.error(JSON.stringify(a)+\" => \"+JSON.stringify(f(a))+\" != \"+JSON.stringify(b));process.exit(1);}};const T=String.fromCharCode(9),N=String.fromCharCode(10);eq(\"hello world\",\"Hello World\");eq(\"  the QUICK brown  \",\"The Quick Brown\");eq(\"iPhone\",\"Iphone\");eq(\"\",\"\"); eq(\"   \",\"\");eq(\"a\",\"A\");eq(\"foo\"+T+\"bar\"+N+\"baz\",\"Foo Bar Baz\");'"
+  },
+  {
+    "id": "unique-preserve-order",
+    "lang": "ts",
+    "prompt": "Implement and export a generic TypeScript function `unique<T>(arr: T[]): T[]` returning a new array with duplicates removed, keeping only the FIRST occurrence of each value and preserving original order. Element identity uses SameValueZero semantics (as a Set does), so NaN is treated as equal to NaN and +0 equals -0. Do not mutate the input. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.unique??m.default;if(typeof f!==\"function\")process.exit(2);const J=JSON.stringify;const eq=(a,b)=>{if(J(a)!==J(b)){console.error(J(a)+\" != \"+J(b));process.exit(1);}};eq(f([1,2,2,3,1]),[1,2,3]);eq(f([\"a\",\"b\",\"a\",\"c\",\"b\"]),[\"a\",\"b\",\"c\"]);eq(f([]),[]);eq(f([3,1,2,1,3]),[3,1,2]);const r=f([NaN,NaN,1]);if(r.length!==2){console.error(\"NaN len \"+r.length);process.exit(1);}if(!Number.isNaN(r[0])||r[1]!==1){console.error(\"NaN dedupe wrong\");process.exit(1);}'"
+  },
+  {
+    "id": "range-sum",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `rangeSum(a: number, b: number): number` returning the sum of all integers from `a` to `b` inclusive. Assume a and b are integers. If a > b the range is empty and the function returns 0. When a === b the result is a. Endpoints and the sum may be negative. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.rangeSum??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(a!==b){console.error(a+\" != \"+b);process.exit(1);}};eq(f(1,5),15);eq(f(5,5),5);eq(f(7,3),0);eq(f(-3,3),0);eq(f(-3,-1),-6);eq(f(0,0),0);eq(f(-2,2),0);eq(f(10,10),10);'"
+  },
+  {
+    "id": "palindrome-codeunit",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `isPalindrome(s: string): boolean` returning whether `s` reads the same forwards and backwards, comparing characters by UTF-16 code units (a naive reversal). The comparison is case-sensitive and considers every character including spaces and punctuation; do not strip or normalize anything. The empty string and any single-character string are palindromes. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.isPalindrome??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(f(a)!==b){console.error(JSON.stringify(a)+\" => \"+f(a)+\" != \"+b);process.exit(1);}};eq(\"\",true);eq(\"a\",true);eq(\"abba\",true);eq(\"abcba\",true);eq(\"abc\",false);eq(\"Aa\",false);eq(\"Abba\",false);eq(\"ab ba\",true);eq(\" \",true);'"
+  },
+  {
+    "id": "fizz-buzz-bazz",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `fizzbuzz(n: number): string[]` returning an array of length `n` (assume n >= 0). For each integer i from 1 to n, build the i-th element (at index i-1) by appending \"Fizz\" if i is divisible by 3, then \"Buzz\" if divisible by 5, then \"Bazz\" if divisible by 7, IN THAT ORDER. If none of 3, 5, 7 divides i, the element is the decimal string of i itself. So multiples of 15 give \"FizzBuzz\" and 105 gives \"FizzBuzzBazz\". n === 0 returns an empty array. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.fizzbuzz??m.default;if(typeof f!==\"function\")process.exit(2);const J=JSON.stringify;const eq=(a,b)=>{if(J(a)!==J(b)){console.error(J(a)+\" != \"+J(b));process.exit(1);}};eq(f(0),[]);eq(f(1),[\"1\"]);const r=f(105);if(r.length!==105){console.error(\"len \"+r.length);process.exit(1);}const chk=(i,v)=>{if(r[i-1]!==v){console.error(i+\" => \"+r[i-1]+\" != \"+v);process.exit(1);}};chk(2,\"2\");chk(3,\"Fizz\");chk(5,\"Buzz\");chk(7,\"Bazz\");chk(15,\"FizzBuzz\");chk(21,\"FizzBazz\");chk(35,\"BuzzBazz\");chk(105,\"FizzBuzzBazz\");'"
+  },
+  {
+    "id": "camel-to-snake",
+    "lang": "ts",
+    "prompt": "Implement and export a TypeScript function `camelToSnake(s: string): string`. Insert an underscore immediately before every uppercase ASCII letter (A-Z) that is NOT at index 0, then convert the whole string to lowercase. Characters other than uppercase ASCII letters keep their position (aside from the final lowercasing). Thus \"camelCase\" -> \"camel_case\", \"PascalCase\" -> \"pascal_case\" (no leading underscore), each letter of an acronym gets its own underscore so \"getURL\" -> \"get_u_r_l\", and digits and existing underscores are preserved. Use a named export. Output ONLY the complete file as a single fenced TypeScript code block.",
+    "check": "bun -e 'const m=await import(process.env.OB1_FILE);const f=m.camelToSnake??m.default;if(typeof f!==\"function\")process.exit(2);const eq=(a,b)=>{if(f(a)!==b){console.error(JSON.stringify(a)+\" => \"+f(a)+\" != \"+b);process.exit(1);}};eq(\"camelCase\",\"camel_case\");eq(\"PascalCase\",\"pascal_case\");eq(\"getURL\",\"get_u_r_l\");eq(\"alreadysnake\",\"alreadysnake\");eq(\"A\",\"a\");eq(\"\",\"\");eq(\"userID2\",\"user_i_d2\");eq(\"already_snake_case\",\"already_snake_case\");'"
+  }
+]

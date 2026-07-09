@@ -5,7 +5,7 @@ import * as readline from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, saveSettings, savedProviderCreds, bakedProviderCreds, hasPersistedSettings, persistedSettings, settingsHealth, ob1ServerUrl, loadAuthToken, persistSubscription, isOpenRouterEndpoint, type Mode, type SandboxMode, type PermissionMode, type Effort, type QualityMode } from "./config.ts";
+import { loadConfig, saveSettings, savedProviderCreds, hasPersistedSettings, persistedSettings, settingsHealth, ob1ServerUrl, loadAuthToken, persistSubscription, persistActiveProvider, isOpenRouterEndpoint, type Mode, type SandboxMode, type PermissionMode, type Effort, type QualityMode, type FreeStrategy } from "./config.ts";
 import { formatSettingsIssues } from "./config-validate.ts";
 import { loadPolicy, loadTrust, saveTrust, recordTrust, isTrusted, effectivePermissionMode } from "./safety/policy.ts";
 import { readGitState, analyzeBranch } from "./context/git-state.ts";
@@ -33,28 +33,29 @@ import { ProcRegistry } from "./agent/procs.ts";
 import { AgentRegistry } from "./agent/agent-registry.ts";
 import { TodoRegistry } from "./agent/todo-registry.ts";
 import { loadMcpServers, makeMcpLoaderTool, type McpLoadResult } from "./mcp/manager.ts";
-import { fanout } from "./multimind/orchestrator.ts";
-import { runLedger } from "./multimind/ledger.ts";
 import { runCodeAct, CODEACT_SYSTEM } from "./agent/codeact.ts";
 import { runFusion } from "./multimind/fusion.ts";
-import { runCouncil } from "./multimind/council.ts";
+import { runDeep, deepNodeLine } from "./multimind/deep.ts";
+import { ensembleModels, detectSignal } from "./multimind/evaluate.ts";
+import { runReview, pickReviewerModel, type Finding } from "./multimind/reviewer.ts";
 import { applySolution as applySolutionStep } from "./multimind/apply.ts";
-import { runPersonas } from "./multimind/personas.ts";
-import { runAdaptive, suggestMode } from "./multimind/router.ts";
 import type { WorkerEvent } from "./multimind/runtime.ts";
-import { appendUsage, loadUsage, aggregate, formatUsage, costForUsage } from "./usage/log.ts";
+import { appendUsage, loadUsage, aggregate, formatUsage, turnCost } from "./usage/log.ts";
 import { loadTasks } from "./eval/tasks.ts";
 import { buildRunners, ALL_MODES, SELECTABLE_MODES } from "./eval/runners.ts";
 import { runEval, computeMatched, computeCapability } from "./eval/harness.ts";
 import { renderReport, renderCapability } from "./eval/report.ts";
-import { runTurn, describe as describeTool, systemPrompt, type HeavyMode } from "./agent/loop.ts";
+import { runTurn, describe as describeTool, systemPrompt } from "./agent/loop.ts";
 import { runVerification, shellExec } from "./agent/verify.ts";
 import { latestQualityLedger, formatQualityLedger } from "./agent/task-quality.ts";
 import { loadQualityScenarios, scoreQualityLedger } from "./eval/scenarios.ts";
 import type { Message, Usage } from "./providers/types.ts";
 import { callModel } from "./providers/gateway.ts";
 import { describeModel, modelSpec, MODELS, isRouterModel, modelReasoning, contextWindowFor } from "./providers/models.ts";
-import { FREELLMAPI, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
+import { FREE, CUSTOM, PROFILES, profileById, normalizeBaseUrl, fetchModels, type ProviderProfile } from "./providers/profiles.ts";
+import { listFreeModels, freeStatus, ensureKeysFile, runFreeHealthCheck, STRATEGIES, type FreeStatus } from "./providers/free/index.ts";
+import { syncFreeCatalogIfStale, startFreeCatalogSyncLoop } from "./providers/free/catalog-sync.ts";
+import { spawn } from "node:child_process";
 import { banner, c, modeColor, explainError, renderFriendly } from "./cli/ui.ts";
 import { TuiController, startTui, type ProviderSetupOpts, type ProviderSetupResult } from "./cli/tui.tsx";
 import { CLI_VERSION } from "./version.ts";
@@ -99,9 +100,9 @@ Inside OB-1, use /help for interactive commands.`;
   }
 }
 
-// First-run onboarding: start free → own endpoint/env → hosted frontier. For the free path, set up and
-// auto-wire the managed FreeLLMAPI proxy. Runs BEFORE loadConfig so the new provider is picked
-// up by the single resolve below. No-ops on non-TTY (pipes/CI) and once the user has set anything up.
+// First-run onboarding: start free → own endpoint/env → hosted frontier. The free path activates the
+// embedded free-models router (no server, no second process). Runs BEFORE loadConfig so the new provider is
+// picked up by the single resolve below. No-ops on non-TTY (pipes/CI) and once the user has set anything up.
 let onboardingRan = false;
 {
   const { shouldOnboard, runOnboarding } = await import("./cli/onboarding.ts");
@@ -120,7 +121,7 @@ function modelReachable(): boolean {
 
 // Auth guard: when we rely on the managed OB-1 server but the saved token is missing or REJECTED
 // (expired, or the account was reset), (re)authenticate before doing anything — otherwise the first
-// request dies with a confusing 401. Interactive TTY only; FreeLLMAPI / Custom / OB1_TOKEN users skip it.
+// request dies with a confusing 401. Interactive TTY only; Free / Custom / OB1_TOKEN users skip it.
 if (stdin.isTTY && !process.env.OB1_TOKEN) {
   const onManaged = !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
   if (onManaged) {
@@ -308,7 +309,6 @@ function renderTranscript(h: Message[]): string {
 
 /** /goal loop: keep running turns toward `goal` until the model emits GOAL_MET or the cap is hit. ESC stops. */
 async function runGoalLoop(goal: string): Promise<void> {
-  await ensureProxyHealthy();
   const maxIters = Number(process.env.OB1_GOAL_MAX_ITERS) > 0 ? Number(process.env.OB1_GOAL_MAX_ITERS) : 10;
   for (let i = 0; i < maxIters && activeGoal === goal; i++) {
     const prompt = i === 0
@@ -317,11 +317,12 @@ async function runGoalLoop(goal: string): Promise<void> {
     const startLen = history.length;
     const outcome = await runTurn(prompt, history, turnDeps());
     if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
-    const escalatedText = outcome?.escalate ? await runEscalatedTurn(prompt, outcome.escalate) : undefined;
-    if (activeAbort?.signal.aborted) { console.log(c.dim("  ⊘ goal loop stopped (ESC)")); break; }
-    rememberTurn(prompt, startLen, outcome?.escalate ? `goal→${outcome.escalate.mode}` : "goal");
+    // Verified escalation (default ON): loop.ts asked to escalate this iteration → hand it to Fusion once
+    // (the apply turn inside can't re-escalate — one escalation per iteration). Tag the episode "escalate".
+    if (outcome.escalate) await runEscalatedTurn(prompt, outcome.escalate);
+    rememberTurn(prompt, startLen, outcome.escalate ? "escalate" : "goal");
     persistSession();
-    const txt = escalatedText ?? lastAssistantText();
+    const txt = lastAssistantText();
     if (/\bGOAL_MET\b/.test(txt)) { console.log(c.green(`  ✓ goal achieved after ${i + 1} iteration(s)`)); activeGoal = null; return; }
     console.log(c.dim(`  ↻ goal iteration ${i + 1}/${maxIters} — not yet met, continuing…`));
   }
@@ -357,12 +358,19 @@ interface UI {
   // Provider setup tab (opened from /models): collects a proxy URL + key (TUI form / REPL prompts), with a live
   // connection test. Returns the entered {url, key} or null if cancelled.
   providerSetup?: (opts: ProviderSetupOpts) => Promise<ProviderSetupResult>;
-  // Inline single-field text prompt (TUI modal / REPL line). Used by the managed Free LLM API setup from
-  // /freellm for email/password (mask hides the value). Returns the text, or null if cancelled (Esc).
+  // Inline single-field text prompt (TUI modal / REPL line). Used e.g. to collect a secret mid-turn
+  // (mask hides the value). Returns the text, or null if cancelled (Esc).
   prompt?: (opts: { title: string; question: string; mask?: boolean; placeholder?: string }) => Promise<string | null>;
 }
 let ui: UI;                            // set by runRepl()/runTui() before any turn runs
 let ctrl: TuiController | null = null; // present only in TUI mode (drives the live meter)
+
+type ExecutionMode = "auto" | "act" | "plan";
+
+function executionModeLabel(): ExecutionMode {
+  if (cfg.planMode) return "plan";
+  return cfg.permissionMode === "autopilot" ? "auto" : "act";
+}
 
 /** Accrue tokens into the live status meter (TUI only; a no-op under the REPL) AND persist one line to
  *  `<dataDir>/usage.jsonl` for `/usage` analytics. This is the single chokepoint every model call flows
@@ -375,7 +383,7 @@ function accrue(inTok: number, outTok: number, cacheRead = 0, cacheWrite = 0): v
     appendUsage(join(cfg.dataDir, "usage.jsonl"), {
       ts: new Date().toISOString(), model, provider: cfg.provider, mode: cfg.mode,
       in: inTok, out: outTok, cacheRead, cacheWrite,
-      costUsd: costForUsage(model, inTok, outTok, cacheRead, cacheWrite),
+      costUsd: turnCost(cfg.provider, model, inTok, outTok, cacheRead, cacheWrite),
     });
   } catch { /* analytics must never interrupt a turn */ }
 }
@@ -414,17 +422,9 @@ function workerProgress(ev: WorkerEvent): void {
 async function applySolution(task: string, solution: string): Promise<void> {
   await applySolutionStep({
     task, solution, planMode: cfg.planMode,
-    run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canEscalate: false, canSpawn: false, canSpawnWrite: false })); }, // applying a mode's result must not re-escalate or re-spawn
+    run: async (prompt) => { await runTurn(prompt, history, turnDeps({ canSpawn: false, canSpawnWrite: false, canEscalateOnFailure: false })); }, // applying a mode's result must not re-spawn OR re-escalate (one escalation per user turn)
     log: console.log, note: c.dim,
   });
-}
-
-async function runEscalatedTurn(task: string, esc: { mode: HeavyMode; reason: string }): Promise<string | undefined> {
-  const { mode, reason } = esc;
-  console.log(c.dim(`  ↗ Solo routed this to ${modeColor(mode)(mode)} — ${reason}`));
-  if (mode === "fusion") return await fusionTurn(task);
-  if (mode === "council") return await councilTurn(task);
-  return await personasTurn(task);
 }
 
 let activeAbort: AbortController | null = null; // the current turn's cancel handle (ESC); null when idle
@@ -446,7 +446,7 @@ async function autoVerify(): Promise<{ ran: boolean; ok: boolean; report: string
   } catch { return null; }
 }
 
-function turnDeps(overrides?: { canEscalate?: boolean; canSpawn?: boolean; canSpawnWrite?: boolean }) {
+function turnDeps(overrides?: { canSpawn?: boolean; canSpawnWrite?: boolean; canEscalateOnFailure?: boolean }) {
   return {
     cfg, tools, store, readCache, approve: ui.approve, interactive: Boolean(stdin.isTTY), log: ui.log, gap: ui.gap, onText: ui.onText, endText: ui.endText,
     onReasoning: ui.onReasoning, endReasoning: ui.endReasoning, onUsage: ui.onUsage, onResolvedModel: ui.onResolvedModel, onErrorAction: ui.onErrorAction,
@@ -460,23 +460,24 @@ function turnDeps(overrides?: { canEscalate?: boolean; canSpawn?: boolean; canSp
     approvals,
     hooks: hooks.hooks,
     hookExec,
-    // The LLM router: offer Solo the escalate tool only when auto-route is on. Callers can force it off
-    // (apply turns) so a heavier mode's own result can't recursively re-escalate.
-    canEscalate: overrides?.canEscalate ?? cfg.autoRoute,
     // Parallel subagents: offer the spawn tool only when enabled; forced off on apply turns (no nesting).
     // Per-subagent progress drives both the inline meter (workerProgress) and the footer registry.
     canSpawn: overrides?.canSpawn ?? cfg.subagents,
     // Write-subagents: opt-in via OB1_SUBAGENTS_WRITE, high-risk (parallel edits). Forced off on apply turns.
     canSpawnWrite: overrides?.canSpawnWrite ?? /^(1|true|on)$/i.test(process.env.OB1_SUBAGENTS_WRITE ?? ""),
+    // Verified escalation: a failed-verification Solo turn returns { escalate } → dispatched to Fusion.
+    // Forced FALSE on apply turns (the override below) so an escalated Fusion's apply can't re-escalate —
+    // at most ONE escalation per user turn (loop.ts also gates on !planMode).
+    canEscalateOnFailure: overrides?.canEscalateOnFailure ?? cfg.escalation,
     onWorkerEvent: workerProgress,
     agentReg,
   };
 }
 
 /** Parse a positive-integer env override, falling back to `def` for missing OR malformed values. A bare
- *  Number()/Math.max(1, Number()) yields NaN for e.g. "two", and NaN then poisons the mode loops — Council's
- *  `for (r=1; r<=NaN; …)` never runs, leaving an empty rounds[] and a `rounds[len-1]` crash; eval/personas
- *  trial/round counts behave the same way. */
+ *  Number()/Math.max(1, Number()) yields NaN for e.g. "two", and NaN then poisons the loops it feeds —
+ *  a `for (i=0; i<NaN; …)` never runs, and eval trial counts / Fusion candidate counts behave the same
+ *  way — so a malformed override silently breaks the run instead of falling back to the default. */
 function envInt(name: string, def: number): number {
   const v = process.env[name];
   if (v == null || v === "") return def;
@@ -486,8 +487,9 @@ function envInt(name: string, def: number): number {
 
 function promptStr(): string {
   const m = modeColor(cfg.mode);
-  const phase = cfg.planMode ? c.yellow("plan") : c.green("act");
-  return `${m(cfg.mode)} ${c.dim("·")} ${phase} ${c.cyan("›")} `;
+  const phase = executionModeLabel();
+  const phaseText = phase === "plan" ? c.yellow("plan") : phase === "auto" ? c.yellow("auto") : c.green("act");
+  return `${m(cfg.mode)} ${c.dim("·")} ${phaseText} ${c.cyan("›")} `;
 }
 
 const HELP = `
@@ -499,15 +501,15 @@ ${c.bold("Commands")}
   ${c.cyan("/exit")} ${c.dim("|")} ${c.cyan("/quit")}          exit the session
 
   ${c.bold("Model & mode")}
-  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("FreeLLMAPI")} gives free/local models, frontier models need a subscription
-  ${c.cyan("/mode")} ${c.dim("[m]")}             pick a mode ${c.dim("(↑↓ · Enter)")} or /mode solo|fusion|council|personas ${c.dim("— heavy modes stay on (sticky); /solo exits")}
-  ${c.cyan("/solo")}                 exit a heavy mode (fusion/council/personas) → back to Solo
-  ${c.cyan("/plan")} ${c.dim("|")} ${c.cyan("/act")}           toggle read-only Plan vs Act mode
+  ${c.cyan("/models")} ${c.dim("|")} ${c.cyan("/model")}       pick a model or provider ${c.dim("(↑↓ · Enter)")}; ${c.bold("Free models")} add new releases after 30 days, hosted plans get them immediately
+  ${c.cyan("/mode")} ${c.dim("[auto|act|plan]")} pick execution mode ${c.dim("(↑↓ · Enter)")}: auto = no prompts, act = ask before edits, plan = read-only
   ${c.cyan("/effort")} ${c.dim("[low|medium|high]")}  reasoning effort ${c.dim("(↑↓ · Enter)")} — thinking budget for models that support it ${c.dim("(default medium)")}
 
   ${c.bold("Provider & plan")}
-  ${c.cyan("/freellm")}              set up / manage the Free LLM API proxy ${c.dim("(↑↓ · Enter)")} — OB-1 can download, run + wire it for you
-  ${c.cyan("/upgrade")}              subscribe or manage your plan — opens pricing already signed in to your account
+  ${c.cyan("/login")}                sign in through the browser
+  ${c.cyan("/logout")}               remove the local OB-1 sign-in token
+  ${c.cyan("/free")}                 manage the free-models pool ${c.dim("(↑↓ · Enter)")} — keys file, routing strategy, provider health
+  ${c.cyan("/upgrade")} ${c.dim("|")} ${c.cyan("/subscribe")}   subscribe or manage your plan — opens pricing already signed in to your account
 
   ${c.bold("Permissions & safety")}
   ${c.cyan("/permission")} ${c.dim("[ask|autopilot]")}  approval mode ${c.dim("(↑↓ · Enter)")}: ask before each change, or autopilot (no prompts)
@@ -537,12 +539,12 @@ ${c.bold("Commands")}
 
   ${c.bold("Orchestration modes")}
   ${c.cyan("/goal")} ${c.dim("<condition>")}     keep working until a condition is met ${c.dim("(bounded loop · ESC or /goal stop)")}
-  ${c.cyan("/autoroute")} ${c.dim("[on|off]")}   Solo auto-routing ${c.dim("(↑↓ · Enter)")} — Solo itself decides (via the escalate tool) when a turn needs a heavier mode ${c.dim("(off by default)")}
+  ${c.cyan("/fusion")}               run future turns as Fusion best-of-N ${c.dim("(sticky; /solo exits)")}
+  ${c.cyan("/solo")}                 exit Fusion mode → back to Solo
   ${c.cyan("/subagents")} ${c.dim("[on|off]")}   parallel subagents ${c.dim("(↑↓ · Enter)")} — Solo may fan out independent read-only sub-tasks; watch them in the footer ${c.dim("(on by default)")}
-  ${c.cyan("/route")} <task>         one-shot adaptive: Solo first, escalate only if the task warrants it AND the check fails
-  ${c.cyan("/fanout")} <task>        multi-mind: N isolated workers + synthesis (~Nx tokens)
-  ${c.cyan("/council")} <task>       author ↔ reviewer revise rounds (≤3) → comprehensive finalizer
-  ${c.cyan("/personas")} <task>      goal → expert panel dialogue → facilitator finalizes
+  ${c.cyan("/escalation")} ${c.dim("[on|off]")}  on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N ${c.dim("(on by default)")}
+  ${c.cyan("/review")}               independent refute-reviewer over your current diff ${c.dim("— reports only correctness bugs it can't refute, then offers to fix them")}
+  ${c.cyan("/deep")} ${c.dim("<task>")}          adaptive AB-MCTS search ${c.dim("(Thompson-sampled generate-vs-refine across the model ensemble, graded by the real verifier · stops on a full pass)")}
   ${c.cyan("/eval")} ${c.dim("[modes…]")}        compute-matched eval: does each mode beat Solo at equal tokens?
   ${c.cyan("/codeact")} <task>       run a task in code-as-action mode (model emits code, sandboxed)
 
@@ -741,8 +743,9 @@ function watchForSubscription(): void {
     if (isSubscribed(plan)) {
       clearInterval(subWatch!); subWatch = undefined;
       ctrl?.setErrorAction(undefined); // the upgrade banner is no longer relevant
+      await syncFreeCatalogIfStale({ force: true });
       const name = plan!.plan.charAt(0).toUpperCase() + plan!.plan.slice(1);
-      ctrl?.pushLine(c.green(`  ✓ Subscription active — you're on the ${name} plan. Frontier models unlocked.`));
+      ctrl?.pushLine(c.green(`  ✓ Subscription active — you're on the ${name} plan. Frontier models and new free models are unlocked.`));
     }
   }, 5000);
   // Don't let this poller keep the process alive: if the user exits before checkout completes (or the
@@ -751,7 +754,7 @@ function watchForSubscription(): void {
 }
 
 /** Point the CLI at the managed OB-1 server (the subscription path) with `model`, switching back from a
- *  FreeLLMAPI/other profile if needed. The server proxies every frontier model on the user's credits, so
+ *  free/other profile if needed. The server proxies every frontier model on the user's credits, so
  *  there's no key to enter. Mirrors persistSubscription on disk (clears the active profile, keeps the
  *  per-provider cred memory) and updates the live config + status. */
 function switchToManaged(model: string): void {
@@ -762,16 +765,49 @@ function switchToManaged(model: string): void {
   cfg.providerProfile = undefined;
   cfg.model = model;
   cfg.resolvedModel = undefined;
-  ctrl?.setStatus({ model, resolvedModel: undefined, estTok: false });
+  ctrl?.setStatus({ model, resolvedModel: undefined, estTok: false, free: false }); // managed route bills per token
   persistSubscription(cfg.settingsDir, model); // clears the profile on disk; keeps the per-provider cred map
   console.log(`  model → ${c.cyan(model)}  ${c.dim(describeModel(model))}`);
 }
 
-/** Set up a provider profile (FreeLLMAPI = free proxy): the setup "tab" prompts
+function onManagedRoute(): boolean {
+  return !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
+}
+
+function syncAuthStateFromDisk(): void {
+  const token = loadAuthToken();
+  if (onManagedRoute()) cfg.apiKey = token;
+  if (!process.env.OB1_SEARXNG_URL && !process.env.OB1_SEARXNG_KEY) {
+    cfg.searxngKey = token;
+    cfg.searxngBearer = true;
+  }
+}
+
+function setExecutionMode(next: ExecutionMode): void {
+  cfg.planMode = next === "plan";
+  if (next === "auto") {
+    cfg.permissionMode = "autopilot";
+    cfg.permissionModeExplicit = true;
+  } else if (next === "act") {
+    cfg.permissionMode = "ask";
+    cfg.permissionModeExplicit = true;
+  }
+  ctrl?.setStatus({ plan: cfg.planMode, autopilot: cfg.permissionMode === "autopilot" });
+  const note = next === "auto"
+    ? "no prompts — edits and commands run automatically"
+    : next === "act"
+      ? "edits allowed — ask before mutating tools"
+      : "read-only — no file or shell mutations";
+  const color = next === "act" ? c.green : c.yellow;
+  console.log(`  mode → ${color(next)}${c.dim(`  (${note})`)}`);
+}
+
+/** Set up a URL+key provider profile (OpenRouter, Ollama, Custom, …): the setup "tab" prompts
  *  for the URL + key, tests the connection live, then configures + persists it (global
  *  ~/.ob1/settings.json). Switching keeps the OTHER provider's creds remembered, so you can flip
- *  free⇄paid without re-entry. Returns true on success. Reached from the /models group menu. */
-async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolean> {
+ *  between providers without re-entry. Returns true on success. Reached from the /models group menu.
+ *  NOT used for the embedded Free models router — that has no URL/key to enter (see activateFree). */
+async function setupProvider(prof: ProviderProfile = CUSTOM): Promise<boolean> {
   if (!ui.providerSetup) { console.log(c.yellow("  provider setup needs an interactive session")); return false; }
   const active = cfg.providerProfile === prof.id;
   const remembered = savedProviderCreds(cfg.settingsDir)[prof.id]; // last key entered for THIS provider
@@ -806,100 +842,184 @@ async function setupProvider(prof: ProviderProfile = FREELLMAPI): Promise<boolea
   // Model: a typed one (Custom) wins; otherwise a first-time connect adopts the profile default.
   if (res.model) cfg.model = res.model;
   else if (!active) cfg.model = prof.defaultModel;
-  cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false }); // new provider → drop stale resolution/est marker
+  cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false, free: false }); // new provider → drop stale resolution/est marker; URL/key routes price by model
   console.log(`  provider → ${c.cyan(prof.name)}  ${c.dim(url)}`);
   saveSettings(cfg); // persist active provider + per-provider creds + model (global ~/.ob1/settings.json — shared across folders)
-  const note = prof.id === "freellmapi" ? " (auto = the proxy picks the best free model)"
-    : prof.id === "custom" && !cfg.apiKey ? " (no key — sent without auth)" : "";
+  const note = prof.id === "custom" && !cfg.apiKey ? " (no key — sent without auth)" : "";
   console.log(c.green(`  ✓ ${prof.name} connected — model: ${c.bold(cfg.model || "(none set)")}${note}. Saved to ~/.ob1/settings.json (shared across every folder).`));
   return true;
 }
 
-/** Make `prof` the active provider, switching from another if needed. Uses creds remembered from a
- *  previous setup. Providers with no saved creds fall through to the setup form.
- *  Returns false if that setup was cancelled. The model is left at the profile's default after a switch
- *  — the caller's picker sets the real one next. */
-async function ensureProvider(prof: ProviderProfile): Promise<boolean> {
-  if (cfg.providerProfile === prof.id && (cfg.apiKey || prof.keyOptional)) return true; // already active
-  const creds = savedProviderCreds(cfg.settingsDir)[prof.id] ?? bakedProviderCreds(prof.id);
-  // Activate remembered creds when there's a key OR the profile allows none (a keyless Custom/LAN endpoint
-  // is remembered with an empty key, which still pins its URL). The key-optional path also needs a URL.
-  if (creds && (creds.key || (prof.keyOptional && creds.url))) {
-    cacheWarn();
-    cfg.provider = prof.wire;
-    cfg.baseUrl = creds.url || prof.defaultLocalUrl;
-    cfg.apiKey = creds.key || undefined;
-    cfg.providerProfile = prof.id;
-    cfg.model = prof.defaultModel; // sensible default for the new provider; the picker sets the real model next
-    cfg.resolvedModel = undefined; ctrl?.setStatus({ model: cfg.model, resolvedModel: undefined, estTok: false });
-    saveSettings(cfg);
-    console.log(`  provider → ${c.cyan(prof.name)}  ${c.dim(cfg.baseUrl)}`);
-    return true;
-  }
-  return await setupProvider(prof); // never configured + no baked key → prompt for it
+// ── Free models: the EMBEDDED in-process router (src/providers/free) ───────────
+// One-line hints for each routing strategy (shown in /free + the strategy picker).
+const FREE_STRATEGY_HINTS: Record<string, string> = {
+  priority: "catalog order",
+  balanced: "default blend",
+  smartest: "quality first",
+  fastest: "throughput first",
+  reliable: "fewest failures",
+};
+const HEALTH_GLYPH: Record<string, string> = { healthy: "●", invalid: "✗", error: "✗", disabled: "⊘", unknown: "○" };
+
+/** How the current model reads for the free profile: "free · auto (balanced)" for router routing, or
+ *  "free · <pin>" for a pinned model. Non-free profiles just show the raw model id. */
+function freeModelLabel(model: string): string {
+  const isAuto = !model || /^(auto|router|default)$/i.test(model);
+  return isAuto ? `free · auto (${cfg.freeStrategy})` : `free · ${model}`;
+}
+/** The model label shown in the footer/status — free-aware, so the footer reads "free · auto (balanced)"
+ *  instead of a bare "auto". Non-free profiles are unchanged. */
+function modelStatusLabel(): string {
+  return cfg.providerProfile === "free" ? freeModelLabel(cfg.model) : cfg.model;
 }
 
-/** Make FreeLLMAPI the active provider, OFFERING the managed setup first when nothing is configured yet.
- *  This is the difference from the bare ensureProvider(): reached from the model picker (/models →
- *  → Free LLM API), a first-time user should be offered "OB-1 downloads + runs + wires the proxy for you"
- *  (clone→run→auto-wire from the repo) — not dropped straight onto a manual URL/key form. Once a proxy is
- *  managed or creds are remembered, it just activates them (via ensureProvider). Returns true when active. */
-async function ensureFreeLLM(): Promise<boolean> {
-  if (cfg.providerProfile === FREELLMAPI.id && cfg.apiKey) return true; // already connected
-  const { loadManaged } = await import("./cli/freellm-manage.ts");
-  const haveCreds = !!(savedProviderCreds(cfg.settingsDir)[FREELLMAPI.id]?.key ?? bakedProviderCreds(FREELLMAPI.id)?.key);
-  // First time, and OB-1 isn't already running a managed proxy → offer managed (default) vs manual.
-  if (!loadManaged()?.managed && !haveCreds && ui.pick) {
-    const a = await ui.pick("Free LLM API — not set up yet", [
-      { label: "set up (managed)", hint: "OB-1 downloads, runs + wires the proxy for you — right here", value: "setup" },
-      { label: "connect manually", hint: "enter a URL + key yourself", value: "manual" },
-    ]);
-    if (a == null) return false;                              // cancelled — leave the provider unchanged
-    if (a === "manual") return await setupProvider(FREELLMAPI);
-    await runManagedFreeLLMSetup();                           // clone → run → auto-wire (persists creds on success)
-    // Proceed only if setup actually wired creds; on failure it already explained why and we stop here.
-    if (!savedProviderCreds(cfg.settingsDir)[FREELLMAPI.id]?.key) return false;
-  }
-  return await ensureProvider(FREELLMAPI); // activate the (now-)remembered creds into the live session
+/** Make the embedded free-models router the active provider (no URL/key — it routes in-process across the
+ *  free tiers). Persists the "free" profile + model so it's restored next launch, and updates the footer. */
+function activateFree(model = "auto"): void {
+  cacheWarn();
+  cfg.provider = "free";
+  cfg.baseUrl = "";
+  cfg.apiKey = undefined;
+  cfg.providerProfile = "free";
+  cfg.model = model;
+  cfg.resolvedModel = undefined;
+  persistActiveProvider(cfg.settingsDir, "free", "", "", model);
+  ctrl?.setStatus({ model: freeModelLabel(model), resolvedModel: undefined, estTok: false, free: true }); // free router → $0, hide the $ meter
 }
 
-/** FREE source: the FreeLLMAPI proxy's LIVE catalog (auto = the proxy's router), plus a reconnect row.
- *  Switches to FreeLLMAPI first if a different provider is active. No typing — arrow-key selection. */
-async function pickFreeModel(): Promise<void> {
-  if (!ui.pick) return;
-  if (!(await ensureFreeLLM())) return;
-  const conn = await fetchModels(cfg.baseUrl, cfg.apiKey ?? "");
-  const items: { label: string; hint?: string; value: string }[] = [];
-  if (conn.ok) {
-    for (const m of conn.models.filter((x) => x.available !== false)) {
-      const hint = `${m.name ?? ""}${m.contextWindow ? `${m.name ? " · " : ""}${(m.contextWindow / 1000).toFixed(0)}k ctx` : ""}`.trim();
-      items.push({ label: m.id + (m.id === FREELLMAPI.defaultModel ? " (default · router)" : ""), hint: hint || undefined, value: m.id });
+/** Open the keys file from a RUNNING session — non-blocking (GUI "open with default app", else print the
+ *  path). Never spawns a terminal editor here: the Ink TUI owns raw-mode stdin, so a full-screen $EDITOR
+ *  would corrupt the display (onboarding, which is pre-TUI, uses a blocking editor instead). */
+function openKeysFileInSession(path: string): void {
+  const argv =
+    process.platform === "darwin" ? ["open", "-t", path] : process.platform === "linux" ? ["xdg-open", path] : null;
+  if (argv) {
+    try {
+      spawn(argv[0], argv.slice(1), { stdio: "ignore", detached: true }).unref(); // fire-and-forget; never blocks the TUI
+      console.log(c.dim(`  opened ${path}`));
+    } catch {
+      console.log(c.dim(`  add your keys here: ${path}`));
     }
   } else {
-    console.log(c.yellow(`  ⚠ couldn't list models (${conn.error ?? "offline"}) — keeping "${cfg.model}".`));
-    items.push({ label: FREELLMAPI.defaultModel + " (default · router)", hint: "the proxy picks the best available model", value: FREELLMAPI.defaultModel });
+    console.log(c.dim(`  add your keys here: ${path}`));
   }
-  items.push({ label: "↻ change connection (URL / key)…", value: "__reconnect__" });
-  const picked = await ui.pick(`${FREELLMAPI.name} — pick a model  ↑↓ · Enter · ← back · Esc  ·  auto = proxy router`, items, cfg.model);
+  console.log(c.dim("  Saved keys are picked up automatically — next message uses them."));
+}
+
+/** One-line-per-entry summary of the free pool (for /free status and the picker header). */
+function freeSummaryLines(st: FreeStatus): string[] {
+  const keyed = st.providers.filter((p) => p.hasKey).length;
+  const keyless = st.providers.filter((p) => p.keyless).length;
+  const lines = [
+    `  ${c.bold("Free models")} ${c.dim(`· strategy: ${st.strategy} (${FREE_STRATEGY_HINTS[st.strategy] ?? ""})`)}`,
+    `  ${keyed} keyed · ${keyless} keyless — ${c.cyan(`${st.availableModels}/${st.totalModels}`)} models active`,
+    c.dim(`  keys: ${st.keysPath} · catalog ${st.catalogVersion} (${st.catalogTier})`),
+  ];
+  if (cfg.providerProfile !== "free")
+    lines.push(c.dim(`  (active profile: ${cfg.providerProfile ?? "hosted"} — /free manages the shared free pool; /models → Free models to use it)`));
+  if (st.unknownKeys.length) lines.push(c.yellow(`  ⚠ unrecognized key name(s) in the file: ${st.unknownKeys.join(", ")}`));
+  return lines;
+}
+
+/** Read-only provider list: signup URL + key status + model counts per provider. */
+async function pickFreeProviders(): Promise<void> {
+  if (!ui.pick) return;
+  const st = freeStatus();
+  const items = st.providers.map((p) => ({
+    label: `${HEALTH_GLYPH[p.health] ?? "○"} ${p.name}${p.keyless ? c.dim(" (keyless)") : p.hasKey ? c.dim(" (keyed)") : ""}`,
+    hint: `${p.availableCount}/${p.modelCount} models · ${p.signupUrl}`,
+    value: p.id,
+  }));
+  const a = await ui.pick("Free providers  ↑↓ · Enter · ← back · Esc", items);
+  if (a == null) return;
+  const p = st.providers.find((x) => x.id === a);
+  if (p) {
+    const key = p.keyless ? "no key needed (keyless)" : p.hasKey ? `keyed · health ${p.health}` : "no key yet";
+    console.log(`  ${c.bold(p.name)} — ${key} · ${p.availableCount}/${p.modelCount} models available`);
+    console.log(c.dim(`    ${p.keyless ? "signup (optional): " : "get a free key: "}${p.signupUrl}`));
+  }
+}
+
+/** Routing-strategy picker: persist cfg.freeStrategy + save. */
+async function pickFreeStrategy(): Promise<void> {
+  if (!ui.pick) return;
+  const items = STRATEGIES.map((s) => ({
+    label: s + (s === cfg.freeStrategy ? c.dim(" (current)") : ""),
+    hint: FREE_STRATEGY_HINTS[s],
+    value: s,
+  }));
+  const a = await ui.pick("Routing strategy  ↑↓ · Enter · ← back · Esc", items, cfg.freeStrategy);
+  if (a == null || !(STRATEGIES as readonly string[]).includes(a)) return;
+  cfg.freeStrategy = a as FreeStrategy;
+  saveSettings(cfg);
+  if (cfg.providerProfile === "free") ctrl?.setStatus({ model: freeModelLabel(cfg.model) }); // refresh the "(strategy)" suffix
+  console.log(`  routing strategy → ${c.cyan(a)}  ${c.dim(FREE_STRATEGY_HINTS[a])}`);
+}
+
+/** /free — a small picker over the free pool: open keys, browse providers, pick strategy, re-check health.
+ *  Works regardless of the active profile (it manages the SHARED pool); it just notes when the active
+ *  profile isn't "free". */
+async function pickFree(): Promise<void> {
+  if (!ui.pick) return;
+  while (true) {
+    for (const l of freeSummaryLines(freeStatus())) console.log(l);
+    const a = await ui.pick("Free models  ↑↓ · Enter · Esc", [
+      { label: "Open keys file", hint: "add free provider keys to unlock more models", value: "keys" },
+      { label: "Providers…", hint: "signup URLs + key status + model counts", value: "providers" },
+      { label: `Routing strategy… (${cfg.freeStrategy})`, hint: FREE_STRATEGY_HINTS[cfg.freeStrategy], value: "strategy" },
+      { label: "Re-check provider health", hint: "probe keyed providers now", value: "health" },
+    ]);
+    if (a == null) return;
+    if (a === "keys") { openKeysFileInSession(ensureKeysFile()); return; }
+    if (a === "providers") { await pickFreeProviders(); if (ui.pickReason?.() === "back") continue; return; }
+    if (a === "strategy") { await pickFreeStrategy(); if (ui.pickReason?.() === "back") continue; return; }
+    if (a === "health") { console.log(c.dim("  re-checking free provider health…")); await runFreeHealthCheck(true); console.log(c.dim("  ✓ health refreshed")); return; }
+  }
+}
+
+/** FREE source (from /models → Free models): a LOCAL, in-memory picker over the embedded router's catalog —
+ *  "auto" (strategy routing) first, then every model available-first then smartest-first. Pinning sets
+ *  cfg.model to a "platform/modelId"; "auto" = router routing. No network, no setup form. */
+async function pickFreeModel(): Promise<void> {
+  if (!ui.pick) return;
+  const models = listFreeModels()
+    .slice()
+    .sort((a, b) => Number(b.available) - Number(a.available) || a.intelligenceRank - b.intelligenceRank);
+  const items: { label: string; hint?: string; value: string }[] = [
+    { label: "auto — best available (recommended)", hint: `router · strategy ${cfg.freeStrategy}`, value: "auto" },
+  ];
+  for (const m of models) {
+    const glyphs = [m.supportsTools ? "⚒" : "", m.supportsVision ? "👁" : ""].filter(Boolean).join(" ");
+    const bits = [m.providerName, m.sizeLabel, glyphs, m.available ? "" : c.dim(`unavailable: ${m.unavailableReason}`)]
+      .filter(Boolean)
+      .join(" · ");
+    items.push({ label: m.displayName + (m.available ? "" : c.dim(" (gated)")), hint: bits || undefined, value: m.id });
+  }
+  const picked = await ui.pick(
+    `Free models — pick a model  ↑↓ · Enter · ← back · Esc  ·  auto = router (${cfg.freeStrategy})`,
+    items,
+    cfg.providerProfile === "free" ? cfg.model : "auto",
+  );
   if (picked == null) return;
-  if (picked === "__reconnect__") { await setupProvider(FREELLMAPI); return; }
-  if (picked === cfg.model) { console.log(c.dim(`  model unchanged (${cfg.model})`)); return; }
-  cacheWarn();
-  cfg.model = picked; ctrl?.setStatus({ model: picked, resolvedModel: undefined, estTok: false });
-  console.log(`  model → ${c.cyan(picked)}`);
+  if (cfg.providerProfile === "free" && picked === cfg.model) {
+    console.log(c.dim(`  model unchanged (${freeModelLabel(cfg.model)})`));
+    return;
+  }
+  activateFree(picked);
+  console.log(`  model → ${c.cyan(freeModelLabel(picked))}`);
 }
 
 /** The single model/provider entry point (/models · /model · the Settings "model" row). Level one is
- *  the frontier models themselves (Claude, GPT, Gemini, …) PLUS provider profile siblings. FreeLLMAPI
- *  expands into the free proxy's own catalog. Other named profiles (OpenRouter, Ollama, LM Studio,
- *  llama.cpp, vLLM, Groq, Custom) open a focused connection form over the existing OpenAI-compatible
+ *  the frontier models themselves (Claude, GPT, Gemini, …) PLUS provider profile siblings. "Free models"
+ *  expands into the embedded router's catalog (auto-routed). Other named profiles (OpenRouter, Ollama, LM
+ *  Studio, llama.cpp, vLLM, Groq, Custom) open a focused connection form over the existing OpenAI-compatible
  *  wire. Frontier models are served by the managed OB-1 server on subscription credits. */
 async function pickModel(): Promise<void> {
   if (!ui.pick) return;
   const plan = await fetchPlan();
   const subscribed = isSubscribed(plan);
   while (true) {
-    const onFree = cfg.providerProfile === FREELLMAPI.id;
+    const onFree = cfg.providerProfile === FREE.id;
     const activeProfile = cfg.providerProfile ? profileById(cfg.providerProfile) : undefined;
     const items: { label: string; hint?: string; value: string }[] = MODELS.map((m) => ({
       label: m.label + (m.notes === "default" ? " (default)" : "") + (subscribed ? "" : "  🔒"),
@@ -908,8 +1028,8 @@ async function pickModel(): Promise<void> {
         : "frontier model — subscribe to unlock",
       value: m.id ?? m.label,
     }));
-    items.push({ label: "Start free with FreeLLMAPI ▸", hint: "free out of the box · bootstrap routes · add keys for reliability", value: "__free__" });
-    for (const prof of PROFILES.filter((p) => p.id !== FREELLMAPI.id && p.id !== CUSTOM.id)) {
+    items.push({ label: "Free models ▸ — signed catalog, auto-routed", hint: onFree ? `connected · ${freeModelLabel(cfg.model)}` : "free gets new releases after 30 days · hosted gets them immediately", value: "__free__" });
+    for (const prof of PROFILES.filter((p) => p.id !== FREE.id && p.id !== CUSTOM.id)) {
       const active = cfg.providerProfile === prof.id;
       items.push({
         label: `${prof.name}${active ? " (connected)" : ""}`,
@@ -928,7 +1048,7 @@ async function pickModel(): Promise<void> {
       ? "Select a model  ↑↓ · Enter · Esc"
       : "Select a model  ↑↓ · Enter · Esc  ·  🔒 = subscribe to unlock";
     const initial = activeProfile?.id === CUSTOM.id ? "__custom__"
-      : activeProfile && activeProfile.id !== FREELLMAPI.id ? `__profile:${activeProfile.id}`
+      : activeProfile && activeProfile.id !== FREE.id ? `__profile:${activeProfile.id}`
         : (onFree || (!cfg.apiKey && !subscribed)) ? "__free__" : cfg.model;
     const picked = await ui.pick(title, items, initial);
     if (picked == null) return;
@@ -947,7 +1067,7 @@ async function pickModel(): Promise<void> {
       return;
     }
     // Subscribed → served by the managed OB-1 server. Make it the active provider (switch back from a
-    // FreeLLMAPI profile if needed), then set the model. No key prompt, no OpenRouter.
+    // free/other profile if needed), then set the model. No key prompt, no OpenRouter.
     const onManaged = !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
     if (onManaged && picked === cfg.model) { console.log(c.dim(`  model unchanged (${cfg.model})`)); return; }
     switchToManaged(picked);
@@ -958,18 +1078,12 @@ async function pickModel(): Promise<void> {
 // One-line description of what each mode does — shown after a switch and as a picker hint.
 function modeNote(m: Mode): string {
   return m === "fusion" ? "each task → N same-prompt candidates, auto-scored, synthesizer merges the best parts"
-    : m === "council" ? "each task → author ↔ reviewer revise rounds, then a comprehensive finalizer"
-    : m === "personas" ? "each goal → a tailored expert panel dialogue, then facilitator synthesis"
-    : m === "adaptive" ? "Solo first; escalate only when the task warrants deeper analysis AND the objective check fails"
     : "one model, one pass — the frugal default";
 }
-// Rough cost multiplier shown in the per-turn "still in <mode>" reminder — these modes fan out into
+// Rough cost multiplier shown in the per-turn "still in <mode>" reminder — Fusion fans out into
 // several model calls, so a stray heavy turn is expensive. Approximate, by design (depends on the task).
 function modeCostHint(m: Mode): string {
-  return m === "fusion" ? "~3× cost — candidates + synthesis"
-    : m === "council" ? "~3× cost — author ↔ reviewer rounds"
-    : m === "personas" ? "~5× cost — multi-expert panel"
-    : "";
+  return m === "fusion" ? "~3× cost — candidates + synthesis" : "";
 }
 /** Set when a heavy mode is freshly selected, so the FIRST turn after selection skips the "still in …"
  *  reminder (the user just chose it); every later turn shows it. Consumed in processLine. */
@@ -978,6 +1092,7 @@ let modeJustSet = false;
 function setMode(m: Mode): void {
   cfg.mode = m;
   modeJustSet = true;
+  ctrl?.setStatus({ mode: cfg.mode });
   const sticky = m === "solo" ? "" : c.dim("  · stays on until you switch (/solo to exit)");
   console.log(`  mode → ${modeColor(m)(m)}${m === "solo" ? "" : c.dim("  (" + modeNote(m) + ")") + sticky}`);
 }
@@ -1013,18 +1128,14 @@ function setQualityMode(q: QualityMode): void {
 // shows the keys, so titles stay terse.
 async function pickMode(): Promise<void> {
   if (!ui.pick) return;
-  const topo: Mode[] = ["solo", "fusion", "council", "personas"];
-  const items: { label: string; hint?: string; value: string }[] = topo.map((x) => ({ label: x, hint: modeNote(x), value: x }));
-  // Plan/act is part of HOW a turn runs, so it lives in the mode picker (not a separate setting).
-  items.push({
-    label: cfg.planMode ? "→ switch to Act" : "→ switch to Plan (read-only)",
-    hint: `phase: currently ${cfg.planMode ? "plan — investigate only" : "act — edits allowed"}`,
-    value: "__phase__",
-  });
-  const m = await ui.pick("Mode", items, cfg.mode);
+  const items: { label: string; hint?: string; value: string }[] = [
+    { label: "auto", hint: "no questions asked — edits and commands run automatically", value: "auto" },
+    { label: "act", hint: "edits allowed, but ask before mutating tools", value: "act" },
+    { label: "plan", hint: "read-only investigation; no file or shell mutations", value: "plan" },
+  ];
+  const m = await ui.pick("Mode", items, executionModeLabel());
   if (!m) return;
-  if (m === "__phase__") { cfg.planMode = !cfg.planMode; console.log(cfg.planMode ? c.yellow("  Plan mode (read-only)") : c.green("  Act mode")); }
-  else setMode(m as Mode);
+  setExecutionMode(m as ExecutionMode);
 }
 async function pickSandbox(): Promise<void> {
   if (!ui.pick) return;
@@ -1055,14 +1166,6 @@ async function pickEffort(): Promise<void> {
   ], cfg.effort ?? "medium");
   if (e) setEffort(e as Effort);
 }
-async function pickAutoRoute(): Promise<void> {
-  if (!ui.pick) return;
-  const a = await ui.pick("Solo auto-route", [
-    { label: "off", hint: "always stay Solo (default) — never auto-escalate", value: "off" },
-    { label: "on", hint: "Solo may route a hard/high-stakes turn to Fusion/Council/Personas (it decides)", value: "on" },
-  ], cfg.autoRoute ? "on" : "off");
-  if (a) { cfg.autoRoute = a === "on"; console.log(`  auto-route ${cfg.autoRoute ? c.yellow("ON") : "off"}${c.dim(" — Solo decides per-turn whether to route to a heavier mode")}`); }
-}
 async function pickSubagents(): Promise<void> {
   if (!ui.pick) return;
   const a = await ui.pick("Subagents (parallel)", [
@@ -1070,6 +1173,14 @@ async function pickSubagents(): Promise<void> {
     { label: "off", hint: "no spawn_subagents tool", value: "off" },
   ], cfg.subagents ? "on" : "off");
   if (a) { cfg.subagents = a === "on"; console.log(`  subagents ${cfg.subagents ? c.yellow("ON") : "off"}${c.dim(" — Solo may spawn parallel read-only subagents for big, splittable tasks")}`); }
+}
+async function pickEscalation(): Promise<void> {
+  if (!ui.pick) return;
+  const a = await ui.pick("escalation", [
+    { label: "on", hint: "on verified failure (checks still failing after self-fix), escalate the turn to fusion best-of-N (default)", value: "on" },
+    { label: "off", hint: "never escalate", value: "off" },
+  ], cfg.escalation ? "on" : "off");
+  if (a) { cfg.escalation = a === "on"; console.log(`  escalation ${cfg.escalation ? c.yellow("ON") : "off"}${c.dim(" — on verified failure, hand a Solo turn to fusion best-of-N")}`); }
 }
 async function pickRepoMap(): Promise<void> {
   if (!ui.pick) return;
@@ -1151,60 +1262,6 @@ function rememberTurn(task: string, startLen: number, mode: string): void {
     /* project memory must never break a turn */
   }
 }
-
-/** Run the managed FreeLLMAPI setup (clone → run proxy → dashboard account → auto-wire) INLINE so it
- *  works from inside the live TUI without dropping to the shell. Same pipeline as `ob1 onboard`'s free
- *  path (shared freeLLMSetupFlow); available to free and paid users alike. */
-async function runManagedFreeLLMSetup(): Promise<void> {
-  if (!ui.prompt) { console.log(c.dim("  run `ob1 onboard` in your shell to set up the managed Free LLM API proxy")); return; }
-  const ask = ui.prompt;
-  const { freeLLMSetupFlow } = await import("./cli/onboarding.ts");
-  const { openBrowser } = await import("./cli/login.ts");
-  await freeLLMSetupFlow({
-    ask: async (q, opts) => (await ask({ title: "Set up Free LLM API", question: q, mask: opts?.mask })) ?? "",
-    out: (s = "") => console.log(s),
-    openUrl: openBrowser,
-    waitForDone: async () => { await ask({ title: "Free LLM API", question: "Press Enter when you've added your keys (or to skip)", placeholder: "" }); },
-  });
-}
-
-/** Manage the OB-1-managed local FreeLLMAPI proxy (status + start/stop/restart/open/manual/unmanage).
- *  Setup runs inline via runManagedFreeLLMSetup (works inside the TUI). */
-async function pickFreeLLM(): Promise<void> {
-  if (!ui.pick) return;
-  const flm = await import("./cli/freellm-manage.ts");
-  const { openBrowser } = await import("./cli/login.ts");
-  const st = flm.loadManaged();
-  if (!st?.managed) {
-    const a = await ui.pick("Free LLM API", [
-      { label: "set up (managed)", hint: "OB-1 downloads, runs + wires the proxy for you — right here", value: "setup" },
-      { label: "connect manually", hint: "enter a URL + key yourself", value: "manual" },
-    ]);
-    if (a === "manual") await setupProvider(FREELLMAPI);
-    else if (a === "setup") await runManagedFreeLLMSetup();
-    return;
-  }
-  const probe = await flm.probeManagedStatus(st);
-  if (probe.providerKeys !== null && probe.providerKeys !== st.providerKeys) flm.saveManaged({ ...st, providerKeys: probe.providerKeys });
-  const status = flm.formatManagedStatus(probe);
-  const a = await ui.pick(`Free LLM API (${status})`, [
-    { label: "open dashboard", hint: `${st.url} — add provider keys here`, value: "open" },
-    { label: probe.proxyUp ? "restart" : "start", hint: "(re)start the local proxy", value: "restart" },
-    { label: "stop", hint: "stop the local proxy", value: "stop" },
-    { label: "connect manually", hint: "switch to a manual URL + key instead", value: "manual" },
-    { label: "unmanage", hint: "OB-1 stops managing it (won't auto-start)", value: "off" },
-  ]);
-  if (a === "open") { openBrowser(st.url); console.log(c.dim(`  opened ${st.url}`)); }
-  else if (a === "restart") {
-    console.log(c.dim("  restarting the proxy…"));
-    if (probe.proxyUp) flm.stop(st);
-    const ok = flm.start(st.dir, st.runtime, st.port) && await flm.waitReady(st.url, fetch, 20000);
-    console.log(ok ? c.dim("  ✓ proxy running") : c.yellow("  ✗ couldn't start it — try `ob1 onboard`"));
-  } else if (a === "stop") { flm.stop(st); console.log(c.dim("  stopped the proxy")); }
-  else if (a === "manual") await setupProvider(FREELLMAPI);
-  else if (a === "off") { flm.clearManaged(); console.log(c.dim("  OB-1 no longer manages the proxy (the container/files remain)")); }
-}
-
 
 /** Compact relative time for the /rewind list ("3m ago"). */
 function fmtAgo(iso: string): string {
@@ -1474,69 +1531,39 @@ async function handleCommand(line: string): Promise<boolean> {
     }
     case "rewind": await rewindCmd(rest); break;
     case "mode": {
-      const m = rest[0] as Mode;
-      if (["solo", "fusion", "council", "personas"].includes(m)) setMode(m);
-      else if (!rest[0] && ui.pick) await pickMode();   // bare /mode opens the picker on a TTY
-      else console.log(c.red("  usage: /mode solo|fusion|council|personas"));
+      const m = rest[0]?.toLowerCase();
+      if (m === "auto" || m === "act" || m === "plan") setExecutionMode(m);
+      else if (m === "solo" || m === "fusion") setMode(m);
+      else if (!m && ui.pick) await pickMode();   // bare /mode opens the picker on a TTY
+      else if (!m) console.log(`  mode: ${executionModeLabel()}${c.dim("  (/mode auto|act|plan)")}`);
+      else console.log(c.red("  usage: /mode auto|act|plan"));
       break;
     }
     case "solo": setMode("solo"); break; // quick exit from a sticky heavy mode
-    case "plan": cfg.planMode = true; console.log(c.yellow("  Plan mode (read-only)")); break;
-    case "act": cfg.planMode = false; console.log(c.green("  Act mode")); break;
+    case "fusion": setMode("fusion"); break;
+    case "auto": setExecutionMode("auto"); break;
+    case "plan": {
+      const sub = rest[0]?.toLowerCase();
+      if (sub === "off") setExecutionMode("act");
+      else setExecutionMode("plan");
+      break;
+    }
+    case "act": setExecutionMode("act"); break;
     case "map": {
       const map = buildRepoMap(cfg.cwd);
       console.log("\n" + renderRepoMap(map, { maxFiles: 20 }));
       console.log(c.dim(`\n  ${map.totalFiles} files · ${map.totalSymbols} symbols\n`));
       break;
     }
-    case "fanout": {
-      if (!modelReachable()) { console.log(c.yellow("  /fanout needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /fanout <task>")); break; }
-      // Optional dual-ledger controller (item #11): act → assess → re-plan-on-stall, bounded. Default
-      // OFF; OB1_ORCH_LEDGER=1 routes /fanout through it instead of the single-shot fan-out.
-      if (process.env.OB1_ORCH_LEDGER === "1") {
-        console.log(c.dim("  dual-ledger orchestration (act → assess → re-plan on stall)…"));
-        const lr = await runLedger({ ledger: { task: arg, facts: [], guesses: [], plan: [arg] }, cfg, tools, onEvent: workerProgress, signal: activeAbort?.signal });
-        if (activeAbort?.signal.aborted) break;
-        const status = lr.satisfied ? c.green("satisfied") : lr.stalledOut ? c.yellow("stalled out (recovery exhausted)") : c.yellow("round cap reached");
-        console.log("\n" + c.bold("Ledger result:") + "\n" + lr.finalText + "\n");
-        console.log(c.dim(`  [${status} · ${lr.rounds} rounds · ${lr.replans} re-plans · ~${lr.totalInputTokens} in / ${lr.totalOutputTokens} out tokens]`));
-        break;
-      }
-      console.log(c.dim("  spawning isolated workers (multi-mind — uses ~Nx tokens)…"));
-      const r = await fanout({ task: arg, cfg, tools, onEvent: workerProgress, signal: activeAbort?.signal });
-      if (activeAbort?.signal.aborted) break; // ESC
-      // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-      for (const w of r.workers) console.log(c.dim(`  • ${w.label}: ${w.outputTokens} out tok${w.ok ? "" : c.yellow(" (incomplete)")}`));
-      console.log("\n" + c.bold("Synthesis:") + "\n" + r.synthesis + "\n");
-      console.log(c.dim(`  [${r.workers.length} workers + synthesizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens total]`));
-      // Persist the synthesized result like Fusion/Council/Personas do: the fan-out workers run read-only
-      // in isolated contexts, so without this the synthesis is only PRINTED and never lands on disk. Gated
-      // by shouldApply (only writes when the synthesis carries code, and never in Plan mode).
-      await applySolution(arg, r.synthesis);
-      break;
-    }
-    case "council": {
-      if (!modelReachable()) { console.log(c.yellow("  /council needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /council <task>")); break; }
-      await councilTurn(arg);
-      break;
-    }
-    case "personas": {
-      if (!modelReachable()) { console.log(c.yellow("  /personas needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /personas <task>")); break; }
-      await personasTurn(arg);
-      break;
-    }
-    case "route": {
-      if (!modelReachable()) { console.log(c.yellow("  /route needs a model provider (a key, or a configured endpoint via /models)")); break; }
-      if (!arg) { console.log(c.red("  usage: /route <task>")); break; }
-      await adaptiveTurn(arg);
-      break;
-    }
     case "eval": {
       if (!modelReachable()) { console.log(c.yellow("  /eval needs a model provider (a key, or a configured endpoint via /models)")); break; }
       await evalTurn(rest);
+      break;
+    }
+    case "review": await reviewTurn(); break; // refute-reviewer over the current diff (Bugbot pattern)
+    case "deep": {
+      if (!arg) { console.log(c.red("  usage: /deep <task>")); break; }
+      await deepTurn(arg); // AB-MCTS-lite adaptive search (deepTurn guards modelReachable)
       break;
     }
     case "mcp": {
@@ -1617,17 +1644,25 @@ async function handleCommand(line: string): Promise<boolean> {
     case "model":
       if (arg) {
         if (history.length && arg !== cfg.model) console.log(c.yellow("  ⚠ switching model mid-session invalidates the prompt cache (R1) — every cached prefix must be rebuilt; /clear to reset context."));
-        cfg.model = arg; ctrl?.setStatus({ resolvedModel: undefined, estTok: false }); console.log(`  model → ${arg}  ${c.dim(describeModel(arg))}`);
+        cfg.model = arg; ctrl?.setStatus({ model: modelStatusLabel(), resolvedModel: undefined, estTok: false }); console.log(`  model → ${arg}  ${c.dim(describeModel(arg))}`);
       } else if (ui.pick) { await pickModel(); }            // bare /model opens the picker on a TTY
       else console.log(`  model: ${cfg.model}  ${c.dim(describeModel(cfg.model))}`);
       break;
     case "models": {
       if (ui.pick) { await pickModel(); break; } // interactive on a TTY; plain list + prompts under the REPL
-      // REPL (non-TTY): set up the provider if nothing is configured, then list the catalog (pick via /model <id>).
-      if (!cfg.apiKey && !cfg.providerProfile && ui.providerSetup) await setupProvider();
+      // REPL (non-TTY): with nothing configured, activate the embedded free router (zero setup — keyless
+      // providers serve immediately); then list what's available. Pin one with /model <id> ("platform/modelId"
+      // or "auto" for router routing).
+      if (!cfg.apiKey && !cfg.providerProfile) { activateFree(); console.log(c.green("  ✓ Free models activated (auto-routed).")); }
+      if (cfg.providerProfile === "free") {
+        for (const l of freeSummaryLines(freeStatus())) console.log(l);
+        for (const m of listFreeModels().filter((x) => x.available)) console.log(`    ${c.cyan(m.id.padEnd(28))} ${c.dim(`${m.providerName} · ${m.sizeLabel}`)}`);
+        console.log(c.dim("  pin one with /model <id>, or /model auto for router routing"));
+        break;
+      }
       if (cfg.providerProfile) {
         const conn = await fetchModels(cfg.baseUrl, cfg.apiKey ?? "");
-        console.log(`  ${c.bold("current")}: ${cfg.model}  ${c.dim("(auto = the proxy's router picks the best free model)")}`);
+        console.log(`  ${c.bold("current")}: ${cfg.model}`);
         if (conn.ok) for (const m of conn.models.filter((x) => x.available !== false)) console.log(`    ${c.cyan(m.id.padEnd(22))} ${c.dim(`${m.name ?? ""}${m.contextWindow ? `${m.name ? " · " : ""}${(m.contextWindow / 1000).toFixed(0)}k ctx` : ""}`)}`);
         else console.log(c.yellow(`  couldn't list models: ${conn.error}`));
         console.log(c.dim("  set one with /model <id>"));
@@ -1642,19 +1677,50 @@ async function handleCommand(line: string): Promise<boolean> {
       // /settings was a menu that just duplicated the slash commands. It's gone — every setting is now a
       // first-class command. Keep a friendly redirect so old muscle memory isn't a dead "unknown command".
       console.log(c.dim("  settings are now individual commands — press / to browse them:"));
-      console.log(c.dim("    /mode · /model · /effort · /freellm · /permission · /sandbox · /autoroute · /subagents · /repomap · /quality · /trust · /allow"));
+      console.log(c.dim("    /mode · /model · /effort · /free · /permission · /sandbox · /subagents · /escalation · /repomap · /quality · /trust · /allow"));
       break;
-    case "freellm": case "free-llm": {
-      if (ui.pick) { await pickFreeLLM(); break; } // managed setup / manage on a TTY
-      const { formatManagedStatus, loadManaged, probeManagedStatus, saveManaged } = await import("./cli/freellm-manage.ts");
-      const st = loadManaged();
-      if (st?.managed) {
-        const probe = await probeManagedStatus(st);
-        if (probe.providerKeys !== null && probe.providerKeys !== st.providerKeys) saveManaged({ ...st, providerKeys: probe.providerKeys });
-        console.log(`  Free LLM API: managed · ${st.runtime} · ${st.url} · ${formatManagedStatus(probe)}`);
-      } else {
-        console.log(c.dim("  Free LLM API: not set up — run `ob1 onboard`, or /models on a TTY"));
+    case "login": {
+      const { runLogin, CLI_SOURCE } = await import("./cli/login.ts");
+      const ok = await runLogin({
+        mode: "login",
+        source: `${CLI_SOURCE}_login`,
+        out: (s) => console.log(s),
+        write: (s) => console.log(s),
+        setExitCode: false,
+      });
+      if (ok) {
+        syncAuthStateFromDisk();
+        await refreshSubscriptionFooter();
       }
+      break;
+    }
+    case "logout": {
+      const { runLogout } = await import("./cli/login.ts");
+      runLogout();
+      syncAuthStateFromDisk();
+      if (subWatch) { clearInterval(subWatch); subWatch = undefined; }
+      if (process.env.OB1_TOKEN) console.log(c.yellow("  OB1_TOKEN is set in this shell, so this session still has an auth token. Unset it to fully log out."));
+      await refreshSubscriptionFooter();
+      break;
+    }
+    case "free": {
+      // Manage the shared free-models pool (works regardless of the active profile): keys file, routing
+      // strategy, provider health, and a status summary.
+      const sub = rest[0]?.toLowerCase();
+      if (sub === "keys") { openKeysFileInSession(ensureKeysFile()); break; }
+      if (sub === "strategy") {
+        const name = rest[1]?.toLowerCase();
+        if (name && (STRATEGIES as readonly string[]).includes(name)) {
+          cfg.freeStrategy = name as FreeStrategy; saveSettings(cfg);
+          if (cfg.providerProfile === "free") ctrl?.setStatus({ model: freeModelLabel(cfg.model) });
+          console.log(`  routing strategy → ${c.cyan(name)}  ${c.dim(FREE_STRATEGY_HINTS[name])}`);
+        } else if (!name && ui.pick) await pickFreeStrategy();
+        else console.log(c.red(`  usage: /free strategy ${STRATEGIES.join("|")} (current: ${cfg.freeStrategy})`));
+        break;
+      }
+      if (sub === "health") { console.log(c.dim("  re-checking free provider health…")); await runFreeHealthCheck(true); console.log(c.dim("  ✓ health refreshed")); break; }
+      if (sub === "status" || !ui.pick) { for (const l of freeSummaryLines(freeStatus())) console.log(l); break; }
+      await pickFree();
       break;
     }
     case "permission": {
@@ -1694,20 +1760,20 @@ async function handleCommand(line: string): Promise<boolean> {
       } else console.log(c.red(`  usage: /quality normal|strict|off|show|scenarios (current: ${cfg.qualityMode})`));
       break;
     }
-    case "autoroute": {
-      if (rest[0] === "on" || rest[0] === "off") {
-        cfg.autoRoute = rest[0] === "on";
-        console.log(`  auto-route ${cfg.autoRoute ? c.yellow("ON") : "off"}`);
-      } else if (!rest[0] && ui.pick) await pickAutoRoute();  // bare /autoroute opens an on/off picker on a TTY
-      else console.log(c.red(`  usage: /autoroute on|off (current: ${cfg.autoRoute ? "on" : "off"})`));
-      break;
-    }
     case "subagents": {
       if (rest[0] === "on" || rest[0] === "off") {
         cfg.subagents = rest[0] === "on";
         console.log(`  subagents ${cfg.subagents ? c.yellow("ON") : "off"}`);
       } else if (!rest[0] && ui.pick) await pickSubagents();  // bare /subagents opens an on/off picker on a TTY
       else console.log(c.red(`  usage: /subagents on|off (current: ${cfg.subagents ? "on" : "off"})`));
+      break;
+    }
+    case "escalation": case "escalate": {
+      if (rest[0] === "on" || rest[0] === "off") {
+        cfg.escalation = rest[0] === "on";
+        console.log(`  escalation ${cfg.escalation ? c.yellow("ON") : "off"}`);
+      } else if (!rest[0] && ui.pick) await pickEscalation();  // bare /escalation opens an on/off picker on a TTY
+      else console.log(c.red(`  usage: /escalation on|off (current: ${cfg.escalation ? "on" : "off"})`));
       break;
     }
     case "effort": {
@@ -1785,7 +1851,7 @@ async function handleCommand(line: string): Promise<boolean> {
     }
     case "usage": {
       // Subscription usage first (the managed-server plan: the monthly credit pool), then the local
-      // token+cost analytics. The plan block is omitted for free/self-hosted (FreeLLMAPI) users.
+      // token+cost analytics. The plan block is omitted for free / self-hosted-endpoint users.
       const planLines = formatPlanUsage(await fetchPlan());
       if (planLines.length) { console.log(""); for (const l of planLines) console.log(l); }
       console.log(formatUsage(aggregate(loadUsage(join(cfg.dataDir, "usage.jsonl")))));
@@ -1823,79 +1889,216 @@ async function handleCommand(line: string): Promise<boolean> {
   return false;
 }
 
-async function fusionTurn(task: string): Promise<string | undefined> {
+/** Verified escalation (Wave 3, default ON): a Solo turn whose objective checks STILL fail after the
+ *  auto-verify self-fix budget hands ITSELF to Fusion best-of-N. The SIGNAL decided this in loop.ts (no
+ *  LLM router); here we just narrate the one-line reason and run Fusion ONCE, passing the failure report
+ *  as escalationContext so candidates FIX rather than restart. HARD RULE — at most one escalation per user
+ *  turn: fusionTurn's own apply turn runs with escalation OFF (canEscalateOnFailure:false, in applySolution),
+ *  and this function never loops. */
+async function runEscalatedTurn(task: string, esc: { reason: string; report: string }): Promise<void> {
+  console.log(c.yellow("  ↗ verified failure — escalating to fusion") + c.dim(` — ${esc.reason}`));
+  // Cheap HEAD-before/after diff so we only auto-review when the escalated apply ACTUALLY wrote something
+  // (applySolution reports whether it dispatched the gated turn, not whether that turn changed files — so
+  // we compare the working diff instead of trusting a dispatch bool). Plan mode never writes → skip both.
+  const before = cfg.planMode ? "" : await collectWorkingDiff();
+  await fusionTurn(task, { escalationContext: esc.report });
+  // Auto-review — the Bugbot pattern on the RISKY path: an escalated best-of-N apply is exactly where an
+  // independent refuter earns its keep. Runs AT MOST ONCE per escalated turn (never on the fix turn below),
+  // so it can't loop. Skipped in plan mode, on ESC, and when the apply wrote nothing new.
+  if (cfg.planMode || activeAbort?.signal.aborted) return;
+  const after = await collectWorkingDiff();
+  if (!after || after === before) return; // nothing was written → nothing to review
+  console.log(c.dim("  ↳ auto-reviewing the escalated apply (independent refuter · read-only)…"));
+  const r = await runReview({ cfg, tools, diff: after, task, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return;
+  printReview(r);
+  await maybeApplyReviewFixes(r); // ONE gated fix turn (canEscalateOnFailure:false), never re-reviewed
+}
+
+// ── /review — the refute-reviewer over the current diff (reviewer.ts) ─────────────────────────────
+/** Quote a path for a bash `-c` command line (single-quote, escaping embedded quotes) so filenames with
+ *  spaces/specials in the untracked list can't break the per-file diff command. */
+function shQuote(p: string): string { return `'${p.replace(/'/g, "'\\''")}'`; }
+
+/** The current WORKING-TREE diff: tracked staged+unstaged changes vs HEAD, PLUS untracked files rendered as
+ *  new-file diffs — computed WITHOUT touching the index. `git diff --no-index /dev/null <file>` never uses
+ *  the index (provably index-neutral), unlike the `add -N` / `reset` trick which would clobber the user's
+ *  staged state. Errors are swallowed (2>/dev/null) → a non-git dir yields "" (the caller gates on that). */
+async function collectWorkingDiff(): Promise<string> {
+  const git = (command: string) => shellExec({ cwd: cfg.cwd, sandbox: "off", command, signal: activeAbort?.signal });
+  const tracked = (await git("git -c core.quotePath=false --no-pager diff HEAD --no-color 2>/dev/null")).output;
+  const others = (await git("git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null")).output
+    .split("\n").map((s) => s.trim()).filter(Boolean);
+  let untracked = "";
+  for (const f of others) {
+    // --no-index against /dev/null renders the whole file as an added new-file diff; it exits 1 (differences
+    // found) which shellExec reports without throwing — take the output regardless.
+    untracked += (await git(`git --no-pager diff --no-index --no-color -- /dev/null ${shQuote(f)} 2>/dev/null`)).output;
+  }
+  return (tracked + untracked).trim();
+}
+
+/** What /review should review: the working-tree diff when there is one; otherwise (clean tree) the last
+ *  commit as a fallback so `/review` is still useful right after a commit. A non-git dir returns an error. */
+async function collectReviewDiff(): Promise<{ diff: string; source: string } | { error: string }> {
+  const inside = (await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git rev-parse --is-inside-work-tree 2>/dev/null", signal: activeAbort?.signal })).output.trim();
+  if (inside !== "true") return { error: "not a git repository (or git unavailable) — /review needs git to compute a diff" };
+  const working = await collectWorkingDiff();
+  if (working) return { diff: working, source: "working tree (staged + unstaged + untracked)" };
+  const show = (await shellExec({ cwd: cfg.cwd, sandbox: "off", command: "git --no-pager show HEAD --no-color 2>/dev/null", signal: activeAbort?.signal })).output.trim();
+  if (!show) return { error: "nothing to review — the tree is clean and there is no commit to fall back to" };
+  return { diff: show, source: "last commit (working tree is clean) — git show HEAD" };
+}
+
+/** Print a review result: findings as a numbered list (file:line · summary · scenario), a green all-clear on
+ *  NONE, or the raw text dimmed as UNPARSED when the response was garbled (never a false green). */
+function printReview(r: { findings: Finding[]; none: boolean; raw: string; totalInputTokens: number; totalOutputTokens: number }): void {
+  if (r.none) { console.log(c.green("  ✓ reviewer found nothing it couldn't refute")); return; }
+  if (!r.findings.length) {
+    const raw = r.raw.trim();
+    if (!raw) { console.log(c.dim("  reviewer produced no output")); return; }
+    console.log(c.dim("  reviewer response (unparsed — no strict FINDING lines; treat as unreviewed, not clean):"));
+    console.log(raw.split("\n").map((l) => c.dim("  │ " + l)).join("\n"));
+    return;
+  }
+  console.log("\n" + c.bold(`  ${r.findings.length} finding${r.findings.length === 1 ? "" : "s"} that survived refutation:`));
+  r.findings.forEach((f, i) => {
+    const loc = f.line != null ? `${f.file}:${f.line}` : f.file;
+    console.log(`  ${c.cyan(`${i + 1}.`)} ${c.bold(loc)} ${c.dim("—")} ${f.summary}`);
+    console.log(c.dim(`     scenario: ${f.scenario}`));
+  });
+  console.log(c.dim(`  [reviewer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+}
+
+/** The fix-turn message: the reviewer's findings VERBATIM, framed so the agent must either fix each or
+ *  justify it as a false positive (no silent dismissals). Shared by /review and the escalated auto-review. */
+function reviewFixPrompt(findings: Finding[]): string {
+  const list = findings.map((f, i) => {
+    const loc = f.line != null ? `${f.file}:${f.line}` : f.file;
+    return `${i + 1}. ${loc} — ${f.summary}\n   Failure scenario: ${f.scenario}`;
+  }).join("\n");
+  return (
+    "An independent reviewer verified these findings on the current diff. Fix each one, or state explicitly " +
+    "why it is a false positive (name the guard, caller, type, or invariant that makes it safe). Do not make " +
+    `unrelated changes.\n\n${list}`
+  );
+}
+
+/** Offer an approval-gated fix turn for the surviving findings (interactive TTY only; non-TTY just leaves
+ *  the findings printed). The fix turn runs with escalation forced OFF and is NEVER re-reviewed — so neither
+ *  /review nor the escalated auto-review can loop. No-op on a clean/garbled result or in plan mode. */
+async function maybeApplyReviewFixes(r: { findings: Finding[]; none: boolean }): Promise<void> {
+  if (r.none || !r.findings.length) return;
+  if (cfg.planMode) { console.log(c.dim("  (plan mode — not applying fixes; /act to let the findings drive edits)")); return; }
+  if (!stdin.isTTY) return; // non-TTY: findings are already printed; no interactive gate to run a fix turn
+  const ok = await ui.approve("apply fixes for these findings");
+  if (!ok) { console.log(c.dim("  left as-is — the findings above are yours to act on")); return; }
+  const startLen = history.length;
+  // canEscalateOnFailure:false — a review-fix turn must not recursively escalate (one escalation per user
+  // turn), and canSpawn off to keep it a single focused pass.
+  await runTurn(reviewFixPrompt(r.findings), history, turnDeps({ canEscalateOnFailure: false, canSpawn: false }));
+  rememberTurn("apply reviewer findings", startLen, "review");
+  persistSession();
+}
+
+async function reviewTurn(): Promise<void> {
+  if (!modelReachable()) { console.log(c.yellow("  /review needs a model provider (a key, or a configured endpoint via /models)")); return; }
+  const collected = await collectReviewDiff();
+  if ("error" in collected) { console.log(c.dim("  " + collected.error)); return; }
+  const model = pickReviewerModel(ensembleModels(cfg), cfg.model);
+  // Budget declared up front (the existing honest-UX pattern): one read-only worker ≈ one Solo pass. Say
+  // whether an INDEPENDENT model is reviewing (decorrelated errors) or the same one with fresh context.
+  const modelNote = model !== cfg.model ? c.dim(` · independent model ${model} (decorrelated errors)`) : c.dim(" · same model, fresh context (fresh-context errors)");
+  console.log(c.dim(`  budget (declared up front): 1 read-only reviewer worker ≈ 1× a Solo investigation${modelNote}`));
+  console.log(c.dim(`  reviewing ${collected.source} — adversarial refuter: reports only bugs it can't refute…`));
+  const r = await runReview({ cfg, tools, diff: collected.diff, model, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return; // ESC: don't render/act on a partial review
+  printReview(r);
+  await maybeApplyReviewFixes(r);
+}
+
+async function fusionTurn(task: string, opts?: { escalationContext?: string }): Promise<string | undefined> {
   if (!modelReachable()) { console.log(c.yellow("  fusion needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const models = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
+  // Env vars REFINE the run but never gate a real signal: the auto verifier signal (evaluate.ts) is the
+  // default; OB1_FUSION_* are honored only as explicit overrides.
+  const envModels = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
+  const models = envModels?.length ? envModels : ensembleModels(cfg); // the diversity gate (frontier ensemble on free)
   const n = process.env.OB1_FUSION_N ? envInt("OB1_FUSION_N", 3) : undefined;
   const check = process.env.OB1_FUSION_CHECK;
   const moa = process.env.OB1_FUSION_MOA === "1";
   const judgeModel = process.env.OB1_FUSION_JUDGE_MODEL;
-  const worktree = process.env.OB1_FUSION_WORKTREE === "1";
+  const worktree = process.env.OB1_FUSION_WORKTREE === "1"; // explicit worktree-at-HEAD override (not required)
   const testCmd = process.env.OB1_FUSION_TEST_CMD;
   const targetPath = process.env.OB1_FUSION_TARGET;
-  const nCand = n ?? Math.max(3, models?.length ?? 0);
-  console.log(c.dim(`  budget (declared up front): ~${nCand + 1 + (moa ? nCand : 0)} model calls ≈ ${nCand + 1 + (moa ? nCand : 0)}× a Solo pass`));
+  const nCand = n ?? Math.max(3, models.length);
+  const calls = nCand + (moa ? nCand : 0); // candidates (+ MoA); a selector/synth call is added only sometimes
+  const sig = detectSignal(cfg);
+  const sigNote = sig.tier === "test" ? `real tests (${sig.testCmd})`
+    : sig.tier === "auto" ? `compile gates (${sig.autoCmds.join(" && ") || "auto"})`
+    : "syntax only (no project checks detected)";
+  console.log(c.dim(`  budget (declared up front): ~${calls}–${calls + 1} model calls ≈ ${calls}× a Solo pass (+1 only when a judge is needed)`));
   const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy each";
-  console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) + auto-score → synthesizer merges the best parts${models?.length ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}${worktree ? ` + worktree real-test (${testCmd ?? "bun test"})` : ""}…`));
-  const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
+  console.log(c.dim(`  Fusion: ${nCand} candidates (same prompt · ${copyKind}) → auto-score [${sigNote}] → select the best (merge only if none pass)${models.length > 1 ? ` · ${models.length} models` : ""}${moa ? " + MoA refine" : ""}…`));
+  const r = await runFusion({ task, cfg, tools, n, models, check, moa, judgeModel, worktree, testCmd, targetPath, escalationContext: opts?.escalationContext, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
   if (activeAbort?.signal.aborted) return undefined; // ESC: don't render a partial result or apply it
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
   for (const cnd of r.candidates) {
-    const v = !cnd.score?.checked ? c.gray("unscored") : cnd.score.ok ? c.green("PASS") : c.red("FAIL");
-    console.log(c.dim(`  • ${cnd.label} [${cnd.model}] `) + v + c.dim(`  ${cnd.outputTokens} out tok`));
+    const sc = cnd.score;
+    const v = !sc?.checked ? c.gray("unscored") : sc.ok ? c.green("PASS") : c.red("FAIL");
+    // Partial credit surfaced honestly when a candidate failed but passed SOME tests (e.g. 4/5 → "80%").
+    const frac = sc?.checked && !sc.ok && typeof sc.score === "number" && sc.score > 0 ? c.dim(` ${Math.round(sc.score * 100)}%`) : "";
+    console.log(c.dim(`  • ${cnd.label} [${cnd.model}] `) + v + frac + c.dim(`  ${cnd.outputTokens} out tok`));
   }
-  if (r.reverted) console.log(c.yellow("  synthesis failed the objective check → reverted to a passing candidate"));
+  const tierLabel: Record<string, string> = { "copy-checks": "copy checks (real state)", "worktree-tests": "worktree tests", check: "check command", syntax: "syntax", none: "none" };
+  if (r.selected && r.signalTier === "none") {
+    // All-prose (conversational) answer — nothing to objectively check. Calm + honest; never the red banner.
+    const how = r.selected.method === "vote" ? "agreement" : "judge rating";
+    console.log(c.dim(`  signal: none — no code to check (conversational answer); selected ${c.cyan(r.selected.label)} [${r.selected.model}] by ${how}`));
+  } else if (r.selected) console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · selected ${c.cyan(r.selected.label)} [${r.selected.model}] by ${r.selected.method}`));
+  else console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · no candidate passed → judge-synthesized a merge`));
+  if (r.reverted) console.log(c.yellow("  the merge regressed below the best candidate → reverted to it"));
+  if (r.failing) console.log(c.red("  ⚠ the result STILL FAILS the objective check — treat it as UNVERIFIED and review before trusting it"));
   console.log("\n" + c.bold(modeColor("fusion")("Fusion result:")) + "\n" + r.synthesis + "\n");
-  console.log(c.dim(`  [${r.candidates.length} candidates + synthesizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+  console.log(c.dim(`  [${r.candidates.length} candidates${r.selected ? "" : " + synthesizer"} · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
   await applySolution(task, r.synthesis);
   return r.synthesis;
 }
 
-async function councilTurn(task: string): Promise<string | undefined> {
-  if (!modelReachable()) { console.log(c.yellow("  council needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const models = process.env.OB1_COUNCIL_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
-  const check = process.env.OB1_COUNCIL_CHECK;
-  const arbiterModel = process.env.OB1_COUNCIL_ARBITER_MODEL;
-  const maxR = envInt("OB1_COUNCIL_ROUNDS", 3);
-  const twoModels = (models?.length ?? 0) > 1;
-  // Council workers edit the REAL workspace directly; gate each mutating action with the same approval Solo
-  // uses (autopilot → no prompt; ask → prompt). In Plan mode the workers stay read-only (nothing written).
-  const workerApprove = cfg.permissionMode === "autopilot" ? undefined : (desc: string) => ui.approve(desc);
-  console.log(c.dim(`  budget (declared up front): up to ~${1 + maxR * 2 + 1} model calls (author + ${maxR}×(review + revise) + finalizer), fewer if it converges early`));
-  console.log(c.dim(`  Council: author ↔ reviewer${twoModels ? ` (2 models)` : ""}${check ? " · objective-grounded" : ""} over up to ${maxR} round(s) · ${cfg.planMode ? "read-only (plan mode)" : "editing the workspace directly" + (cfg.permissionMode === "autopilot" ? "" : ", each change gated")}…`));
-  const r = await runCouncil({ task, cfg, tools, rounds: maxR, models, check, arbiterModel, approve: workerApprove, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return undefined; // ESC
+/** /deep — AB-MCTS-lite adaptive search (deep.ts). Thompson-samples, per call, whether to WIDEN (a fresh
+ *  generation) or DEEPEN (refine a promising node), grounded in the SAME auto verifier signal Fusion uses.
+ *  Wired exactly like fusionTurn (mkTools/procs/planMode/workerProgress/ESC) and applies the best node via
+ *  the one gated apply turn — the search never writes the real tree itself. */
+async function deepTurn(task: string): Promise<void> {
+  if (!modelReachable()) { console.log(c.yellow("  /deep needs a model provider (a key, or a configured endpoint via /models)")); return; }
+  const models = ensembleModels(cfg); // the diversity gate (frontier ensemble on the free router; else [cfg.model])
+  const budget = envInt("OB1_DEEP_BUDGET", 9);
+  const sig = detectSignal(cfg);
+  const sigNote = sig.tier === "test" ? `real tests (${sig.testCmd})`
+    : sig.tier === "auto" ? `compile gates (${sig.autoCmds.join(" && ") || "auto"})`
+    : "syntax only (no project checks detected)";
+  // Budget declared up front (the honest-UX pattern): a Deep run spends ~budget worker calls, each ≈ a Solo pass.
+  console.log(c.dim(`  budget (declared up front): ~${budget} model calls (Thompson-sampled generate-vs-refine across ${models.length} model${models.length === 1 ? "" : "s"}) ≈ ~${budget}× a Solo pass`));
+  const copyKind = cfg.planMode ? "read-only (plan mode)" : "full tools in a private workspace copy per call";
+  console.log(c.dim(`  Deep (AB-MCTS-lite): adaptive tree search · ${copyKind} · auto-score [${sigNote}] · widen-vs-deepen by Thompson sampling · stops early on a full pass…`));
+  const r = await runDeep({ task, cfg, tools, budget, models, mkTools, procs, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
+  if (activeAbort?.signal.aborted) return; // ESC: don't render a partial result or apply it
   // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  for (const rd of r.rounds) {
-    const tag = rd.blocking ? c.red("BLOCK") : c.green("OK");
-    console.log(c.dim(`  • round ${rd.round}: `) + tag + c.dim(rd.revisedThisRound ? " → revised" : " → no revision needed"));
+  console.log("\n" + c.bold(modeColor("fusion")("Deep search tree")) + c.dim(" (widen-vs-deepen · real verifier reward):"));
+  for (const n of r.nodes) {
+    const isBest = r.best != null && n.id === r.best.id;
+    const v = n.ok ? c.green("PASS") : n.score > 0 ? c.yellow(`${Math.round(n.score * 100)}%`) : c.red("fail");
+    console.log(`  ${isBest ? c.cyan("▸") : " "} ${c.dim(deepNodeLine(n))}  ${v}`);
   }
-  const v = r.accepted ? c.green("ACCEPT") : c.yellow("REVISE");
-  console.log("\n" + c.bold(modeColor("council")("Council result")) + " " + v + ":\n" + r.final + "\n");
-  console.log(c.dim(`  [${r.rounds.length} round(s) · author + reviewer + finalizer · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  // No separate apply step: the workers already wrote their changes to the real workspace as they went.
-  if (cfg.planMode) console.log(c.dim("  (plan mode — council investigated read-only; nothing written. /act to let it edit the workspace.)"));
-  else if (r.accepted) console.log(c.dim("  council edited the workspace directly; changes are in place — review and verify them."));
-  else console.log(c.yellow("  ⚠ council returned REVISE (not ready to ship). Any edits it made are already in the workspace — review them and re-run or refine the task."));
-  return r.final;
-}
-
-async function personasTurn(task: string): Promise<string | undefined> {
-  if (!modelReachable()) { console.log(c.yellow("  personas needs a model provider (a key, or a configured endpoint via /models)")); return undefined; }
-  const rounds = envInt("OB1_PERSONAS_ROUNDS", 2);
-  const max = envInt("OB1_PERSONAS_MAX", 6);
-  console.log(c.dim(`  budget (declared up front): up to ~${1 + max * rounds + 1} model calls (former + ≤${max} personas × ${rounds} dialogue rounds + facilitator), or 1 if it collapses to Solo`));
-  console.log(c.dim("  Personas: casting the panel for your goal…"));
-  const r = await runPersonas({ task, cfg, tools, rounds, max, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return undefined; // ESC
-  // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  const names = r.personas.map((p) => (p.title ? `${p.name} (${p.title})` : p.name)).join(", ");
-  if (r.collapsed) console.log(c.dim(`  panel collapsed to a single solver: ${c.bold(names)} (goal didn't warrant a panel)`));
-  else console.log(c.dim(`  panel (${r.personas.length}): `) + c.bold(names) + c.dim(` · ${r.dialogue.turns.length} turns over ${r.rounds} round(s) · facilitator: ${r.personas[0].name}`));
-  console.log("\n" + c.bold(modeColor("personas")("Personas result:")) + "\n" + r.final + "\n");
-  console.log(c.dim(`  [${r.collapsed ? "collapsed→solo" : `${r.personas.length} personas + facilitator`} · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  await applySolution(task, r.final);
-  return r.final;
+  const best = r.best;
+  const tierLabel: Record<string, string> = { "copy-checks": "copy checks (real state)", "worktree-tests": "worktree tests", check: "check command", syntax: "syntax", none: "none" };
+  if (!best) { console.log(c.yellow("  deep produced no candidate (budget 0 or cancelled)")); return; }
+  const verdict = best.ok ? c.green("PASS") : best.score > 0 ? c.yellow(`partial (${Math.round(best.score * 100)}%)`) : c.red("FAIL");
+  console.log(c.dim(`  signal: ${tierLabel[r.signalTier]} · best `) + c.cyan(`#${best.id}`) + c.dim(` [${best.model}] → `) + verdict);
+  // Honest verdict — a still-failing best must be announced loudly (never a silent fail), like fusionTurn.
+  if (!best.ok) console.log(c.red("  ⚠ the best candidate STILL FAILS the objective check — treat it as UNVERIFIED and review before trusting it"));
+  console.log("\n" + c.bold(modeColor("fusion")("Deep result:")) + "\n" + best.text + "\n");
+  console.log(c.dim(`  [${r.nodes.length} node(s) · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
+  await applySolution(task, best.text); // same one gated apply turn (no re-escalate) fusion uses
 }
 
 async function evalTurn(requested: string[]): Promise<void> {
@@ -1908,56 +2111,8 @@ async function evalTurn(requested: string[]): Promise<void> {
   console.log(c.yellow(`  ⚠ Eval spends real tokens: ${tasks.length} task(s) × ${modes.join(", ")} × ${trials} trial(s)…`));
   const runners = buildRunners(cfg, tools, modes);
   const outcomes = await runEval({ tasks, runners, cwd: cfg.cwd, trials, onProgress: (m) => console.log(c.dim("  · " + m)) });
-  console.log("\n" + c.bold(modeColor("adaptive")("Capability (solve what Solo fails)")) + "\n" + renderCapability(computeCapability(outcomes, { baseline: "solo" })) + "\n");
-  console.log(c.bold(modeColor("council")("Compute-matched (efficiency)")) + "\n" + renderReport(computeMatched(outcomes, { baseline: "solo" })) + "\n");
-}
-
-async function adaptiveTurn(task: string, hint?: { mode: "fusion" | "council" | "personas"; why: string }): Promise<void> {
-  if (!modelReachable()) { console.log(c.yellow("  adaptive needs a model provider (a key, or a configured endpoint via /models)")); return; }
-  const check = process.env.OB1_ROUTE_CHECK;
-  // Escalation target: env override, else derive from the difficulty signal (risk/design → Council's
-  // critique; hard/high-value → Fusion's best-of-N). Council/Fusion are the only escalation topologies.
-  const escalateTo = process.env.OB1_ROUTE_ESCALATE === "council" ? "council"
-    : hint && hint.mode !== "fusion" ? "council" : "fusion";
-  const models = process.env.OB1_FUSION_MODELS?.split(",").map((s) => s.trim()).filter(Boolean);
-  // If this escalates to Council, its workers edit the REAL tree — gate each mutating action with the
-  // SAME approval Solo/council uses (autopilot → no prompt; ask → prompt), and honor Plan mode (read-only).
-  const workerApprove = cfg.permissionMode === "autopilot" ? undefined : (desc: string) => ui.approve(desc);
-  console.log(c.dim(`  Adaptive${hint ? ` (${hint.why})` : ""}: Solo first; escalate to ${escalateTo} only if the task warrants it AND the objective check fails${check ? "" : c.yellow(" (no OB1_ROUTE_CHECK set → syntax signal only)")}…`));
-  const r = await runAdaptive({ task, cfg, tools, check, escalateTo, models, requireDifficultySignal: true, approve: workerApprove, planMode: cfg.planMode, onEvent: workerProgress, signal: activeAbort?.signal });
-  if (activeAbort?.signal.aborted) return; // ESC
-  // (token meter already ticked up per-worker via workerProgress — do not accrue the total again)
-  const tag = r.path === "solo" ? c.gray("solo (Solo passed → no escalation)") : modeColor(r.path)(`${r.path} (Solo failed the check → escalated)`);
-  console.log(c.dim("  path: ") + tag);
-  console.log("\n" + c.bold(modeColor("adaptive")("Adaptive result:")) + "\n" + r.final + "\n");
-  console.log(c.dim(`  [~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens]`));
-  await applySolution(task, r.final);
-}
-
-// In-session auto-heal for the OB-1-managed Free LLM API proxy. A Node-run proxy is a detached child,
-// not a service, so it can die mid-session; the boot-time check (see startup block) only revives it at
-// the next launch. This runs before every real prompt: a fast no-op when the proxy is already up, and a
-// throttled respawn when it isn't — so a proxy that won't start (bad .env, missing dist/) can't stall
-// every message with a respawn+timeout. Best-effort: never blocks or breaks a turn.
-let lastProxyHealAt = 0;
-async function ensureProxyHealthy(): Promise<void> {
-  if (cfg.providerProfile !== "freellmapi") return;
-  try {
-    const flm = await import("./cli/freellm-manage.ts");
-    const st = flm.loadManaged();
-    if (!st?.managed) return;
-    if (await flm.isUp(st.url)) return; // healthy — the hot path
-    const now = Date.now();
-    if (now - lastProxyHealAt < 15000) { // crash-loop guard: at most one respawn attempt per 15s
-      console.log(c.yellow("  ⚠ Free LLM API proxy is down — retrying shortly · run /freellm to restart"));
-      return;
-    }
-    lastProxyHealAt = now;
-    console.log(c.dim("  Free LLM API proxy stopped — restarting it locally…"));
-    console.log(await flm.ensureRunning(st)
-      ? c.dim("  ✓ proxy back up")
-      : c.yellow("  ⚠ couldn't restart the Free LLM API proxy — run /freellm to fix"));
-  } catch { /* best-effort — never block a turn on the heal check */ }
+  console.log("\n" + c.bold(modeColor("fusion")("Capability (solve what Solo fails)")) + "\n" + renderCapability(computeCapability(outcomes, { baseline: "solo" })) + "\n");
+  console.log(c.bold(modeColor("solo")("Compute-matched (efficiency)")) + "\n" + renderReport(computeMatched(outcomes, { baseline: "solo" })) + "\n");
 }
 
 // ─── per-line dispatch (shared by REPL + TUI) ───────────────────────────────
@@ -1977,7 +2132,6 @@ async function processLine(line: string): Promise<boolean> {
     return false;
   }
   if (t.startsWith("/")) return handleCommand(t);
-  await ensureProxyHealthy(); // revive a crashed OB-1-managed Free LLM API proxy before the turn
   // @path mentions — pull referenced files/dirs into the turn so the model sees them without a read_file
   // round-trip. The original typed line (`t`) is kept for checkpoints/recall/skill-learning; only the text
   // SENT to the model carries the attached contents.
@@ -1991,32 +2145,23 @@ async function processLine(line: string): Promise<boolean> {
   // Heavy modes are sticky (persist until switched). To keep that from silently running every later
   // prompt at multiplied cost, show a visible reminder before each heavy turn — except the very first
   // turn right after selection (the user just chose it). `/solo` exits.
-  if (cfg.mode === "fusion" || cfg.mode === "council" || cfg.mode === "personas") {
+  if (cfg.mode === "fusion") {
     if (!modeJustSet) console.log(c.yellow(`  ⚠ still in ${modeColor(cfg.mode)(cfg.mode.toUpperCase())} (${modeCostHint(cfg.mode)}) · ${c.cyan("/solo")} to exit`));
     modeJustSet = false;
   }
   const startLen = history.length;
   if (cfg.mode === "fusion") { await fusionTurn(turnText); rememberTurn(t, startLen, "fusion"); persistSession(); return false; }
-  if (cfg.mode === "council") { await councilTurn(turnText); rememberTurn(t, startLen, "council"); persistSession(); return false; }
-  if (cfg.mode === "personas") { await personasTurn(turnText); rememberTurn(t, startLen, "personas"); persistSession(); return false; }
-  // (no `adaptive` branch — it's retired as a mode; auto-routing is the cfg.autoRoute toggle below)
-  // Auto-route OFF: a pure-regex *nudge* (no extra model call) suggesting a heavier mode — purely advisory.
-  if (!cfg.autoRoute) {
-    const hint = suggestMode(t);
-    if (hint) console.log(c.dim(`  💡 looks ${hint.why} — ${c.cyan("/mode " + hint.mode)} for deeper analysis · auto-route is off (${c.cyan("/autoroute on")} to enable). Continuing in Solo…`));
-  }
-  // Auto-route ON: Solo gets the `escalate` tool (offered via turnDeps.canEscalate) and decides DURING its
-  // normal response whether the task needs a heavier mode. No upfront probe call — an easy turn is one Solo
-  // call; only a genuinely hard turn pays for the heavier mode. If it escalated, forward the whole task.
+  // Solo: one careful pass. Verified escalation (default ON): if the auto-verify self-fix loop STILL fails
+  // after its budget, loop.ts returns { escalate } and we hand the SAME turn to Fusion best-of-N ONCE, with
+  // the failure report as context. HARD RULE — at most one escalation per user turn: the apply turn inside
+  // Fusion runs with escalation OFF, and runEscalatedTurn never loops. ESC after Solo skips the escalation.
   const outcome = await runTurn(turnText, history, turnDeps());
-  if (outcome?.escalate) {
-    await runEscalatedTurn(turnText, outcome.escalate);
-  }
-  rememberTurn(t, startLen, outcome?.escalate ? `solo→${outcome.escalate.mode}` : "solo");
+  if (outcome.escalate && !activeAbort?.signal.aborted) await runEscalatedTurn(turnText, outcome.escalate);
+  rememberTurn(t, startLen, outcome.escalate ? "escalate" : "solo");
   persistSession(); // write the conversation so /resume can reopen it
   // Auto skill learning (opt-in, OFF by default): distil this turn into reusable procedural memory.
-  // One cheap brain call, only on a substantive non-escalated Solo turn. Never blocks/breaks the turn.
-  if (cfg.skillLearn && memBrain && !outcome?.escalate) {
+  // One cheap brain call, only on a substantive Solo turn. Never blocks/breaks the turn.
+  if (cfg.skillLearn && memBrain) {
     try {
       const res = await maybeLearnSkill({ cwd: cfg.cwd, slice: history.slice(startLen), existing: listSkills(cfg.cwd, { includeArchived: true }), ask: memBrain.ask });
       if (res.action !== "none" && res.name) console.log(c.dim(`  💾 ${res.action === "create" ? "learned" : "refined"} skill: ${c.cyan(res.name)}`));
@@ -2108,11 +2253,11 @@ async function runRepl(startup: string[]): Promise<void> {
 
 // ─── Ink TUI (interactive TTY) ──────────────────────────────────────────────
 async function runTui(startup: string[]): Promise<void> {
-  ctrl = new TuiController({ model: cfg.model, mode: cfg.mode, plan: cfg.planMode, inTok: 0, outTok: 0, cacheTok: 0, autopilot: cfg.permissionMode === "autopilot", effort: cfg.effort }, procs, agentReg, todos);
-  // "Get Intelligent Models" footer button — shown only on the OB-1-managed Free LLM API provider (free
-  // models only); Enter opens the subscription pricing page in the browser. Read live so switching
-  // providers via /models toggles it. [[no-auto-escalation-to-expensive-modes]]
-  ctrl.upsellEligible = () => cfg.providerProfile === "freellmapi";
+  ctrl = new TuiController({ model: modelStatusLabel(), mode: cfg.mode, plan: cfg.planMode, inTok: 0, outTok: 0, cacheTok: 0, autopilot: cfg.permissionMode === "autopilot", effort: cfg.effort, free: cfg.providerProfile === "free" }, procs, agentReg, todos);
+  // "Get Intelligent Models" footer button — shown only on the Free models provider (free tiers only);
+  // Enter opens the subscription pricing page in the browser. Read live so switching providers via /models
+  // toggles it. [[no-auto-escalation-to-expensive-modes]]
+  ctrl.upsellEligible = () => cfg.providerProfile === "free";
   ctrl.onUpsell = () => { void openPricingPage(); };
   // @path autocomplete: complete against the workspace file list (built once, lazily, from the repo map so
   // it respects ignores). Prefix matches first, then substring; capped at 10.
@@ -2223,7 +2368,7 @@ async function runTui(startup: string[]): Promise<void> {
           // forgets the empty-array clear, leaving a stale "✔ tasks (6/6)" above the prompt. Only clear
           // when nothing is pending/in_progress, so a plan that legitimately spans turns still persists.
           if (todos.size > 0 && todos.done === todos.size) todos.clear();
-          ctrl!.setStatus({ model: cfg.model, mode: cfg.mode, plan: cfg.planMode, autopilot: cfg.permissionMode === "autopilot" }); ctrl!.setBusy(false);
+          ctrl!.setStatus({ model: modelStatusLabel(), mode: cfg.mode, plan: cfg.planMode, autopilot: cfg.permissionMode === "autopilot" }); ctrl!.setBusy(false);
           // After a real (model) turn that wasn't interrupted, propose a likely next prompt (Tab accepts).
           // Skip slash-commands (no model exchange to base it on) and the queued case (a next prompt is
           // already waiting). Fire-and-forget — it must not block the drain loop.
@@ -2242,13 +2387,13 @@ async function runTui(startup: string[]): Promise<void> {
 // ─── boot ───────────────────────────────────────────────────────────────────
 const startup: string[] = [];
 startup.push(banner());
-// Access line: show the subscription plan or "Free LLM API" — never the raw wire provider ("openai") or
-// the server/localhost URL (users don't need either; the wire protocol is an implementation detail).
+// Access line: show the subscription plan or "Free models" — never the raw wire provider ("openai"/"free")
+// or the server URL (users don't need either; the wire protocol is an implementation detail).
 {
   const onManaged = !cfg.providerProfile && cfg.provider === "openai" && cfg.baseUrl.startsWith(ob1ServerUrl());
   let accessLine: string;
-  if (cfg.providerProfile === "freellmapi") {
-    accessLine = "Free LLM API";
+  if (cfg.providerProfile === "free") {
+    accessLine = "Free models";
   } else if (onManaged) {
     if (!loadAuthToken()) {
       accessLine = "Not signed in — run `ob1 login`";
@@ -2273,7 +2418,11 @@ startup.push(banner());
   }
   startup.push(c.dim(`  ${accessLine}`));
 }
-startup.push(c.dim(`  model: ${cfg.model} — ${describeModel(cfg.model)}${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : " · output governed by model"}`));
+if (cfg.providerProfile === "free")
+  startup.push(c.dim(`  model: ${freeModelLabel(cfg.model)} — signed free-model catalog${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : ""}`));
+else
+  startup.push(c.dim(`  model: ${cfg.model} — ${describeModel(cfg.model)}${cfg.maxTokens ? ` · capped ${cfg.maxTokens}` : " · output governed by model"}`));
+if (cfg.providerProfile === "free") startFreeCatalogSyncLoop();
 if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restored (global ~/.ob1/settings.json) — change with /models or individual slash commands"));
 // Settings health: a hand-edited settings.json with a bad value silently fell back to a default — say
 // so, so a typo'd sandbox/mode isn't a silent mystery. Warnings (unknown keys) are shown dimmer.
@@ -2298,10 +2447,10 @@ if (hasPersistedSettings(cfg.settingsDir)) startup.push(c.dim("  settings restor
       cfg.permissionMode = "ask";
       // Non-interactive (piped / non-TTY stdin) can't show an approval prompt, so ask mode would silently
       // auto-deny EVERY mutating tool with no explanation. Say so up front, and point at the fixes that
-      // actually apply without a TTY (autopilot env, or run interactively) — the /trust · /autopilot
+      // actually apply without a TTY (autopilot env, or run interactively) — the /trust · /mode auto
       // slash-command advice below is useless with no interactive prompt.
       if (!stdin.isTTY) startup.push(c.yellow("  ⚠ Non-interactive session in an untrusted folder: edits/commands will be auto-denied (no way to approve). Set OB1_PERMISSION=autopilot or run interactively to approve."));
-      else startup.push(c.yellow("  ⚠ new/untrusted folder — starting in ask mode (each edit/command asks first). Run /trust to enable autopilot here, or /autopilot to switch now."));
+      else startup.push(c.yellow("  ⚠ new/untrusted folder — starting in act mode (each edit/command asks first). Run /mode auto for no prompts."));
     }
   }
   if (policy.rules.length) startup.push(c.dim(`  policy: ${policy.rules.length} rule(s) from .ob1/policy.json`));
@@ -2316,24 +2465,17 @@ try {
   const a = analyzeBranch(gs);
   if (a.stale) startup.push(c.yellow(`  ⚠ ${a.recommendation}`));
 } catch { /* best-effort — never block boot on git */ }
-// One-time migration note: `adaptive` mode is now the Solo auto-route toggle. loadConfig collapsed any
-// adaptive workspace to Solo, so this is always accurate; saveSettings rewrites mode:"solo" → shows once.
-if (persistedSettings(cfg.settingsDir).mode === "adaptive") {
-  startup.push(c.yellow(`  note: 'adaptive' mode is now a Solo auto-route toggle — you're in Solo (auto-route ${cfg.autoRoute ? "on" : "off"}). Change it with /autoroute.`));
+// One-time migration note: the retired heavy modes (council/personas) and the old adaptive router are
+// gone — a workspace persisted in any of them now loads as Solo. loadConfig already collapsed it, so this
+// is always accurate; saveSettings rewrites mode:"solo" → the note shows a single time.
+const persistedMode = persistedSettings(cfg.settingsDir).mode as string | undefined;
+if (persistedMode && persistedMode !== "solo" && persistedMode !== "fusion") {
+  startup.push(c.yellow(`  note: '${persistedMode}' orchestration mode has been retired — you're now in Solo. Use ${c.cyan("/fusion")} for best-of-N, or ${c.cyan("/eval")} to compare modes.`));
   saveSettings(cfg);
 }
-// If the active provider is an OB-1-managed FreeLLMAPI proxy, make sure it's running (Docker persists
-// across restarts; a Node-run proxy died with the last session). Best-effort — fast when already up.
-if (cfg.providerProfile === "freellmapi") {
-  try {
-    const flm = await import("./cli/freellm-manage.ts");
-    const st = flm.loadManaged();
-    if (st?.managed && !(await flm.isUp(st.url))) {
-      startup.push(c.dim("  starting your local Free LLM API proxy…"));
-      if (!(await flm.ensureRunning(st))) startup.push(c.yellow("  ⚠ couldn't auto-start the Free LLM API proxy — run /freellm to restart"));
-    }
-  } catch { /* best-effort */ }
-}
+// The embedded free-models router has no process to start — it routes in-process. Kick a best-effort,
+// non-blocking background health check so keyed providers are probed while the session boots.
+if (cfg.providerProfile === "free") { void runFreeHealthCheck(false); }
 // Load tree-sitter grammars before the repo map / AGENTS.md so symbol extraction uses real parsing
 // (falls back to the regex extractor if unavailable). Best-effort — never blocks startup on failure.
 await initTreeSitter().catch(() => false);

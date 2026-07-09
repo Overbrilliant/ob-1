@@ -1,24 +1,20 @@
 # Troubleshooting
 
-## FreeLLMAPI Port Conflicts
+## Free Models: No Keyed Providers / Rate Limited
 
-OB-1 starts FreeLLMAPI on a localhost port. The preferred managed port is `MANAGED_PORT = 49317` in
-`src/cli/freellm-manage.ts`. If that port is busy, OB-1 automatically picks another free port and stores
-the chosen URL in `~/.ob1/freellm.json`.
-
-Open the FreeLLMAPI manager:
+If free-model responses feel slow, low-quality, or rate-limited, you are likely running only on keyless
+providers (Kilo, Pollinations, OVH, LLM7), which have shared, variable limits. Add your own free provider
+keys to `~/.ob1/keys.env` — saving the file activates the provider on your next message, no restart.
 
 ```text
-/freellm
+/free health
+/free strategy <name>
 ```
 
-Use the manager after freeing a port, changing Docker/Node state, or when the proxy is stopped. It can
-check status, restart the proxy, open the dashboard, stop the proxy, or unmanage it.
-
-## Missing Docker
-
-FreeLLMAPI setup prefers Docker when available and falls back to a Node-based local process. The Node
-path can take longer because dependencies must be installed locally.
+`/free health` re-checks provider status now instead of waiting for the background check. `/free
+strategy` switches routing behavior (for example `reliable` to favor providers with fewer recent
+failures, or `fastest` for throughput). See the [Free models guide](free-models.md) for the full keys
+file format and strategy list.
 
 ## Missing Playwright Browser
 
@@ -34,7 +30,7 @@ binary.
 
 ## Hosted 402 Responses
 
-Hosted frontier models require an active plan. FreeLLMAPI and your own endpoints do not require a hosted
+Hosted frontier models require an active plan. Free models and your own endpoints do not require a hosted
 subscription.
 
 ## Env Key Not Taking Effect

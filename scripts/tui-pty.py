@@ -8,7 +8,7 @@
 # keystrokes and asserts the live rendering responds:
 #   • boots into the Ink TUI (banner + "OB-1" status bar + input placeholder render in raw mode)
 #   • a typed slash-command + Enter is accepted and dispatched (/help renders the command list)
-#   • a command mutates live state (/mode fusion re-renders with the fusion description)
+#   • a command mutates live state (/fusion re-renders with the fusion description)
 #   • PERSISTENCE: committed scrollback (the `› /help` echo, a pushLine→<Static> commit) is still on
 #     screen at the END — this catches the "response appears then vanishes" class of bug, where a
 #     mutated-in-place <Static> items array never flushes lines pushed after the first render. The
@@ -52,7 +52,7 @@ tmp = tempfile.mkdtemp(prefix="ob1-tui-pty-")
 # static model PICKER rather than the provider-setup tab (which is what /models does when nothing is
 # configured).
 # OB1_MODEL pins the highlight to the FIRST registry entry so one ↓ lands on a real model, not the
-# appended "Connect FreeLLMAPI" row. NO inherited CI flag.
+# appended "Free models ▸" row. NO inherited CI flag.
 env = {
     "PATH": os.environ.get("PATH", ""),
     "HOME": tmp,
@@ -62,6 +62,7 @@ env = {
     "OB1_SANDBOX": "off",
     "OB1_TOKEN": "dummy-tui-pty-test-token",
     "OB1_SERVER": "http://127.0.0.1:1",
+    "OB1_ALLOW_LOCAL_SERVER": "1",
     "OB1_MODEL": "anthropic/claude-opus-4.8",
 }
 
@@ -180,33 +181,19 @@ try:
     check("keystrokes + Enter accepted in raw mode (/help renders command list)", helped)
 
     # 3) A command mutates live state and the TUI re-renders.
-    submit("/mode fusion")
+    submit("/fusion")
     switched = wait_for(["synthesizer merges the best parts"], timeout=10.0)  # the fusion-mode note
-    check("/mode fusion dispatched + live re-render", switched)
+    check("/fusion dispatched + live re-render", switched)
 
     # 3b) Settings are no longer one menu — the old /settings picker was removed and every setting is now
-    #     a first-class command. /settings just prints a redirect to those commands; /permission opens the
-    #     interactive ask/autopilot picker. Assert the redirect text, then drive the /permission picker via
-    #     arrow nav (no typing). The trust gate (on by default) starts this fresh, UNTRUSTED temp folder in
-    #     ASK, so the picker opens highlighted on "ask" (index 0); one ↓ moves to autopilot and selecting it
-    #     flips the mode — proving the picker both renders and mutates state. "use with care" is the autopilot
-    #     hint, unique to this picker, so matching it confirms it rendered.
+    #     a first-class command. /settings just prints a redirect to those commands.
     submit("/settings")
     redirect_ok = wait_for(["individual commands"], timeout=8.0)
     check("/settings redirects to the individual setting commands", redirect_ok)
 
-    # The trust gate downgrades an implicit autopilot → ask in an untrusted folder; a fresh `ob1` in a real
-    # repo must not run autopilot unasked. This is the launch-safety default, so assert it fired at boot.
-    check("trust gate: a fresh untrusted folder starts in ask mode", "starting in ask mode" in text())
-    submit("/permission")
-    perm_open = wait_for(["use with care"], timeout=8.0)
-    check("/permission opens the ask/autopilot picker", perm_open)
-    send("\x1b[B")                                   # ask (trust-gate default highlight) → autopilot
-    pump(0.4)
-    send("\r")                                       # select autopilot
-    autop = wait_for(["permission → autopilot"], timeout=6.0)
-    check("/permission set to autopilot via the picker", autop)
-    pump(0.5)
+    # The trust gate downgrades an implicit autopilot → act in an untrusted folder; a fresh `ob1` in a real
+    # repo must not run auto mode unasked. This is the launch-safety default, so assert it fired at boot.
+    check("trust gate: a fresh untrusted folder starts in act mode", "starting in act mode" in text())
 
     # 3c) /models opens an interactive picker; arrow + Enter acts on the highlighted model. This PTY
     #     session has no managed-server subscription (no auth token), so frontier models are LOCKED (🔒)
@@ -221,16 +208,16 @@ try:
     picked = wait_for(["opening pricing", "subscription"], timeout=6.0)
     check("arrow + Enter selects a model from the picker (locked → pricing)", picked)
 
-    # 3d) BARE /mode (no argument) opens the same arrow-key picker — the no-typing selection flow.
-    #     Mode is "fusion" here (set in step 3), so one ↓ lands deterministically on "council".
+    # 3d) BARE /mode (no argument) opens the execution-mode picker — the no-typing selection flow.
+    #     The trust-gate default is act, so one ↑ lands deterministically on auto.
     submit("/mode")
-    mode_picker = wait_for(["one model, one pass"], timeout=8.0)  # solo's hint — only the mode picker renders it
+    mode_picker = wait_for(["no questions asked", "read-only"], timeout=8.0)
     check("bare /mode opens an interactive picker (no typing)", mode_picker)
-    send("\x1b[B")   # fusion → council
+    send("\x1b[A")   # act → auto
     pump(0.4)
     send("\r")
-    mode_set = wait_for(["mode → council"], timeout=6.0)
-    check("arrow + Enter selects a mode from the picker", mode_set)
+    mode_set = wait_for(["mode → auto"], timeout=6.0)
+    check("arrow + Enter selects auto mode from the picker", mode_set)
 
     # 3e) BARE /sandbox opens its picker too. Sandbox is "off" here, so one ↓ lands on "read-only".
     submit("/sandbox")

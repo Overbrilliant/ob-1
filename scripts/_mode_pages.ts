@@ -1,19 +1,17 @@
-// Run the SAME Apple-page prompt through each ob1 mode → apple-pages/<mode>.html for head-to-head.
+// Run the SAME Apple-page prompt through each ob1 mode (solo, fusion) → apple-pages/<mode>.html for head-to-head.
 import { loadConfig } from "../src/config.ts";
 import { MemoryStore } from "../src/memory/store.ts";
 import { makeEmbedder } from "../src/memory/embed.ts";
 import { runSolo } from "../src/eval/runners.ts";
 import { runFusion, extractCode } from "../src/multimind/fusion.ts";
-import { runCouncil } from "../src/multimind/council.ts";
-import { runPersonas } from "../src/multimind/personas.ts";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 const cfg = loadConfig();
-if (!cfg.apiKey && !cfg.providerProfile) { console.error("need a configured model route: sign in, or use /models for FreeLLMAPI or Custom API"); process.exit(1); }
+if (!cfg.apiKey && !cfg.providerProfile) { console.error("need a configured model route: sign in, or use /models for Free models or Custom API"); process.exit(1); }
 const store = new MemoryStore(cfg.dbPath, makeEmbedder());
 const tools = new Map(); // pure design task — no codebase tools needed
-// Single model across ALL four modes → the only variable is the topology, not the model (R5/plan).
+// Single model across both modes → the only variable is the topology, not the model (R5/plan).
 console.error(`model: ${cfg.model} (single model for all modes)\n`);
 
 const BRIEF =
@@ -42,10 +40,6 @@ console.error("→ solo (one model, one pass)…");
 const solo = await runSolo(BRIEF, cfg, tools); save("solo", solo.text, solo.inputTokens, solo.outputTokens);
 console.error("→ fusion (best-of-N, same prompt → judge merges the best parts)…");
 const fu = await runFusion({ task: BRIEF, cfg, tools }); save("fusion", fu.synthesis, fu.totalInputTokens, fu.totalOutputTokens);
-console.error("→ council (author ↔ reviewer revise rounds → comprehensive finalizer)…");
-const co = await runCouncil({ task: BRIEF, cfg, tools }); save("council", co.final, co.totalInputTokens, co.totalOutputTokens);
-console.error("→ personas (expert panel dialogue → facilitator finalizes)…");
-const pe = await runPersonas({ task: BRIEF, cfg, tools }); save("personas", pe.final, pe.totalInputTokens, pe.totalOutputTokens);
 
 store.close();
-console.log("\ndone — solo.html / fusion.html / council.html / personas.html (all opened in your browser)");
+console.log("\ndone — solo.html / fusion.html (all opened in your browser)");

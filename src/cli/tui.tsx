@@ -31,6 +31,9 @@ export interface Status {
   subscribed?: boolean;
   monthUsed?: number;     // managed credits used this billing month
   monthCap?: number;      // monthly credit cap
+  // Embedded free-models router active: models cost $0, but their resolved ids can regex-match a priced
+  // frontier family, so suppress the $ meter entirely (never print a phantom "~$0.0034" for a free call).
+  free?: boolean;
 }
 
 interface ScrollItem { id: number; text: string; md?: boolean; dim?: boolean; code?: boolean; user?: boolean } // md = inline Markdown; dim = reasoning; code = inside a ``` fence (verbatim); user = a submitted prompt (grey bar)
@@ -610,10 +613,10 @@ export class TuiController {
   };
 
   // ─── "Get Intelligent Models" upsell (footer button) ───────────────────────
-  // A prominent footer call-to-action shown ONLY on the OB-1-managed Free LLM API provider (free models
-  // only). From the input box, ↓ moves focus onto the button and ↑ returns; Enter opens the pricing page
-  // in the browser. Both hooks are injected by index.ts so this file stays free of config/browser deps.
-  upsellEligible: () => boolean = () => false; // index.ts: cfg.providerProfile === "freellmapi"
+  // A prominent footer call-to-action shown ONLY on the Free models provider (free tiers only). From the
+  // input box, ↓ moves focus onto the button and ↑ returns; Enter opens the pricing page in the browser.
+  // Both hooks are injected by index.ts so this file stays free of config/browser deps.
+  upsellEligible: () => boolean = () => false; // index.ts: cfg.providerProfile === "free"
   onUpsell: () => void = () => {};             // index.ts: open the pricing page in the browser
   upsellFocus = false;                         // ↓ from the input gives the button focus; ↑/Esc returns
   focusUpsell = (): void => { if (!this.upsellFocus && this.upsellEligible()) { this.upsellFocus = true; this.emit(); } };
@@ -635,6 +638,11 @@ export class TuiController {
 
 function modeColor(mode: string): string {
   return mode === "fusion" ? "blue" : mode === "council" ? "magenta" : mode === "personas" ? "cyan" : mode === "adaptive" ? "green" : "gray";
+}
+
+function executionMode(s: Status): "auto" | "act" | "plan" {
+  if (s.plan) return "plan";
+  return s.autopilot ? "auto" : "act";
 }
 
 // Context-usage bar: how much of the MODEL's context window the current conversation occupies.
@@ -702,8 +710,9 @@ function StatusBar({ s, reasoning, procs, agents, busy, stopping, genChars = 0, 
   // they pay a flat plan, so the dollar figure is meaningless to them. Free/custom keeps the $ cost.
   const subscribed = !!s.subscribed && (s.monthCap ?? 0) > 0;
   // inTok is the UNCACHED input; cached tokens still bill (~0.25× input) so fold them in at the cache
-  // rate — otherwise the live cost understates a cache-heavy session.
-  const cost = costForUsage(specModel, s.inTok, s.outTok, s.cacheTok);
+  // rate — otherwise the live cost understates a cache-heavy session. Free-router turns are $0 (their
+  // resolved id may match a priced frontier family, so gate on the route, not the model id).
+  const cost = s.free ? 0 : costForUsage(specModel, s.inTok, s.outTok, s.cacheTok);
   const meter = `${(s.inTok / 1000).toFixed(1)}k in · ${(s.outTok / 1000).toFixed(1)}k out` +
     (s.cacheTok ? ` · ${(s.cacheTok / 1000).toFixed(1)}k cached` : "") +
     (!subscribed && cost ? ` · ~$${cost.toFixed(4)}` : "") + // subscribers see the usage bar, not a $ amount
@@ -726,8 +735,10 @@ function StatusBar({ s, reasoning, procs, agents, busy, stopping, genChars = 0, 
         <Text dimColor> {modelLabel} · </Text>
         <Text color={modeColor(s.mode)}>{s.mode}</Text>
         <Text dimColor> · </Text>
-        <Text color={s.plan ? "yellow" : "green"}>{s.plan ? "plan" : "act"}</Text>
-        {s.autopilot ? <Text color="yellow"> · ⚡autopilot</Text> : null}
+        {(() => {
+          const x = executionMode(s);
+          return <Text color={x === "act" ? "green" : "yellow"}>{x}</Text>;
+        })()}
         {procs ? <Text color="yellow"> · ⚙{procs} proc{procs > 1 ? "s" : ""} ⌃P</Text> : null}
         {agents ? <Text color="cyan"> · 🤖{agents} agent{agents > 1 ? "s" : ""}</Text> : null}
         {busy ? (stopping
@@ -783,15 +794,17 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/export", "save the conversation to a file (or /export clipboard)"],
   ["/exit", "exit the session"],
   // ── model & mode ──
-  ["/models", "pick a model — or connect FreeLLMAPI (↑↓ · Enter)"],
-  ["/mode", "pick a mode (↑↓ · Enter)"],
+  ["/models", "pick a model or provider (↑↓ · Enter)"],
+  ["/mode", "execution mode: auto / act / plan (↑↓ · Enter)"],
+  ["/fusion", "run future turns as Fusion best-of-N"],
   ["/solo", "exit a heavy mode → back to Solo"],
-  ["/plan", "read-only plan mode"],
-  ["/act", "act mode (allow edits)"],
   ["/effort", "reasoning effort: low/medium/high (↑↓ · Enter)"],
   // ── provider & plan ──
-  ["/freellm", "set up / manage the Free LLM API proxy (↑↓ · Enter)"],
+  ["/login", "sign in through the browser"],
+  ["/logout", "remove the local OB-1 sign-in token"],
+  ["/free", "manage the free-models pool: keys, strategy, health (↑↓ · Enter)"],
   ["/upgrade", "subscribe / manage your plan (opens pricing, signed in)"],
+  ["/subscribe", "open the subscription page"],
   // ── permissions & safety ──
   ["/permission", "approval mode: ask / autopilot (↑↓ · Enter)"],
   ["/sandbox", "pick sandbox level (↑↓ · Enter)"],
@@ -810,12 +823,10 @@ const SLASH_COMMANDS: [string, string][] = [
   ["/usage", "token + cost analytics"],
   // ── orchestration modes ──
   ["/goal", "keep working until a condition is met"],
-  ["/autoroute", "Solo auto-routing on/off (↑↓ · Enter)"],
   ["/subagents", "parallel subagents on/off"],
-  ["/route", "adaptive routing"],
-  ["/fanout", "multi-mind workers"],
-  ["/council", "draft → critics → arbiter"],
-  ["/personas", "brainstorming panel"],
+  ["/escalation", "escalate a verified-failure turn to fusion (on/off)"],
+  ["/review", "independent refute-reviewer over your current diff"],
+  ["/deep", "adaptive AB-MCTS search (task) — generate-vs-refine, real verifier"],
   ["/eval", "compute-matched eval"],
   ["/codeact", "code-as-action mode (task)"],
   // ── tools & integrations ──
@@ -829,7 +840,7 @@ const SLASH_COMMANDS: [string, string][] = [
 // Commands that take a free-text argument: Enter on these COMPLETES to "/cmd " so the argument can be
 // typed. Every other command RUNS on Enter (opens its picker, toggles, or lists) — so navigating the
 // menu and pressing Enter actually does the thing, instead of just writing the name into the input.
-const NEEDS_ARG = new Set(["/fanout", "/council", "/personas", "/route", "/goal"]);
+const NEEDS_ARG = new Set(["/goal"]);
 
 // Pasting a big block into ink-text-input is brutally slow — every char re-renders the whole growing
 // value (and any embedded \r submits a line early). Ink 7's usePaste delivers the paste as ONE string on

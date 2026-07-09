@@ -136,7 +136,7 @@ function deps(cfg: any, brain: MockBrain, over: Partial<TurnDeps> = {}): TurnDep
 }
 
 // ── scenario 8b: false capability refusal — model says it cannot write files despite file tools ──
-// A live FreeLLMAPI run did this for a PHP task: it returned a code block and claimed it couldn't create
+// A live free-tier model run did this for a PHP task: it returned a code block and claimed it couldn't create
 // files. The guard must nudge once so the model uses write_file instead of ending the turn as "success".
 {
   const brain = new MockBrain([
