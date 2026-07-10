@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OB-1 — A Multi-Mind CLI Coding Agent · Build Plan</title>
+<style>
+  :root{
+    --ink:#000; --paper:#fff; --gray:#555; --line:#ddd; --soft:#f6f6f6;
+    --solo:#444; --fusion:#1d4ed8; --council:#7c3aed; --persona:#0d9488; --warn:#b45309;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.62; font-size:16px;
+  }
+  .wrap{max-width:1000px; margin:0 auto; padding:0 24px 120px}
+  header.hero{border-bottom:3px solid var(--ink); padding:54px 0 30px; margin-bottom:8px}
+  .badge{display:inline-block; border:1px solid var(--ink); border-radius:999px; padding:3px 12px; font-size:12px; letter-spacing:.14em; text-transform:uppercase; margin-bottom:18px}
+  h1{font-size:46px; line-height:1.05; margin:0 0 12px; letter-spacing:-.02em}
+  h1 small{display:block; font-size:19px; font-weight:500; color:var(--gray); letter-spacing:0; margin-top:10px}
+  h2{font-size:28px; margin:64px 0 6px; padding-top:14px; letter-spacing:-.01em}
+  h2 .n{color:var(--line); font-weight:800; margin-right:10px}
+  h3{font-size:20px; margin:34px 0 4px}
+  h4{font-size:16px; margin:20px 0 2px; text-transform:uppercase; letter-spacing:.08em; color:var(--gray)}
+  p{margin:10px 0}
+  a{color:var(--ink)}
+  .lede{font-size:19px; color:#222}
+  hr{border:0; border-top:1px solid var(--line); margin:40px 0}
+  ul,ol{margin:10px 0 10px 22px} li{margin:5px 0}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:var(--soft); padding:1px 6px; border-radius:5px; font-size:.9em}
+  .toc{position:sticky; top:0; background:rgba(255,255,255,.95); backdrop-filter:blur(4px); border-bottom:1px solid var(--line); z-index:50; padding:10px 0; font-size:13px}
+  .toc .wrap{padding-top:0;padding-bottom:0}
+  .toc a{margin-right:16px; text-decoration:none; color:var(--gray); white-space:nowrap}
+  .toc a:hover{color:var(--ink)}
+  .toc .scroll{overflow-x:auto; white-space:nowrap}
+  table{border-collapse:collapse; width:100%; margin:18px 0; font-size:14.5px}
+  th,td{border:1px solid var(--line); padding:9px 11px; text-align:left; vertical-align:top}
+  th{background:var(--soft); font-weight:700}
+  .callout{background:var(--soft); border-left:4px solid var(--ink); padding:14px 18px; margin:20px 0; border-radius:0 8px 8px 0}
+  .callout.warn{border-left-color:var(--warn)}
+  .callout.warn strong{color:var(--warn)}
+  .callout h4{margin-top:0;color:var(--ink)}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:18px}
+  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  @media(max-width:760px){.grid2,.grid3{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line); border-radius:12px; padding:18px}
+  .card h3{margin-top:0}
+  .mode-card{border-top:5px solid var(--ink)}
+  .mode-card.solo{border-top-color:var(--solo)} .mode-card.fusion{border-top-color:var(--fusion)}
+  .mode-card.council{border-top-color:var(--council)} .mode-card.persona{border-top-color:var(--persona)}
+  .pill{display:inline-block; font-size:11px; padding:2px 9px; border-radius:999px; color:#fff; letter-spacing:.04em; text-transform:uppercase}
+  .pill.solo{background:var(--solo)} .pill.fusion{background:var(--fusion)} .pill.council{background:var(--council)} .pill.persona{background:var(--persona)}
+  figure{margin:26px 0; padding:18px; border:1px solid var(--line); border-radius:14px; background:#fff}
+  figure svg{width:100%; height:auto; display:block}
+  figcaption{font-size:13px; color:var(--gray); margin-top:12px; text-align:center}
+  .stack{display:flex; flex-direction:column; gap:8px}
+  .layer{border:1px solid var(--ink); border-radius:10px; padding:12px 16px; background:#fff}
+  .layer .lt{font-weight:700} .layer .ld{font-size:13px; color:var(--gray)}
+  .layer.accent{background:var(--soft)}
+  .ref{font-size:12px; color:var(--gray)}
+  .ref a{color:var(--gray)}
+  .kpi{display:flex; gap:14px; flex-wrap:wrap; margin:18px 0}
+  .kpi div{border:1px solid var(--line); border-radius:10px; padding:12px 16px; flex:1; min-width:150px}
+  .kpi b{display:block; font-size:24px}
+  .kpi span{font-size:12.5px; color:var(--gray)}
+  .timeline{display:flex; gap:0; margin:22px 0; flex-wrap:wrap}
+  .phase{flex:1; min-width:130px; border:1px solid var(--line); border-right:0; padding:12px}
+  .phase:last-child{border-right:1px solid var(--line)}
+  .phase b{font-size:12px; letter-spacing:.06em; color:var(--gray)}
+  .phase p{font-size:13px; margin:6px 0 0}
+  svg text{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .legend{font-size:12.5px;color:var(--gray);display:flex;gap:18px;flex-wrap:wrap;margin-top:6px}
+  .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  footer{border-top:1px solid var(--line); margin-top:60px; padding-top:18px; font-size:13px; color:var(--gray)}
+</style>
+</head>
+<body>
+
+<nav class="toc"><div class="wrap scroll">
+  <a href="#vision">Vision</a>
+  <a href="#principles">Principles</a>
+  <a href="#arch">Architecture</a>
+  <a href="#loop">Agent Loop</a>
+  <a href="#memory">Context &amp; Memory</a>
+  <a href="#modes">The 4 Modes</a>
+  <a href="#fusion">Fusion</a>
+  <a href="#council">Council</a>
+  <a href="#personas">Personas</a>
+  <a href="#tokens">Token Optimization</a>
+  <a href="#workspace">Workspace IQ</a>
+  <a href="#tools">Tools &amp; Skills</a>
+  <a href="#roadmap">Roadmap</a>
+  <a href="#stack">Stack</a>
+  <a href="#risks">Risks</a>
+</div></nav>
+
+<div class="wrap">
+
+<header class="hero" id="vision">
+  <span class="badge">Build Plan · v1 · 2026-06-19</span>
+  <h1>OB-1
+    <small>A multi-mind, token-frugal CLI coding agent — everything Claude Code does, plus three collaborative reasoning modes that spend extra compute <em>only</em> when the task is worth it.</small>
+  </h1>
+  <div class="kpi">
+    <div><b>1</b><span>fast single-agent default (Solo)</span></div>
+    <div><b>3</b><span>opt-in multi-mind modes: Fusion · Council · Personas</span></div>
+    <div><b>MCP</b><span>native tools + on-demand skills</span></div>
+    <div><b>&lt;200</b><span>line always-loaded memory index</span></div>
+  </div>
+  <p class="lede">This plan is synthesized from eight adversarially-verified research reports in
+  <code>research/</code>. Every design decision traces back to a finding — and to its honest caveat.
+  The guiding rule throughout: <strong>context is the scarce resource, the harness beats the model,
+  and extra agents must <em>earn</em> their tokens.</strong></p>
+  <p class="ref">Evidence base:
+    <a href="research/claude-code-efficiency.md">R1 Efficiency</a> ·
+    <a href="research/coding-agent-quality.md">R2 Agent quality</a> ·
+    <a href="research/agent-memory-systems.md">R3 Memory</a> ·
+    <a href="research/claude-code-alternatives-architecture.md">R4 Alt-architecture</a> ·
+    <a href="research/multi-agent-orchestration.md">R5 Multi-agent</a> ·
+    <a href="research/agent-tooling-landscape.md">R6 Tooling landscape</a> ·
+    <a href="research/tech-stack.md">R7 Tech stack</a> ·
+    <a href="research/visible-memory-systems.md">R8 Visible memory</a>
+  </p>
+</header>
+
+<!-- ================= EXEC SUMMARY ================= -->
+<h2 id="summary"><span class="n">01</span>Executive summary</h2>
+<p>OB-1 is a terminal-first coding agent. Its <strong>default is a single, fast, deeply
+token-optimized agent</strong> (Solo) — because the research is blunt: at equal token budgets,
+single agents match or beat multi-agent systems on most coding work, and multi-agent systems cost
+4–15× more <span class="ref">(R5)</span>. The differentiator is that OB-1 can <strong>escalate</strong>
+into one of three collaborative modes when a task is hard or high-value:</p>
+<div class="grid3">
+  <div class="card mode-card fusion"><span class="pill fusion">Fusion</span><h3>Best-of-N</h3>
+    <p>Fan the same task to several models in isolated contexts, then synthesize one final answer from the strongest parts of each.</p></div>
+  <div class="card mode-card council"><span class="pill council">Council</span><h3>Critique &amp; converge</h3>
+    <p>Models draft, then adversarially critique each other across rounds until a vetted answer survives.</p></div>
+  <div class="card mode-card persona"><span class="pill persona">Personas</span><h3>Role panel</h3>
+    <p>Dynamically formed expert personas (Architect, Security, Performance, Skeptic…) collaborate and a lead synthesizes.</p></div>
+</div>
+<p>All three sit on top of a shared, best-practice foundation: plan/act loop, diff-based editing,
+a tree-sitter repository map, tiered on-demand memory, MCP tools + skills, OS sandboxing, a
+multi-provider gateway, and a built-in token/cost meter.</p>
+
+<!-- ================= PRINCIPLES ================= -->
+<h2 id="principles"><span class="n">02</span>Design principles (each earns its place)</h2>
+<table>
+  <thead><tr><th>Principle</th><th>What it means for OB-1</th><th>From</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Context is the scarce resource</strong></td><td>Every token depletes a finite attention budget; recall rots as the window fills. Inject the smallest relevant subset; externalize the rest.</td><td class="ref">R1, R3</td></tr>
+    <tr><td><strong>The harness beats the model</strong></td><td>Edit format, tool design and the agent-computer interface swing correctness 10–20pts on the <em>same</em> model. Invest there first.</td><td class="ref">R2, R4</td></tr>
+    <tr><td><strong>Compute-match before crediting architecture</strong></td><td>A mode is only "better" if it beats Solo at <em>equal tokens</em>. Build the eval that proves it; default to Solo otherwise.</td><td class="ref">R5</td></tr>
+    <tr><td><strong>Verification beats generation</strong></td><td>Reliability comes from a strong critic, not more drafting — but only if the critic is genuinely better than the generator. This is the heart of Council.</td><td class="ref">R2, R5</td></tr>
+    <tr><td><strong>Isolate sub-agent context</strong></td><td>Workers run in separate windows and return <em>compressed</em> results, keeping the orchestrator's context clean.</td><td class="ref">R3, R5</td></tr>
+    <tr><td><strong>Converge on standards</strong></td><td>MCP for tools, plan/act + approval + sandbox for safety, <code>AGENTS.md</code> for memory. Don't reinvent solved layers.</td><td class="ref">R6</td></tr>
+    <tr><td><strong>Measure everything</strong></td><td>A first-class token/cost meter (ccusage-style) is built in — efficiency claims must be observable.</td><td class="ref">R1</td></tr>
+  </tbody>
+</table>
+
+<!-- ================= ARCHITECTURE ================= -->
+<h2 id="arch"><span class="n">03</span>System architecture</h2>
+<p>Eight layers. The top three are what make OB-1 distinctive; the bottom five are the
+best-practice foundation every modern agent is converging on.</p>
+
+<figure>
+  <div class="stack">
+    <div class="layer"><span class="lt">① CLI / TUI</span> <span class="ld">— REPL, streaming output, slash-commands, <code>/mode</code> switch, diff viewer, approval prompts, live token meter</span></div>
+    <div class="layer accent"><span class="lt">② Mode Runtime</span> <span class="ld">— <span style="color:var(--solo)">Solo</span> · <span style="color:var(--fusion)">Fusion</span> · <span style="color:var(--council)">Council</span> · <span style="color:var(--persona)">Personas</span> &nbsp;(selects a topology + budget)</span></div>
+    <div class="layer accent"><span class="lt">③ Multi-Mind Engine</span> <span class="ld">— parallel worker spawner, <strong>isolated context windows</strong>, result compression, synthesis/aggregation, voting &amp; convergence</span></div>
+    <div class="layer"><span class="lt">④ Agent Core</span> <span class="ld">— agentic loop, Plan/Act gate, edit engine (diff &amp; search-replace, lenient apply), termination &amp; budget control</span></div>
+    <div class="layer"><span class="lt">⑤ Context &amp; Memory Engine</span> <span class="ld">— repo map, fact store (facts + revisions), relationship graph, tiered <code>AGENTS.md</code> index + topic files, JIT top-k retrieval, compaction &amp; context editing</span></div>
+    <div class="layer"><span class="lt">⑥ Tooling Layer</span> <span class="ld">— MCP client, deferred tool defs, on-demand Skills, preferred CLI tools, file/search/shell/browser</span></div>
+    <div class="layer"><span class="lt">⑦ Safety Layer</span> <span class="ld">— per-action approval, auto-approve allowlists, OS sandbox (Seatbelt / bwrap+seccomp), network-off default</span></div>
+    <div class="layer"><span class="lt">⑧ Provider Gateway</span> <span class="ld">— multi-LLM abstraction, prompt-cache aware routing, model tiering (cheap workers / strong synthesizer), local models</span></div>
+  </div>
+  <figcaption>Diagram 1 — Layered architecture. Layers ②–③ are the multi-mind differentiators; ④–⑧ are the converging best-practice base.</figcaption>
+</figure>
+
+<!-- ================= AGENT LOOP ================= -->
+<h2 id="loop"><span class="n">04</span>The core agent loop</h2>
+<p>Every mode — even multi-mind workers — runs this same gated loop. Plan/Act separation
+(pioneered by Cline, R6) and an approval gate before any side effect are non-negotiable.</p>
+
+<figure>
+<svg viewBox="0 0 960 300" role="img" aria-label="Agentic loop diagram">
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#000"/></marker>
+  </defs>
+  <!-- plan/act gate -->
+  <rect x="20" y="120" width="120" height="60" rx="10" fill="#f6f6f6" stroke="#000"/>
+  <text x="80" y="146" text-anchor="middle" font-size="14" font-weight="700">Plan mode</text>
+  <text x="80" y="164" text-anchor="middle" font-size="11" fill="#555">read-only</text>
+
+  <rect x="180" y="60" width="130" height="56" rx="10" fill="#fff" stroke="#000"/>
+  <text x="245" y="84" text-anchor="middle" font-size="13" font-weight="700">1 · Perceive</text>
+  <text x="245" y="101" text-anchor="middle" font-size="11" fill="#555">JIT context, top-k</text>
+
+  <rect x="360" y="60" width="130" height="56" rx="10" fill="#fff" stroke="#000"/>
+  <text x="425" y="84" text-anchor="middle" font-size="13" font-weight="700">2 · Plan</text>
+  <text x="425" y="101" text-anchor="middle" font-size="11" fill="#555">strategy / steps</text>
+
+  <rect x="540" y="60" width="130" height="56" rx="10" fill="#fff" stroke="#000"/>
+  <text x="605" y="84" text-anchor="middle" font-size="13" font-weight="700">3 · Act</text>
+  <text x="605" y="101" text-anchor="middle" font-size="11" fill="#555">tool / edit call</text>
+
+  <!-- approval gate -->
+  <polygon points="720,88 760,60 800,88 760,116" fill="#f6f6f6" stroke="#000"/>
+  <text x="760" y="86" text-anchor="middle" font-size="10" font-weight="700">approve?</text>
+  <text x="760" y="99" text-anchor="middle" font-size="9" fill="#555">gate</text>
+
+  <rect x="820" y="60" width="120" height="56" rx="10" fill="#fff" stroke="#000"/>
+  <text x="880" y="84" text-anchor="middle" font-size="13" font-weight="700">4 · Observe</text>
+  <text x="880" y="101" text-anchor="middle" font-size="11" fill="#555">tool result</text>
+
+  <rect x="540" y="200" width="170" height="56" rx="10" fill="#fff" stroke="#000"/>
+  <text x="625" y="224" text-anchor="middle" font-size="13" font-weight="700">5 · Verify</text>
+  <text x="625" y="241" text-anchor="middle" font-size="11" fill="#555">tests / self-check / critic</text>
+
+  <rect x="760" y="200" width="180" height="56" rx="10" fill="#f6f6f6" stroke="#000"/>
+  <text x="850" y="224" text-anchor="middle" font-size="13" font-weight="700">Done / compact</text>
+  <text x="850" y="241" text-anchor="middle" font-size="11" fill="#555">budget &amp; stop control</text>
+
+  <!-- arrows -->
+  <line x1="310" y1="88" x2="356" y2="88" stroke="#000" marker-end="url(#ar)"/>
+  <line x1="490" y1="88" x2="536" y2="88" stroke="#000" marker-end="url(#ar)"/>
+  <line x1="670" y1="88" x2="716" y2="88" stroke="#000" marker-end="url(#ar)"/>
+  <line x1="800" y1="88" x2="816" y2="88" stroke="#000" marker-end="url(#ar)"/>
+  <path d="M880,116 L880,168 L625,168 L625,196" fill="none" stroke="#000" marker-end="url(#ar)"/>
+  <text x="700" y="162" font-size="10" fill="#555">observe → verify</text>
+  <!-- loop back -->
+  <path d="M540,228 L300,228 L300,150" fill="none" stroke="#000" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+  <text x="330" y="246" font-size="10" fill="#555">not done → next step (loop)</text>
+  <!-- verify to done -->
+  <line x1="710" y1="228" x2="756" y2="228" stroke="#000" marker-end="url(#ar)"/>
+  <!-- plan mode feeds perceive -->
+  <path d="M140,150 L160,150 L160,100 L176,100" fill="none" stroke="#000" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+</svg>
+  <figcaption>Diagram 2 — The gated agent loop. Plan mode is read-only; the approval gate sits before every state-mutating Act; Verify can be a self-check (Solo) or a full critic stage (Council).</figcaption>
+</figure>
+
+<!-- ================= MEMORY ================= -->
+<h2 id="memory"><span class="n">05</span>Context &amp; memory engine</h2>
+<p>This is where most of the token savings — and the "very visible" memory — live. Treat the context
+window like a cache you fill <em>lazily</em>: a tiny always-loaded index, everything else externalized
+and pulled in top-k on demand <span class="ref">(R3 — Claude Code's <code>MEMORY.md</code> pattern)</span>.
+Long-term memory follows <strong>Google Memory Bank's model</strong> <span class="ref">(R8)</span>: each
+item is a <strong>plain-text fact with immutable revisions</strong> (readable + auditable), indexed by
+<code>sqlite-vec</code> for retrieval — <em>plus</em> a <strong>relationship graph</strong> over the
+entities (next section).</p>
+
+<figure>
+<svg viewBox="0 0 960 410" role="img" aria-label="Tiered memory diagram with fact store and relationship graph">
+  <defs><marker id="ar2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#000"/></marker>
+  <marker id="ar2p" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#0d9488"/></marker></defs>
+
+  <!-- context window -->
+  <rect x="600" y="20" width="340" height="330" rx="12" fill="#fff" stroke="#000" stroke-width="2"/>
+  <text x="770" y="44" text-anchor="middle" font-size="14" font-weight="800">CONTEXT WINDOW</text>
+  <text x="770" y="60" text-anchor="middle" font-size="11" fill="#555">finite attention budget — keep it lean</text>
+  <rect x="620" y="76" width="300" height="36" rx="7" fill="#f6f6f6" stroke="#000"/>
+  <text x="770" y="99" text-anchor="middle" font-size="12">AGENTS.md index (&lt;200 lines, always loaded)</text>
+  <rect x="620" y="120" width="300" height="34" rx="7" fill="#fff" stroke="#000"/>
+  <text x="770" y="142" text-anchor="middle" font-size="12">top-k retrieved facts</text>
+  <rect x="620" y="162" width="300" height="34" rx="7" fill="#fff" stroke="var(--persona)" stroke-width="2"/>
+  <text x="770" y="184" text-anchor="middle" font-size="12" fill="var(--persona)">bounded relationships (1–2 hops)</text>
+  <rect x="620" y="204" width="300" height="34" rx="7" fill="#fff" stroke="#000"/>
+  <text x="770" y="226" text-anchor="middle" font-size="12">repo-map slice (ranked symbols)</text>
+  <rect x="620" y="246" width="300" height="34" rx="7" fill="#fff" stroke="#000"/>
+  <text x="770" y="268" text-anchor="middle" font-size="12">live working set + recent turns</text>
+  <text x="770" y="300" text-anchor="middle" font-size="10" fill="#b45309">compaction + context-editing evict stale tool results ↺</text>
+  <text x="770" y="330" text-anchor="middle" font-size="10" fill="#555">graph stored cheaply · injected lean (bounded)</text>
+
+  <!-- external stores -->
+  <rect x="20" y="20" width="250" height="48" rx="9" fill="#f6f6f6" stroke="#000"/>
+  <text x="145" y="40" text-anchor="middle" font-size="11.5" font-weight="700">Fact store (Memory Bank model)</text>
+  <text x="145" y="57" text-anchor="middle" font-size="10" fill="#555">plain-text facts + immutable revisions</text>
+
+  <rect x="20" y="78" width="250" height="48" rx="9" fill="#fff" stroke="var(--persona)" stroke-width="2"/>
+  <text x="145" y="98" text-anchor="middle" font-size="11.5" font-weight="700" fill="var(--persona)">Relationship graph</text>
+  <text x="145" y="115" text-anchor="middle" font-size="10" fill="#555">entities + typed edges · bi-temporal</text>
+
+  <rect x="20" y="136" width="250" height="48" rx="9" fill="#f6f6f6" stroke="#000"/>
+  <text x="145" y="156" text-anchor="middle" font-size="11.5" font-weight="700">Repo map</text>
+  <text x="145" y="173" text-anchor="middle" font-size="10" fill="#555">tree-sitter + PageRank · SQLite-cached</text>
+
+  <rect x="20" y="194" width="250" height="48" rx="9" fill="#f6f6f6" stroke="#000"/>
+  <text x="145" y="214" text-anchor="middle" font-size="11.5" font-weight="700">Topic files (on demand)</text>
+  <text x="145" y="231" text-anchor="middle" font-size="10" fill="#555">debugging.md · conventions.md</text>
+
+  <rect x="20" y="252" width="250" height="48" rx="9" fill="#f6f6f6" stroke="#000"/>
+  <text x="145" y="272" text-anchor="middle" font-size="11.5" font-weight="700">Workspace files</text>
+  <text x="145" y="289" text-anchor="middle" font-size="10" fill="#555">read by identifier, not pre-loaded</text>
+
+  <!-- retriever -->
+  <rect x="330" y="118" width="180" height="78" rx="10" fill="#fff" stroke="#000" stroke-width="2"/>
+  <text x="420" y="146" text-anchor="middle" font-size="13" font-weight="800">Retriever</text>
+  <text x="420" y="164" text-anchor="middle" font-size="9.5" fill="#555">top-k (sqlite-vec) +</text>
+  <text x="420" y="178" text-anchor="middle" font-size="9.5" fill="#555">bounded k-hop expansion</text>
+
+  <!-- viewer -->
+  <rect x="330" y="250" width="180" height="78" rx="10" fill="#f6f6f6" stroke="var(--persona)" stroke-width="2"/>
+  <text x="420" y="276" text-anchor="middle" font-size="12.5" font-weight="800" fill="var(--persona)">/memory viewer</text>
+  <text x="420" y="293" text-anchor="middle" font-size="9.5" fill="#555">list · search · edit</text>
+  <text x="420" y="307" text-anchor="middle" font-size="9.5" fill="#555">diff revisions · graph export</text>
+
+  <!-- arrows: stores -> retriever -->
+  <line x1="270" y1="44" x2="326" y2="135" stroke="#000" marker-end="url(#ar2)"/>
+  <line x1="270" y1="102" x2="326" y2="150" stroke="#0d9488" marker-end="url(#ar2p)"/>
+  <line x1="270" y1="160" x2="326" y2="165" stroke="#000" marker-end="url(#ar2)"/>
+  <line x1="270" y1="218" x2="326" y2="178" stroke="#000" marker-end="url(#ar2)"/>
+  <line x1="270" y1="276" x2="326" y2="190" stroke="#000" marker-end="url(#ar2)"/>
+  <!-- retriever -> context -->
+  <line x1="510" y1="157" x2="596" y2="157" stroke="#000" stroke-width="2" marker-end="url(#ar2)"/>
+  <text x="553" y="149" text-anchor="middle" font-size="10" fill="#555">inject</text>
+  <!-- fact store + relationship graph -> viewer -->
+  <path d="M150,68 L150,289 L326,289" fill="none" stroke="#0d9488" stroke-dasharray="3 3" marker-end="url(#ar2p)"/>
+  <path d="M270,108 L300,108 L300,270 L326,270" fill="none" stroke="#0d9488" stroke-dasharray="3 3" marker-end="url(#ar2p)"/>
+</svg>
+  <figcaption>Diagram 3 — Tiered, lazy memory. A small index stays in context; the retriever pulls top-k <em>facts</em> plus a <em>bounded</em> relationship neighborhood just-in-time. The fact store (facts + revisions) and the relationship graph also feed the <code>/memory</code> viewer for inspection and visualization.</figcaption>
+</figure>
+
+<div class="callout"><strong>Why this is the highest-leverage subsystem.</strong> R3's efficiency
+numbers (90%+ token savings from selective retrieval, 91% lower latency) are <em>structurally</em>
+robust — selective top-k mechanically beats reprocessing full history. We bank these
+near-tautological savings on day one, before touching any model.</div>
+
+<h3>Relationships — a lightweight, visible property graph</h3>
+<p>Memory isn't just isolated facts; OB-1 also stores <strong>entities and the typed relationships
+between them</strong> — <code>LoginController —calls→ AuthService</code>,
+<code>AuthService —issues→ JWT</code> — as a property graph in the same SQLite file as the fact store.
+Following Graphiti's <strong>bi-temporal</strong> model <span class="ref">(R8)</span>, each edge carries
+a validity window and is <em>invalidated, not deleted</em> when things change, so OB-1 can answer
+"what did the auth flow look like three refactors ago?" The graph <strong>renders directly</strong> in
+the <code>/memory</code> viewer (or an HTML / Neo4j export) — this is the "very visible" part.</p>
+
+<figure>
+<svg viewBox="0 0 960 250" role="img" aria-label="Relationship graph model">
+  <defs><marker id="arg" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#0d9488"/></marker></defs>
+
+  <ellipse cx="150" cy="78" rx="76" ry="33" fill="#fff" stroke="var(--persona)" stroke-width="2"/>
+  <text x="150" y="76" text-anchor="middle" font-size="12" font-weight="700">User</text>
+  <text x="150" y="92" text-anchor="middle" font-size="9" fill="#555">entity</text>
+
+  <ellipse cx="470" cy="78" rx="94" ry="33" fill="#fff" stroke="var(--persona)" stroke-width="2"/>
+  <text x="470" y="74" text-anchor="middle" font-size="12" font-weight="700">AuthService</text>
+  <text x="470" y="90" text-anchor="middle" font-size="9" fill="#555">entity · summary evolves</text>
+
+  <ellipse cx="800" cy="78" rx="74" ry="33" fill="#fff" stroke="var(--persona)" stroke-width="2"/>
+  <text x="800" y="76" text-anchor="middle" font-size="12" font-weight="700">JWT</text>
+  <text x="800" y="92" text-anchor="middle" font-size="9" fill="#555">entity</text>
+
+  <ellipse cx="470" cy="200" rx="98" ry="33" fill="#fff" stroke="var(--persona)" stroke-width="2"/>
+  <text x="470" y="198" text-anchor="middle" font-size="12" font-weight="700">LoginController</text>
+  <text x="470" y="214" text-anchor="middle" font-size="9" fill="#555">entity</text>
+
+  <line x1="226" y1="78" x2="372" y2="78" stroke="#0d9488" stroke-width="2" marker-end="url(#arg)"/>
+  <text x="299" y="70" text-anchor="middle" font-size="10" fill="var(--persona)">authenticated_by</text>
+
+  <line x1="566" y1="78" x2="722" y2="78" stroke="#0d9488" stroke-width="2" marker-end="url(#arg)"/>
+  <text x="644" y="70" text-anchor="middle" font-size="10" fill="var(--persona)">issues</text>
+
+  <line x1="470" y1="167" x2="470" y2="113" stroke="#0d9488" stroke-width="2" marker-end="url(#arg)"/>
+  <text x="478" y="142" text-anchor="start" font-size="10" fill="var(--persona)">calls</text>
+
+  <rect x="610" y="150" width="330" height="86" rx="10" fill="#f6f6f6" stroke="#000"/>
+  <text x="775" y="172" text-anchor="middle" font-size="11" font-weight="700">Bi-temporal edge (Graphiti-style)</text>
+  <text x="775" y="190" text-anchor="middle" font-size="10" fill="#555">issues · valid: 2026-01 → now</text>
+  <text x="775" y="206" text-anchor="middle" font-size="10" fill="#555">old fact invalidated, NOT deleted</text>
+  <text x="775" y="222" text-anchor="middle" font-size="10" fill="#555">→ query "what was true when"</text>
+</svg>
+  <figcaption>Diagram 3b — The relationship graph. Entities are nodes; typed, time-stamped edges are the relationships. Stored relationally in SQLite (cheap), rendered for inspection, traversed only in bounded neighborhoods at retrieval time.</figcaption>
+</figure>
+
+<div class="callout warn"><h4>The graph cost-control rule (R8)</h4>Graph <em>storage</em> is cheap, but
+graph-heavy <em>retrieval</em> is what cost Mem0's graph variant <strong>~2× tokens and ~3× latency
+for only ~2% accuracy</strong>. So OB-1 stores the full graph and visualizes it, but by default injects
+only <strong>top-k facts + a bounded 1–2 hop neighborhood</strong> — never the whole graph. Full
+multi-hop traversal is opt-in, for queries that genuinely need temporal/relational reasoning.</div>
+
+<!-- ================= MODES ================= -->
+<h2 id="modes"><span class="n">06</span>The four modes</h2>
+<p>One workhorse and three escalations. The CLI default is Solo; users switch with
+<code>/mode fusion|council|personas</code> or OB-1 can <em>suggest</em> an escalation when it detects
+a hard/high-value task. Each mode declares a token budget up front so cost is never a surprise.</p>
+
+<figure>
+<svg viewBox="0 0 960 300" role="img" aria-label="Mode decision tree">
+  <defs><marker id="ar3" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#000"/></marker></defs>
+  <rect x="380" y="20" width="200" height="54" rx="10" fill="#f6f6f6" stroke="#000"/>
+  <text x="480" y="42" text-anchor="middle" font-size="13" font-weight="800">Incoming task</text>
+  <text x="480" y="60" text-anchor="middle" font-size="11" fill="#555">how hard / how high-value?</text>
+
+  <rect x="380" y="120" width="200" height="60" rx="10" fill="#fff" stroke="var(--solo)" stroke-width="3"/>
+  <text x="480" y="144" text-anchor="middle" font-size="13" font-weight="800" fill="#444">SOLO · default</text>
+  <text x="480" y="162" text-anchor="middle" font-size="10.5" fill="#555">most coding · cheapest · 1×</text>
+
+  <rect x="40" y="225" width="270" height="62" rx="10" fill="#fff" stroke="var(--fusion)" stroke-width="3"/>
+  <text x="175" y="249" text-anchor="middle" font-size="13" font-weight="800" fill="var(--fusion)">FUSION</text>
+  <text x="175" y="267" text-anchor="middle" font-size="10.5" fill="#555">"give me the best possible answer" · breadth · N×</text>
+
+  <rect x="345" y="225" width="270" height="62" rx="10" fill="#fff" stroke="var(--council)" stroke-width="3"/>
+  <text x="480" y="249" text-anchor="middle" font-size="13" font-weight="800" fill="var(--council)">COUNCIL</text>
+  <text x="480" y="267" text-anchor="middle" font-size="10.5" fill="#555">"must be correct / low-risk" · verify · N×+rounds</text>
+
+  <rect x="650" y="225" width="270" height="62" rx="10" fill="#fff" stroke="var(--persona)" stroke-width="3"/>
+  <text x="785" y="249" text-anchor="middle" font-size="13" font-weight="800" fill="var(--persona)">PERSONAS</text>
+  <text x="785" y="267" text-anchor="middle" font-size="10.5" fill="#555">"design needs many lenses" · breadth of view · N×</text>
+
+  <line x1="480" y1="74" x2="480" y2="118" stroke="#000" marker-end="url(#ar3)"/>
+  <path d="M420,180 L175,180 L175,223" fill="none" stroke="#000" stroke-dasharray="4 3" marker-end="url(#ar3)"/>
+  <path d="M480,180 L480,223" fill="none" stroke="#000" stroke-dasharray="4 3" marker-end="url(#ar3)"/>
+  <path d="M540,180 L785,180 L785,223" fill="none" stroke="#000" stroke-dasharray="4 3" marker-end="url(#ar3)"/>
+  <text x="240" y="205" font-size="10" fill="#555">escalate</text>
+</svg>
+  <figcaption>Diagram 4 — Mode selection. Solo handles the bulk; the three multi-mind modes are deliberate, budgeted escalations for hard, correctness-critical, or design-heavy work.</figcaption>
+</figure>
+
+<table>
+  <thead><tr><th>Mode</th><th>Question it answers</th><th>Topology</th><th>Token cost</th><th>Research basis</th></tr></thead>
+  <tbody>
+    <tr><td><span class="pill solo">Solo</span></td><td>"Just do it well."</td><td>Single gated agent</td><td>1× (baseline)</td><td class="ref">R5 — single agents win at equal budget</td></tr>
+    <tr><td><span class="pill fusion">Fusion</span></td><td>"Give me the best possible answer."</td><td>Parallel fan-out → synthesize</td><td>~N× + synth</td><td class="ref">R5 — parallelizable; R-deep-research best-of-N</td></tr>
+    <tr><td><span class="pill council">Council</span></td><td>"This must be correct."</td><td>Draft → cross-critique rounds → converge</td><td>~N× × rounds</td><td class="ref">R2/R5 — verification beats generation</td></tr>
+    <tr><td><span class="pill persona">Personas</span></td><td>"Look at this from every angle."</td><td>Role panel → blackboard → lead synthesis</td><td>~N×</td><td class="ref">R6 — MetaGPT role pipeline (made dynamic)</td></tr>
+  </tbody>
+</table>
+
+<!-- FUSION -->
+<h3 id="fusion"><span class="pill fusion">Fusion</span> &nbsp;Best-of-N synthesis</h3>
+<p>The same fully-specified task is dispatched to several models (and/or the same model at
+different temperatures/strategies) running in <strong>isolated context windows</strong>. Each returns
+a complete candidate. An <strong>aggregator</strong> — a strong synthesizer model — reads all
+candidates plus their diffs/test results and produces one final answer, grafting the best parts of
+each. Optionally each candidate is auto-scored (compile/tests) so the synthesizer is grounded in
+real signal, not vibes.</p>
+
+<figure>
+<svg viewBox="0 0 960 250" role="img" aria-label="Fusion mode diagram">
+  <defs><marker id="arf" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="var(--fusion)"/></marker></defs>
+  <rect x="20" y="100" width="150" height="50" rx="10" fill="#fff" stroke="var(--fusion)" stroke-width="2"/>
+  <text x="95" y="122" text-anchor="middle" font-size="12.5" font-weight="700">Task spec</text>
+  <text x="95" y="139" text-anchor="middle" font-size="10" fill="#555">+ shared context</text>
+
+  <rect x="270" y="30" width="180" height="48" rx="10" fill="#fff" stroke="var(--fusion)"/>
+  <text x="360" y="52" text-anchor="middle" font-size="12" font-weight="700">Model A · worker</text>
+  <text x="360" y="68" text-anchor="middle" font-size="10" fill="#555">isolated window</text>
+  <rect x="270" y="100" width="180" height="48" rx="10" fill="#fff" stroke="var(--fusion)"/>
+  <text x="360" y="122" text-anchor="middle" font-size="12" font-weight="700">Model B · worker</text>
+  <text x="360" y="138" text-anchor="middle" font-size="10" fill="#555">isolated window</text>
+  <rect x="270" y="170" width="180" height="48" rx="10" fill="#fff" stroke="var(--fusion)"/>
+  <text x="360" y="192" text-anchor="middle" font-size="12" font-weight="700">Model C · worker</text>
+  <text x="360" y="208" text-anchor="middle" font-size="10" fill="#555">isolated window</text>
+
+  <rect x="520" y="70" width="150" height="108" rx="10" fill="#f6f6f6" stroke="var(--fusion)" stroke-width="2"/>
+  <text x="595" y="112" text-anchor="middle" font-size="12.5" font-weight="800">Auto-score</text>
+  <text x="595" y="130" text-anchor="middle" font-size="10" fill="#555">compile · tests</text>
+  <text x="595" y="150" text-anchor="middle" font-size="10" fill="#555">(grounding signal)</text>
+
+  <rect x="740" y="80" width="190" height="88" rx="10" fill="#fff" stroke="var(--fusion)" stroke-width="3"/>
+  <text x="835" y="118" text-anchor="middle" font-size="13" font-weight="800" fill="var(--fusion)">Synthesizer</text>
+  <text x="835" y="136" text-anchor="middle" font-size="10.5" fill="#555">grafts best parts</text>
+  <text x="835" y="152" text-anchor="middle" font-size="10.5" fill="#555">→ final answer</text>
+
+  <line x1="170" y1="120" x2="266" y2="54" stroke="var(--fusion)" marker-end="url(#arf)"/>
+  <line x1="170" y1="125" x2="266" y2="124" stroke="var(--fusion)" marker-end="url(#arf)"/>
+  <line x1="170" y1="130" x2="266" y2="194" stroke="var(--fusion)" marker-end="url(#arf)"/>
+  <line x1="450" y1="54" x2="516" y2="95" stroke="var(--fusion)" marker-end="url(#arf)"/>
+  <line x1="450" y1="124" x2="516" y2="124" stroke="var(--fusion)" marker-end="url(#arf)"/>
+  <line x1="450" y1="194" x2="516" y2="153" stroke="var(--fusion)" marker-end="url(#arf)"/>
+  <line x1="670" y1="124" x2="736" y2="124" stroke="var(--fusion)" stroke-width="2" marker-end="url(#arf)"/>
+</svg>
+  <figcaption>Diagram 5 — Fusion. Parallel candidates in isolated windows, grounded by auto-scoring, then synthesized into one answer.</figcaption>
+</figure>
+<p class="ref"><strong>When to use:</strong> hard, high-value, parallelizable tasks (a tricky
+algorithm, an ambiguous design). <strong>Honest caveat (R5):</strong> cost scales ~N×; much of the
+benefit of "more agents" correlates with raw compute, so Fusion must be compute-matched against Solo
+in the eval harness before it's recommended by default.</p>
+
+<!-- COUNCIL -->
+<h3 id="council"><span class="pill council">Council</span> &nbsp;Critique &amp; converge</h3>
+<p>Models produce drafts, then each <strong>adversarially critiques the others</strong> — prompted to
+<em>refute</em>, not flatter — across one or more rounds. Authors revise against the critiques; an
+arbiter checks whether objections are resolved and declares convergence (or escalates to the user).
+To respect the research, critics are given <strong>distinct lenses</strong> (correctness, security,
+performance, does-it-actually-reproduce) rather than N identical reviewers — diversity catches failure
+modes redundancy can't.</p>
+
+<figure>
+<svg viewBox="0 0 960 260" role="img" aria-label="Council mode diagram">
+  <defs><marker id="arc" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="var(--council)"/></marker></defs>
+  <text x="120" y="24" text-anchor="middle" font-size="12" font-weight="800" fill="var(--council)">Round 1 · draft</text>
+  <rect x="40" y="40" width="160" height="44" rx="9" fill="#fff" stroke="var(--council)"/><text x="120" y="67" text-anchor="middle" font-size="11.5">Agent A draft</text>
+  <rect x="40" y="100" width="160" height="44" rx="9" fill="#fff" stroke="var(--council)"/><text x="120" y="127" text-anchor="middle" font-size="11.5">Agent B draft</text>
+  <rect x="40" y="160" width="160" height="44" rx="9" fill="#fff" stroke="var(--council)"/><text x="120" y="187" text-anchor="middle" font-size="11.5">Agent C draft</text>
+
+  <text x="455" y="24" text-anchor="middle" font-size="12" font-weight="800" fill="var(--council)">Round 2 · cross-critique (distinct lenses)</text>
+  <rect x="360" y="40" width="190" height="44" rx="9" fill="#f6f6f6" stroke="var(--council)"/><text x="455" y="61" text-anchor="middle" font-size="11">critique: correctness</text><text x="455" y="76" text-anchor="middle" font-size="9.5" fill="#555">tries to refute</text>
+  <rect x="360" y="100" width="190" height="44" rx="9" fill="#f6f6f6" stroke="var(--council)"/><text x="455" y="121" text-anchor="middle" font-size="11">critique: security</text><text x="455" y="136" text-anchor="middle" font-size="9.5" fill="#555">tries to refute</text>
+  <rect x="360" y="160" width="190" height="44" rx="9" fill="#f6f6f6" stroke="var(--council)"/><text x="455" y="181" text-anchor="middle" font-size="11">critique: perf / repro</text><text x="455" y="196" text-anchor="middle" font-size="9.5" fill="#555">tries to refute</text>
+
+  <rect x="620" y="78" width="150" height="90" rx="10" fill="#fff" stroke="var(--council)"/><text x="695" y="116" text-anchor="middle" font-size="12" font-weight="700">Revise</text><text x="695" y="134" text-anchor="middle" font-size="10" fill="#555">address objections</text>
+  <rect x="800" y="80" width="140" height="86" rx="10" fill="#fff" stroke="var(--council)" stroke-width="3"/><text x="870" y="116" text-anchor="middle" font-size="12.5" font-weight="800" fill="var(--council)">Arbiter</text><text x="870" y="134" text-anchor="middle" font-size="10" fill="#555">converged → final</text>
+
+  <line x1="200" y1="62" x2="356" y2="62" stroke="var(--council)" marker-end="url(#arc)"/>
+  <line x1="200" y1="122" x2="356" y2="122" stroke="var(--council)" marker-end="url(#arc)"/>
+  <line x1="200" y1="182" x2="356" y2="182" stroke="var(--council)" marker-end="url(#arc)"/>
+  <line x1="550" y1="62" x2="616" y2="100" stroke="var(--council)" marker-end="url(#arc)"/>
+  <line x1="550" y1="122" x2="616" y2="122" stroke="var(--council)" marker-end="url(#arc)"/>
+  <line x1="550" y1="182" x2="616" y2="146" stroke="var(--council)" marker-end="url(#arc)"/>
+  <line x1="770" y1="123" x2="797" y2="123" stroke="var(--council)" stroke-width="2" marker-end="url(#arc)"/>
+  <path d="M870,166 L870,225 L120,225 L120,208" fill="none" stroke="var(--council)" stroke-dasharray="4 3" marker-end="url(#arc)"/>
+  <text x="430" y="243" font-size="10" fill="#555">not converged → another round</text>
+</svg>
+  <figcaption>Diagram 6 — Council. Drafts are cross-examined by lens-specialized critics prompted to refute; authors revise; an arbiter declares convergence or runs another round.</figcaption>
+</figure>
+<p class="ref"><strong>When to use:</strong> correctness-critical or risky changes (auth, migrations,
+money). <strong>Honest caveat (R5):</strong> coordination/critique adds a distinct failure class and
+real cost; a critic only helps if it's genuinely better than the generator — so Council uses
+strong models as critics and caps rounds.</p>
+
+<!-- PERSONAS -->
+<h3 id="personas"><span class="pill persona">Personas</span> &nbsp;Dynamic role panel</h3>
+<p>OB-1 inspects the task and <strong>forms the personas it actually needs</strong> — e.g. Architect,
+Security Auditor, Performance Engineer, API Designer, and a standing Skeptic. Each works its angle and
+posts findings to a shared <strong>blackboard</strong> (durable shared state, which R5 names as the
+antidote to multi-agent fragility). A lead persona integrates the board into a final plan/answer. This
+is MetaGPT's role pipeline (R6) made <em>dynamic</em> instead of a fixed five-role waterfall.</p>
+
+<figure>
+<svg viewBox="0 0 960 250" role="img" aria-label="Personas mode diagram">
+  <defs><marker id="arp" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="var(--persona)"/></marker></defs>
+  <rect x="20" y="95" width="150" height="58" rx="10" fill="#fff" stroke="var(--persona)" stroke-width="2"/>
+  <text x="95" y="118" text-anchor="middle" font-size="12.5" font-weight="700">Persona Former</text>
+  <text x="95" y="135" text-anchor="middle" font-size="10" fill="#555">picks roles for task</text>
+
+  <rect x="240" y="20" width="150" height="40" rx="9" fill="#fff" stroke="var(--persona)"/><text x="315" y="44" text-anchor="middle" font-size="11">Architect</text>
+  <rect x="240" y="68" width="150" height="40" rx="9" fill="#fff" stroke="var(--persona)"/><text x="315" y="92" text-anchor="middle" font-size="11">Security Auditor</text>
+  <rect x="240" y="116" width="150" height="40" rx="9" fill="#fff" stroke="var(--persona)"/><text x="315" y="140" text-anchor="middle" font-size="11">Performance Eng.</text>
+  <rect x="240" y="164" width="150" height="40" rx="9" fill="#fff" stroke="var(--persona)"/><text x="315" y="188" text-anchor="middle" font-size="11">Skeptic</text>
+
+  <rect x="470" y="55" width="190" height="120" rx="12" fill="#f6f6f6" stroke="var(--persona)" stroke-width="2"/>
+  <text x="565" y="92" text-anchor="middle" font-size="12.5" font-weight="800">Blackboard</text>
+  <text x="565" y="112" text-anchor="middle" font-size="10" fill="#555">durable shared state</text>
+  <text x="565" y="130" text-anchor="middle" font-size="10" fill="#555">findings · constraints</text>
+  <text x="565" y="148" text-anchor="middle" font-size="10" fill="#555">open questions</text>
+
+  <rect x="740" y="80" width="190" height="92" rx="10" fill="#fff" stroke="var(--persona)" stroke-width="3"/>
+  <text x="835" y="118" text-anchor="middle" font-size="13" font-weight="800" fill="var(--persona)">Lead synthesis</text>
+  <text x="835" y="136" text-anchor="middle" font-size="10.5" fill="#555">integrates board</text>
+  <text x="835" y="152" text-anchor="middle" font-size="10.5" fill="#555">→ final plan/answer</text>
+
+  <line x1="170" y1="120" x2="236" y2="40" stroke="var(--persona)" marker-end="url(#arp)"/>
+  <line x1="170" y1="122" x2="236" y2="88" stroke="var(--persona)" marker-end="url(#arp)"/>
+  <line x1="170" y1="126" x2="236" y2="136" stroke="var(--persona)" marker-end="url(#arp)"/>
+  <line x1="170" y1="130" x2="236" y2="184" stroke="var(--persona)" marker-end="url(#arp)"/>
+  <line x1="390" y1="40" x2="466" y2="80" stroke="var(--persona)" marker-end="url(#arp)"/>
+  <line x1="390" y1="88" x2="466" y2="100" stroke="var(--persona)" marker-end="url(#arp)"/>
+  <line x1="390" y1="136" x2="466" y2="125" stroke="var(--persona)" marker-end="url(#arp)"/>
+  <line x1="390" y1="184" x2="466" y2="150" stroke="var(--persona)" marker-end="url(#arp)"/>
+  <line x1="660" y1="118" x2="736" y2="120" stroke="var(--persona)" stroke-width="2" marker-end="url(#arp)"/>
+</svg>
+  <figcaption>Diagram 7 — Personas. Roles are formed for the task, collaborate through a durable blackboard (not fragile message-passing), and a lead integrates the board.</figcaption>
+</figure>
+<p class="ref"><strong>When to use:</strong> open-ended design, architecture reviews, "what am I
+missing?" <strong>Honest caveat (R5/R6):</strong> rigid role pipelines can over-engineer simple tasks;
+the Former is allowed to pick <em>one</em> persona (collapsing to Solo) when the task doesn't warrant a panel.</p>
+
+<!-- ================= TOKEN OPT ================= -->
+<h2 id="tokens"><span class="n">07</span>Token-optimization strategy</h2>
+<p>Two buckets: <strong>structural</strong> savings (always on, near-tautological) and
+<strong>behavioral</strong> savings (discipline the runtime enforces).</p>
+<div class="grid2">
+  <div class="card"><h4>Structural — always on</h4>
+    <ul>
+      <li><strong>Prompt caching</strong>: reuse the unchanged prefix; cache-read ≈ 10% of input cost <span class="ref">(R1)</span></li>
+      <li><strong>Tiered memory</strong>: &lt;200-line index + on-demand topic files <span class="ref">(R3)</span></li>
+      <li><strong>Repo map</strong> instead of whole files <span class="ref">(R4)</span></li>
+      <li><strong>Diff edit formats</strong>: return only changed lines <span class="ref">(R4)</span></li>
+      <li><strong>Deferred MCP tool defs</strong>: only names until used <span class="ref">(R1)</span></li>
+    </ul>
+  </div>
+  <div class="card"><h4>Behavioral — runtime-enforced</h4>
+    <ul>
+      <li><strong>Lock model + effort at session start</strong>; warn on mid-task model switch (cache invalidation) <span class="ref">(R1)</span></li>
+      <li><strong>Auto-compaction + context editing</strong>: evict stale tool results near the limit <span class="ref">(R3)</span></li>
+      <li><strong>Top-k retrieval</strong>, dedup, keep deltas not full history <span class="ref">(R3)</span></li>
+      <li><strong>Model tiering</strong>: cheap workers (Haiku-class), strong synthesizer only where it counts <span class="ref">(R1)</span></li>
+      <li><strong>Sub-agent isolation</strong>: workers compress results back, keeping orchestrator lean <span class="ref">(R5)</span></li>
+    </ul>
+  </div>
+</div>
+<div class="callout warn"><h4>The cost honesty rule</h4><strong>Multi-mind modes increase <em>total</em>
+tokens (≈4–15×), even as they reduce orchestrator context.</strong> OB-1 shows a live per-mode token
+budget and post-run cost, and the eval harness must show a mode beating Solo <em>at equal tokens</em>
+before OB-1 ever auto-suggests it <span class="ref">(R5)</span>.</div>
+
+<!-- ================= WORKSPACE ================= -->
+<h2 id="workspace"><span class="n">08</span>Workspace intelligence</h2>
+<div class="grid2">
+  <div class="card"><h3>Repository map</h3>
+    <p>Parse with <strong>tree-sitter</strong> → ASTs of every definition; rank with a
+    <strong>PageRank</strong>-style graph over the file-dependency graph; inject only the
+    most-referenced symbols that fit the budget. SQLite-cached, incremental, 100+ languages
+    <span class="ref">(R4 — the Aider pattern)</span>.</p></div>
+  <div class="card"><h3>Project memory at init</h3>
+    <p>On first run OB-1 generates <code>AGENTS.md</code>: build/test commands, conventions, and
+    architecture notes it discovers — the converging cross-tool standard <span class="ref">(R6)</span>.
+    Detailed notes spill into on-demand topic files referenced from the index.</p></div>
+</div>
+
+<!-- ================= TOOLS ================= -->
+<h2 id="tools"><span class="n">09</span>Tools, skills &amp; safety</h2>
+<div class="grid3">
+  <div class="card"><h3>MCP-native tools</h3><p>First-class MCP client (stdio/http/sse) — the de-facto standard across Cline, Goose, Gemini CLI, Crush <span class="ref">(R6)</span>. Tool defs deferred until used. Prefer plain CLI tools (<code>gh</code>, <code>git</code>) where they're more context-efficient <span class="ref">(R1)</span>.</p></div>
+  <div class="card"><h3>On-demand skills</h3><p>A Skills system loaded only when invoked — specialized playbooks live outside base context to keep it small <span class="ref">(R1)</span>. Skills compose with every mode.</p></div>
+  <div class="card"><h3>Gated autonomy</h3><p>Plan/Act modes, per-action approval, auto-approve allowlists with destructive-command gating, and OS sandbox (Seatbelt / bwrap+seccomp), network-off by default <span class="ref">(R6 — Cline + Codex CLI)</span>.</p></div>
+</div>
+
+<!-- ================= ROADMAP ================= -->
+<h2 id="roadmap"><span class="n">10</span>Implementation roadmap</h2>
+<p>Ship the workhorse first; add modes only once the foundation and the eval harness exist (so each
+mode can be proven, not assumed).</p>
+<div class="timeline">
+  <div class="phase"><b>PHASE 0</b><p><strong>Solo core.</strong> CLI/TUI, gated loop, diff edit engine, approval, provider gateway.</p></div>
+  <div class="phase"><b>PHASE 1</b><p><strong>Context engine.</strong> Repo map, tiered memory, JIT+top-k, compaction, token meter.</p></div>
+  <div class="phase"><b>PHASE 2</b><p><strong>Tools.</strong> MCP client, Skills, sandbox + permissions, <code>AGENTS.md</code>.</p></div>
+  <div class="phase"><b>PHASE 3</b><p><strong>Multi-mind runtime.</strong> Parallel spawner, isolated worker contexts, result compression.</p></div>
+  <div class="phase"><b>PHASE 4</b><p><strong>Fusion</strong> + auto-scoring + synthesizer.</p></div>
+  <div class="phase"><b>PHASE 5</b><p><strong>Council</strong> + lens-specialized critics + arbiter.</p></div>
+  <div class="phase"><b>PHASE 6</b><p><strong>Personas</strong> + blackboard + dynamic former.</p></div>
+  <div class="phase"><b>PHASE 7</b><p><strong>Eval harness.</strong> Compute-matched SWE-bench-style proof each mode beats Solo.</p></div>
+</div>
+
+<!-- ================= STACK ================= -->
+<h2 id="stack"><span class="n">11</span>Recommended stack</h2>
+<table>
+  <thead><tr><th>Concern</th><th>Choice</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Language / runtime</td><td>TypeScript + Node (Bun optional)</td><td>Richest MCP + provider SDK ecosystem; Cline/Codex precedent. Rust (Goose/Crush precedent) is the alternative if a single static binary + speed matter more.</td></tr>
+    <tr><td>TUI</td><td>Ink (React for CLIs)</td><td>Streaming output, diff viewer, approval prompts, live token meter.</td></tr>
+    <tr><td>Tools</td><td>Official MCP SDK</td><td>The converging standard (R6).</td></tr>
+    <tr><td>Repo map</td><td>tree-sitter + a graph lib + SQLite cache</td><td>Proven Aider design (R4).</td></tr>
+    <tr><td>Memory store</td><td>SQLite + sqlite-vec + a relationship-edges table</td><td>Plain-text fact records + immutable revisions (Memory Bank model), top-k retrieval, and a lightweight bi-temporal property graph — all in one SQLite file (R3, R7, R8).</td></tr>
+    <tr><td>Provider gateway</td><td>Thin multi-LLM abstraction (OpenAI/Anthropic-compatible + local)</td><td>Model tiering, cache-aware routing, mid-session switching (R6).</td></tr>
+    <tr><td>Sandbox</td><td>Seatbelt (macOS) · bwrap+seccomp (Linux)</td><td>Matches Codex CLI; network-off default (R6).</td></tr>
+    <tr><td>Multi-mind runtime</td><td>In-process async workers, each its own context window object</td><td>Isolation without process overhead; deterministic orchestration (R5).</td></tr>
+  </tbody>
+</table>
+
+<!-- ================= RISKS ================= -->
+<h2 id="risks"><span class="n">12</span>Risks, tradeoffs &amp; honest caveats</h2>
+<table>
+  <thead><tr><th>Risk</th><th>Mitigation</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Modes burn tokens without beating Solo</strong> — most of multi-agent's "gain" tracks raw compute (R5).</td><td>Default Solo; budget every mode; gate auto-suggestion behind compute-matched eval wins (Phase 7).</td></tr>
+    <tr><td><strong>Coordination failures</strong> — a distinct error class that grows with communication complexity (R5).</td><td>Prefer simple topologies; use a durable blackboard over chatty message-passing; cap rounds; hard termination + budget control.</td></tr>
+    <tr><td><strong>Weak critics add cost, not quality</strong> — self-repair is bottlenecked by critique quality (R2).</td><td>Council critics are strong models with distinct lenses; arbiter requires objections actually resolved.</td></tr>
+    <tr><td><strong>Context rot</strong> — more agents/notes ≠ better recall (R3).</td><td>Aggressive compaction/eviction; workers return compressed results only.</td></tr>
+    <tr><td><strong>Graph memory bloats cost</strong> — ~2× tokens / ~3× latency for ~2% accuracy (R8).</td><td>Store the graph cheaply in SQLite; inject only top-k facts + bounded 1–2 hop neighborhoods; full traversal is opt-in.</td></tr>
+    <tr><td><strong>Cache invalidation</strong> from mid-session model switching (R1).</td><td>Lock model/effort per session; Fusion/Council pin worker models for the run.</td></tr>
+    <tr><td><strong>Vendor benchmark hype</strong> — headline % often unreproducible (R1, R5).</td><td>Trust structural efficiency numbers; prove quality claims in-house, compute-matched.</td></tr>
+    <tr><td><strong>Edit-apply reliability</strong> — diffs save tokens but can mis-apply on small files (R4).</td><td>Lenient/flexible patch application + high-level diffs + auto-retry on apply failure.</td></tr>
+  </tbody>
+</table>
+
+<div class="callout"><h4>The one-sentence thesis</h4>OB-1 wins not by always throwing more models at
+a problem, but by being a <strong>ruthlessly token-frugal single agent by default</strong> that can
+summon <strong>Fusion, Council, or Personas</strong> when — and only when — the task is worth the spend,
+with an eval harness that keeps everyone honest.</div>
+
+<footer>
+  OB-1 build plan · generated 2026-06-19 from six adversarially-verified research reports in
+  <code>research/</code>. White paper, black text, hand-built SVG/CSS diagrams. Every claim is
+  traceable to a report (R1–R6) and carries its caveat — efficiency numbers are structural and
+  trusted; quality/superiority numbers must be proven compute-matched before they ship.
+</footer>
+
+</div>
+</body>
+</html>

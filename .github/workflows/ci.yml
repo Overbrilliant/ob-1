@@ -1,0 +1,99 @@
+name: ci
+
+# Wires the deterministic suite AND the two opt-in live tests (MCP interop vs the official reference
+# server; bubblewrap sandbox enforcement on real Linux) into CI, plus a real-PTY TUI raw-mode test.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Hermetic: typecheck + every no-key/no-network smoke + the real-PTY TUI test ─────────────────
+  checks:
+    name: typecheck · smokes · TUI (PTY)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Install pyte (terminal emulator for the TUI persistence assertion)
+        run: pip install pyte
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Deterministic smoke suite
+        run: bun run scripts/ci-smokes.ts
+      - name: TUI raw-mode e2e (real pseudo-terminal)
+        run: python3 scripts/tui-pty.py
+      - name: TUI streaming e2e (gap · no overflow garbage · pinned input)
+        run: python3 scripts/stream-pty.py
+
+  # ── Live interop: the two tests that need network / a real Linux sandbox ────────────────────────
+  live:
+    name: live interop (MCP reference server · bwrap)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - uses: actions/setup-node@v5 # provides npx for the reference MCP server
+        with:
+          node-version: 20
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Install bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Allow unprivileged user namespaces
+        # Ubuntu 24.04 restricts unprivileged userns via AppArmor, which would make wrapCommand()
+        # degrade and the enforcement test self-skip. Re-enable so bwrap REALLY enforces.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: MCP interop vs official @modelcontextprotocol/server-everything
+        run: bun run scripts/mcp-interop.ts
+      - name: Bubblewrap sandbox enforcement (network denied + writes confined)
+        run: bun run scripts/bwrap-enforce.ts
+
+  # ── Optional: real authenticated CLOUD MCP server (GitHub remote). Manual-only so it never gates
+  #    push/PR, and self-skips if the GH_MCP_TOKEN secret is unset. ─────────────────────────────────
+  github-mcp:
+    name: authenticated cloud MCP (GitHub remote)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Probe GitHub remote MCP server (read-only)
+        env:
+          GITHUB_MCP_TOKEN: ${{ secrets.GH_MCP_TOKEN }}
+        run: bun run scripts/mcp-github-live.ts
+
+  # ── Optional: real SearXNG web-search endpoint. Manual-only; self-skips if the secrets are unset. ──
+  web-live:
+    name: live web search (SearXNG)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Probe the SearXNG web-search API (correct/wrong/missing key + web_fetch)
+        env:
+          OB1_SEARXNG_URL: ${{ secrets.OB1_SEARXNG_URL }}
+          OB1_SEARXNG_KEY: ${{ secrets.OB1_SEARXNG_KEY }}
+        run: bun run scripts/web-live.ts

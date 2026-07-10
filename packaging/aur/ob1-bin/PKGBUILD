@@ -1,0 +1,19 @@
+# Maintainer: Overbrilliant <support@overbrilliant.com>
+pkgname=ob1-bin
+pkgver=0.1.3
+pkgrel=1
+pkgdesc="OB-1, the free open-source CLI coding agent"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Overbrilliant/ob-1"
+license=('Apache-2.0')
+provides=('ob1')
+conflicts=('ob1' 'ob1-git')
+
+source_x86_64=("ob1-${pkgver}-linux-x64.tar.gz::https://github.com/Overbrilliant/ob-1/releases/download/v${pkgver}/ob1-linux-x64.tar.gz")
+source_aarch64=("ob1-${pkgver}-linux-arm64.tar.gz::https://github.com/Overbrilliant/ob-1/releases/download/v${pkgver}/ob1-linux-arm64.tar.gz")
+sha256sums_x86_64=('PUT_RELEASE_SHA256_HERE')
+sha256sums_aarch64=('PUT_RELEASE_SHA256_HERE')
+
+package() {
+  install -Dm755 "${srcdir}/ob1" "${pkgdir}/usr/bin/ob1"
+}

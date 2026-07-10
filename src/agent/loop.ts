@@ -1,0 +1,1033 @@
+// The gated agent loop (Phase 0) — the heart of Solo mode.
+// ReAct: the model reasons, calls tools, observes results, repeats until end_turn.
+// Plan/Act gate + per-action approval sit before every mutating tool (R6).
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { callModel, isRetryable, type Message, type ContentBlock, type ToolDef, type Usage, type SystemBlock } from "../providers/gateway.ts";
+import { modelSpec, isRouterModel, supportsEffort } from "../providers/models.ts";
+import { isDestructiveCall, normalizeToolOutput, toolCallChangesWorkspace, toolCallWritesFiles, toolCallMutates, toolResultContent, type Tool, type ReadCache } from "./tools.ts";
+import { classifyIntent } from "../safety/bash-validation.ts";
+import { recoveryHint } from "./recovery.ts";
+import { evaluatePolicy, type PolicyRule } from "../safety/policy.ts";
+import type { ApprovalStore } from "./approval-tokens.ts";
+import { runHooks, type HookConfig, type HookExec } from "./hooks.ts";
+import { isOpenRouterEndpoint, type Config } from "../config.ts";
+import type { MemoryStore, Fact } from "../memory/store.ts";
+import { loadAgentsMd, generateAgentsMd } from "../context/agents.ts";
+import { listTopics } from "../context/topics.ts";
+import { repoMapSummary, invalidateRepoMap } from "../context/repomap.ts";
+import { listSkills } from "../skills/registry.ts";
+import { editContext, compactIfNeeded, summaryPrompt } from "./context.ts";
+import { detectChecks } from "./verify.ts";
+import { QualityRun, renderTaskQualityContract } from "./task-quality.ts";
+import { c, renderDiff, renderFriendly, explainError } from "../cli/ui.ts";
+import { runWorker, type WorkerEvent } from "../multimind/runtime.ts";
+import { runSubagents, formatSubagentFindings, writeSubagentReport, reportEnabled, MAX_SUBTASKS, type SubagentTask } from "../multimind/subagents.ts";
+import { runWriteSubagents, applyMerge, type WriteAssignment } from "../multimind/subagents-write.ts";
+import type { AgentRegistry } from "./agent-registry.ts";
+
+export interface TurnDeps {
+  cfg: Config;
+  tools: Map<string, Tool>;
+  store: MemoryStore;
+  /** Per-turn read-dedup cache shared with `tools`' read_file. The loop clears it at turn start and
+   *  on every context eviction so a dedup pointer can never reference content no longer in history. */
+  readCache?: ReadCache;
+  approve: (desc: string) => Promise<boolean>;
+  /** Whether an interactive approval prompt is actually possible (a TTY). FALSE for a piped / non-TTY
+   *  session, where `approve` can't prompt and so returns false at stdin EOF — used to explain a denial
+   *  as "auto-denied, can't prompt" rather than a misleading "user denied". Undefined ⇒ assume interactive. */
+  interactive?: boolean;
+  log: (s: string) => void;
+  /** Emit a single deduped blank line between stream blocks (response · tool call) for even spacing. */
+  gap?: () => void;
+  /** Stream assistant text live (stdout for the REPL, React state for the TUI). */
+  onText?: (delta: string) => void;
+  /** Flush/commit the streamed block (REPL: newline; TUI: move it into scrollback). */
+  endText?: () => void;
+  /** Stream the model's reasoning/thinking live (TUI shows it behind the Ctrl+O toggle). */
+  onReasoning?: (delta: string) => void;
+  /** Flush any trailing reasoning (turn end / tool-only turn with no answer text). */
+  endReasoning?: () => void;
+  /** Per-response token usage, for a live cost/token meter. */
+  onUsage?: (u: Usage) => void;
+  /** The model the provider actually used (for a router request like `auto`) — lets the UI show what it
+   *  resolved to instead of the bare alias. Fired only when the response reports a model. */
+  onResolvedModel?: (model: string) => void;
+  /** A turn ended in an actionable error — carries the action (e.g. an "Upgrade your plan" link) so the
+   *  TUI can park it on ↑-from-the-prompt. undefined when the error has no clickable action. */
+  onErrorAction?: (action?: { label: string; url: string }) => void;
+  /** Fired the first time a MUTATING tool actually runs this turn (a write/edit/bash). Lets the dispatcher
+   *  warn, if the turn is then ESC-aborted, that files/commands may be left partially applied. */
+  onMutate?: () => void;
+  /** Auto-verify hook: when the model finishes a turn that CHANGED files, run the project's fast checks
+   *  (typecheck/compile). If it returns ran && !ok, the loop feeds the failures back and the model
+   *  self-corrects. Always wired in Act mode; undefined in read-only Plan mode (no command execution). */
+  verify?: () => Promise<{ ran: boolean; ok: boolean; report: string; timedOut?: boolean } | null>;
+  /** Max self-correction rounds before giving up and leaving the changes for the user (default 3;
+   *  OB1_AUTOFIX_MAX overrides — 0 is valid and means "escalate/stop on the first verified failure"). */
+  autofixMax?: number;
+  /** Declarative policy rules (from .ob1/policy.json) evaluated before the approval gate: a "deny" rule
+   *  blocks a tool call, "allow" auto-approves it (no prompt), "warn" tags the prompt. Empty/undefined
+   *  ⇒ the normal gate applies. */
+  policy?: PolicyRule[];
+  /** Session capability tokens (user-granted via /allow): a covering token auto-approves a mutating call
+   *  so the gate doesn't re-prompt for, e.g., every git command. Finite tokens decrement per use. */
+  approvals?: ApprovalStore;
+  /** Programmable hooks (from .ob1/hooks.json) + the executor that runs them. PreToolUse can block a
+   *  call; PostToolUse / PostToolUseFailure inject feedback into the tool result. No-op when empty. */
+  hooks?: HookConfig[];
+  hookExec?: HookExec;
+  /** External cancellation (ESC) — stops the turn between/within model calls. */
+  signal?: AbortSignal;
+  /** When true, Solo is offered the `spawn_subagents` tool — it may fan out independent read-only
+   *  sub-tasks in parallel (set from cfg.subagents). Suppressed on apply turns (no nested spawn). */
+  canSpawn?: boolean;
+  /** When true, Solo is offered the `spawn_write_subagents` tool — parallel EDITS in isolated worktrees
+   *  (set from OB1_SUBAGENTS_WRITE). High-risk, default off; suppressed on apply turns. */
+  canSpawnWrite?: boolean;
+  /** Verified escalation (set from cfg.escalation; default on). When true, a turn whose auto-verify
+   *  self-fix loop STILL fails after autofixMax rounds returns { escalate } instead of just leaving the
+   *  changes — the dispatcher then hands it to Fusion best-of-N. The SIGNAL decides (no LLM router, no
+   *  regex). Forced FALSE on apply turns + Plan mode so at most ONE escalation happens per user turn. */
+  canEscalateOnFailure?: boolean;
+  /** Live per-worker progress for spawned subagents (the inline meter — the orchestrator's workerProgress). */
+  onWorkerEvent?: (ev: WorkerEvent) => void;
+  /** Footer progress tracker for spawned subagents (the TUI renders each agent's live status). */
+  agentReg?: AgentRegistry;
+  /** Injectable model call (tests only) — defaults to the real gateway callModel. */
+  _callModel?: typeof callModel;
+  /** Injectable worker runner for spawn_subagents (tests only) — defaults to the real runWorker. */
+  _runWorker?: typeof runWorker;
+}
+
+/** What a Solo turn yields back to the dispatcher. `escalate` is the VERIFIED-escalation signal (Wave 3):
+ *  the auto-verify self-fix loop ran its full budget and the checks STILL fail, so an objective SIGNAL
+ *  (not an LLM, not a regex) asks the dispatcher to hand this turn to Fusion best-of-N. There is no `mode`
+ *  field — Fusion is the only escalation target. Undefined ⇒ an ordinary turn (or escalation disabled /
+ *  suppressed). Kept a named, extensible interface so runTurn's signature and every caller stay stable. */
+export interface TurnOutcome {
+  escalate?: { reason: string; report: string };
+}
+
+/** The verified-escalation decision — PURE (no I/O) so it can be unit-tested in isolation. Its PRECONDITION
+ *  (checked by the caller) is a genuine verified failure: the auto-verify self-fix loop ran its full budget
+ *  and the objective check STILL fails. Given that, escalate ONLY when (a) the turn is allowed to escalate
+ *  (canEscalateOnFailure — wired from cfg.escalation, forced FALSE on apply turns so one escalation happens
+ *  per user turn), (b) we're not in read-only Plan mode, and (c) the turn wasn't ESC-aborted. No LLM and no
+ *  regex participate — the objective SIGNAL plus these three policy flags fully determine the outcome. */
+export function shouldEscalate(state: { canEscalateOnFailure?: boolean; planMode: boolean; aborted?: boolean }): boolean {
+  return !!state.canEscalateOnFailure && !state.planMode && !state.aborted;
+}
+
+// Decomposition parallelism: Solo splits a big task into INDEPENDENT read-only sub-tasks and runs them
+// concurrently, getting each one's findings back to synthesize. Only advertised when canSpawn (cfg.subagents on).
+const SPAWN_TOOL: ToolDef = {
+  name: "spawn_subagents",
+  description:
+    "Run several INDEPENDENT sub-tasks in parallel as isolated, read-only subagents, and get each one's " +
+    "findings back. Use ONLY for a big task that genuinely splits into parts that don't depend on each " +
+    "other — e.g. investigate N different files/areas, research N options, audit N modules. Each subagent " +
+    "works in its own context with read-only tools and returns a concise summary; THEN you synthesize the " +
+    "results and make any edits yourself. Don't use it for small, serial, or interdependent work, and don't " +
+    `pass more than ${MAX_SUBTASKS} sub-tasks.`,
+  input_schema: {
+    type: "object",
+    properties: {
+      subtasks: {
+        type: "array",
+        description: "the independent sub-tasks to run in parallel",
+        items: {
+          type: "object",
+          properties: {
+            task: { type: "string", description: "a complete, self-contained instruction (subagents can't ask follow-ups)" },
+            context: { type: "string", description: "optional shared framing prepended to the task" },
+          },
+          required: ["task"],
+        },
+      },
+      model: { type: "string", description: "optional model override for the subagents" },
+    },
+    required: ["subtasks"],
+  },
+};
+
+// Write-capable parallel subagents (item #2). OPT-IN (OB1_SUBAGENTS_WRITE) and high-risk: each agent
+// edits an EXPLICIT, DISJOINT file set in its own git worktree; overlap is refused; the merge is gated.
+const SPAWN_WRITE_TOOL: ToolDef = {
+  name: "spawn_write_subagents",
+  description:
+    "Run several INDEPENDENT code-EDITING sub-tasks in parallel, each in an isolated git worktree, then " +
+    "merge the results through one approval gate. Use ONLY when the work splits into parts that edit " +
+    "DISJOINT files (no file may be assigned to two agents — that is refused). Each agent declares the exact " +
+    "files it will edit. If any two agents touch the same file the whole batch aborts untouched. Prefer " +
+    "editing yourself for small or interdependent changes; this is for genuinely parallel, file-disjoint work.",
+  input_schema: {
+    type: "object",
+    properties: {
+      subtasks: {
+        type: "array",
+        description: "the independent editing sub-tasks; their `files` sets must be disjoint",
+        items: {
+          type: "object",
+          properties: {
+            task: { type: "string", description: "a complete, self-contained editing instruction" },
+            files: { type: "array", items: { type: "string" }, description: "the exact file paths this agent may edit (its lane)" },
+          },
+          required: ["task", "files"],
+        },
+      },
+    },
+    required: ["subtasks"],
+  },
+};
+
+/** Run a spawn_subagents tool call: validate, fan out via runSubagents, return formatted findings to Solo.
+ *  `parentTask` (the user's turn input) is recorded in the saved review report. */
+async function handleSpawn(input: any, deps: TurnDeps, parentTask: string): Promise<string> {
+  const raw = Array.isArray(input?.subtasks) ? input.subtasks : [];
+  const subtasks: SubagentTask[] = raw
+    .map((s: any) => (typeof s === "string" ? { task: s } : { task: String(s?.task ?? "").trim(), context: s?.context ? String(s.context) : undefined }))
+    .filter((s: SubagentTask) => s.task.length > 0);
+  if (subtasks.length === 0) return "spawn_subagents: no valid sub-tasks provided (need a non-empty `subtasks` array, each with a `task`).";
+  deps.log(c.cyan(`  ⇉ spawning ${subtasks.length} parallel subagent${subtasks.length === 1 ? "" : "s"}…`) + c.dim(` (read-only · ~${subtasks.length}× a Solo investigation)`));
+  const r = await runSubagents({
+    subtasks, cfg: deps.cfg, tools: deps.tools,
+    model: typeof input?.model === "string" ? input.model : undefined,
+    onEvent: deps.onWorkerEvent, registry: deps.agentReg, signal: deps.signal,
+    _run: deps._runWorker,
+  });
+  const ok = r.results.filter((x) => x.ok).length;
+  deps.log(c.dim(`  ⇇ ${ok}/${r.results.length} subagents done · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens`));
+  // Durable, reviewable artifact: the full per-subagent findings the user can open later (the bounded
+  // tool_result that scrolls away is not enough). Default on; best-effort so a write failure never
+  // breaks the turn. [[visible-progress-no-silent-work]]
+  if (reportEnabled()) {
+    try {
+      const path = writeSubagentReport(deps.cfg.dataDir, parentTask, subtasks, r, new Date().toISOString());
+      deps.log(c.dim(`  ↳ saved review report → ${path}`));
+    } catch { /* report is a bonus; never fail the turn over it */ }
+  }
+  return formatSubagentFindings(subtasks, r);
+}
+
+/** Run a spawn_write_subagents call: parse {task, files} assignments, run the guarded worktree write
+ *  path, and on a clean disjoint result apply the merge through the normal approval gate. */
+async function handleSpawnWrite(input: any, deps: TurnDeps): Promise<string> {
+  const raw = Array.isArray(input?.subtasks) ? input.subtasks : [];
+  const assignments: WriteAssignment[] = raw
+    .map((s: any, i: number) => ({ label: `writer-${i + 1}`, task: String(s?.task ?? "").trim(), files: Array.isArray(s?.files) ? s.files.map((f: any) => String(f)).filter(Boolean) : [] }))
+    .filter((a: WriteAssignment) => a.task && a.files.length);
+  if (assignments.length === 0) return "spawn_write_subagents: each sub-task needs a `task` and a non-empty `files` lane.";
+  deps.log(c.cyan(`  ⇉ ${assignments.length} write-subagents in isolated worktrees…`) + c.dim(" (disjoint files · merge is gated)"));
+  const r = await runWriteSubagents({ assignments, cfg: deps.cfg, tools: deps.tools, onEvent: deps.onWorkerEvent, signal: deps.signal, _run: deps._runWorker });
+  if (!r.ok) {
+    const where = r.conflicts.map((cf) => `${cf.file} (${cf.labels.join(" + ")})`).join(", ");
+    deps.log(c.yellow(`  ⇇ write-subagents aborted: ${r.reason}`));
+    return `spawn_write_subagents aborted — ${r.reason}.${where ? ` Conflicting files: ${where}.` : ""} Nothing was written. Re-plan with disjoint file lanes, or make the edits yourself.`;
+  }
+  deps.onMutate?.(); // a write is about to be offered to the gate
+  const written = await applyMerge(deps.cfg.cwd, r.changes, deps.approve);
+  if (written.length === 0) return `Write-subagents produced ${r.changes.length} file change(s) but the merge was declined — nothing written.`;
+  deps.log(c.dim(`  ⇇ merged ${written.length} file(s) from ${assignments.length} write-subagents · ~${r.totalInputTokens} in / ${r.totalOutputTokens} out tokens`));
+  return `Applied ${written.length} file change(s) from ${assignments.length} write-subagents (disjoint, conflict-checked): ${written.join(", ")}.`;
+}
+
+// Per-turn cap on tool-call rounds. DEFAULT IS UNLIMITED (like Claude Code): a turn runs until the
+// model stops calling tools — bounded by the context compaction above (history never grows unbounded)
+// and the server-side monthly credit pool (chat 402s when credits run out), not an arbitrary step
+// count. A high RUNAWAY backstop still pauses a *pathological* stuck loop CLEANLY (work kept, "continue"
+// resumes) so a runaway can't silently drain a whole plan. Override via OB1_MAX_STEPS:
+//   unset            → unlimited in practice (paused only at the runaway backstop)
+//   a number N (≥1)  → hard cap at N steps
+//   0 | unlimited    → truly uncapped, even the backstop removed
+const RUNAWAY_STEPS = 1000; // safety net only; effectively unreachable for real agentic tasks
+function resolveMaxSteps(): number {
+  const raw = (process.env.OB1_MAX_STEPS ?? "").trim().toLowerCase();
+  if (raw === "") return RUNAWAY_STEPS;                                  // default: unlimited-in-practice
+  if (raw === "0" || raw === "unlimited" || raw === "none") return Infinity; // explicit, no backstop
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1 ? Math.floor(n) : RUNAWAY_STEPS;   // a finite cap, else fall back
+}
+const MAX_STEPS = resolveMaxSteps();
+const UNCAPPED = MAX_STEPS === Infinity || MAX_STEPS === RUNAWAY_STEPS;  // whether the cap is a real limit or just a safety net
+// Loop-breaker: after this many identical executions of a NON-mutating tool (same name+input), stop
+// re-running it — a stuck model re-issuing the same web_search/read_file never progresses and burns tokens
+// (a real dogfooding case fired the identical web_search 25×). Override via OB1_MAX_IDENTICAL_CALLS.
+const MAX_IDENTICAL_CALLS = Math.max(2, Number(process.env.OB1_MAX_IDENTICAL_CALLS) || 3);
+
+/** A small, lean system prompt, split for prompt caching into a STABLE block (cached: session-constant
+ *  instructions, skills, the repo map) and a VOLATILE tail (uncached: per-turn semantic memory, the
+ *  date, model identity). The split keeps the big static prefix a cross-step / cross-turn cache HIT
+ *  while the small per-turn content rides outside the breakpoint — so it never busts the cache.
+ *  Injects only a bounded, relevant slice of memory (R3 — semantic top-k for this turn). */
+export function systemPrompt(cfg: Config, store: MemoryStore, retrieved?: Fact[]): SystemBlock[] {
+  const chosen = retrieved && retrieved.length ? retrieved : store.listFacts().slice(-12);
+  const memLabel = retrieved && retrieved.length ? "Relevant project memory (semantic top-k)" : "Known project memory";
+  const facts = chosen.map((f) => `- ${f.fact}`).join("\n");
+  const rels = store.listRelationships().slice(-8).map((e) => `- ${e.src} --${e.rel}--> ${e.dst}`).join("\n");
+  // Prefer an on-disk AGENTS.md (human edits + learned memory blocks); fall back to an in-memory project
+  // index when the workspace has none — we no longer scaffold the file unasked (see index.ts startup).
+  const agents = loadAgentsMd(cfg.cwd) ?? generateAgentsMd(cfg.cwd);
+  const skills = listSkills(cfg.cwd);
+  const skillList = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
+  const topicList = listTopics(cfg.cwd).map((t) => `- ${t.name}`).join("\n");
+  // STABLE block — constant for the whole session (mode/skills/agents/repo map). Cached: re-billed at
+  // ~10–25% on every step instead of full price.
+  const stable = [
+    "You are OB-1, a precise, token-frugal CLI coding agent. Keep responses concise.",
+    agents ? `Project index (AGENTS.md):\n${agents}` : "",
+    topicList ? `On-demand topic files (call read_topic with the name to load detailed notes):\n${topicList}` : "",
+    skillList ? `Available skills (call use_skill with the name to load full instructions when relevant):\n${skillList}\nRouting — HARD RULE, not a suggestion: if a task involves building, generating, or restyling ANYTHING a user will see (a UI, web page or site, component, email, data visualization, 3D/canvas/WebGL scene, game, or animation), your FIRST action MUST be a use_skill call to load the matching design skill — BEFORE any write_file or edit_file. State which skill you're loading, load it, then build to it. Do NOT write UI code first and consult the skill afterwards; that is a mistake to avoid.` : "",
+    "When a non-trivial approach succeeds (or the user corrects you into one that works), you may save it as a reusable skill with manage_skill(create) — capture the general method, not a one-off; prefer updating a related skill over creating a near-duplicate.",
+    cfg.planMode
+      ? "MODE: PLAN (read-only). Do NOT modify files or run commands — investigate and propose a plan. The user will switch to Act mode to execute."
+      : "MODE: ACT. You may edit files and run commands; mutating actions are gated by user approval.",
+    "Principles: read before you edit; make the smallest correct change; prefer edit_file (search/replace) over rewriting whole files. Prefer plain CLI tools via run_bash (e.g. `gh`, `git`, `rg`) when they are more token-efficient than reading many files. For a large file, read_file accepts offset/limit (a 1-based line range) — read only the slice you need instead of the whole file. When you learn a durable project fact or a code relationship, persist it with memory_add / relate. When the task hinges on a decision only the user can make (a missing requirement, or a choice between approaches), call ask_user with a few options instead of guessing.",
+    "Building a large file (a single-file app; a long HTML/JSON/code file): do NOT emit the whole thing in one response — a long generation often gets truncated or dropped mid-stream on free/local providers. Write a minimal RUNNABLE skeleton with write_file FIRST, then grow it in SMALL successive edit_file calls (one section/feature per call), verifying as you go (browser_check for UI). Keep each single tool output bounded; many small edits beat one giant write.",
+    "Don't give up early. You have full access to this machine: when a goal needs a capability you don't have, get it" + (cfg.planMode ? " (in Act mode, by installing the package or tool via run_bash)" : " — install whatever package or tool via run_bash") + " instead of declaring it impossible. Only after genuinely exhausting your options, say what's blocking and offer alternatives.",
+    "Long-lived commands: never run a server, watcher, or other process that does not exit (e.g. `npm run dev`, `bun serve`, a `localhost`) as a normal run_bash call — it would block the turn. Pass background:true; it returns immediately with a process id and keeps running. Then call the `list_bash` TOOL to read its buffered output (e.g. the served URL), and call the `kill_bash` TOOL to stop it when done. Do NOT type `list_bash` or `kill_bash(id)` inside run_bash; they are tools, not shell commands.",
+    "run_bash working directory: each command starts FRESH in the workspace root — the cwd does NOT persist between calls, so a `cd` in one call is forgotten by the next. To act inside a folder you created (e.g. a scaffolded project), pass the `cwd` argument (relative to the workspace) or chain it in ONE command, e.g. `cd overbrilliant && npm install && npm run build`. This applies to background commands too — start a dev server in the project's own directory.",
+    cfg.planMode ? "" :
+      "Verify your work — don't declare done on untested code. After changing code, decide which checks fit the change and run the `verify` tool: 'auto' for a fast compile/typecheck gate, or name the kinds (e.g. 'typecheck,test' or 'build') for behavioural changes. Read the failures and fix them, then re-verify until it's green. (OB-1 also auto-runs the fast gate after any file-changing turn and feeds failures back to you — so treat a reported failure as work to finish, not noise.) If a failure is genuinely pre-existing or unrelated to your change, say so explicitly rather than ignoring it. " +
+      "CRITICAL for UI / visual / interactive work (a toggle, button, form, route, styling, dark mode): a passing build or typecheck does NOT prove the feature works — code that compiles can still do nothing when clicked. You MUST verify behaviour with the `browser_check` tool. For static HTML/CSS/JS pages, pass the workspace file path directly (e.g. `site/index.html`) and avoid starting a server. For framework apps, start the dev server (run_bash background), get its URL by calling the list_bash TOOL, then browser_check it. Drive the actual interaction (click the toggle) and assert the observable result CHANGED (e.g. the body background colour or the html data-theme attribute is different after the click). Never tell the user a visual feature is done until browser_check passes; `curl` and `grep` only confirm the code is PRESENT, not that it WORKS. Verify enough to be sure, then STOP: once the relevant check (or one browser_check that drives the interaction) passes green, the work is done — don't re-run the same verification again and again or keep polishing what already works.",
+    "Ground facts in real sources — never fabricate. For anything about current events, external products, libraries, APIs, or install steps, use web_search and then web_fetch to verify before stating it; do not invent commands, URLs, version numbers, prices, or features. If you can't verify something (the right tool is missing, a call failed, or web_search is unavailable), say so plainly instead of guessing — and never write unverified claims into a file.",
+    // Auto repo map: a fresh, budgeted view of the codebase structure so the model always knows what
+    // it's working with. Lives in the CACHED block (it's session-stable: the deterministic render only
+    // changes when the file set / symbols change, so a content-only edit keeps the cache warm). Full
+    // detail via the repo_map tool. Toggled by cfg.repoMap (/settings → repo-map; OB1_REPO_MAP). Default on.
+    (() => { const m = cfg.repoMap ? repoMapSummary(cfg.cwd) : ""; return m ? `${m}\n(call repo_map for the full, deeper map)` : ""; })(),
+  ].filter(Boolean).join("\n\n");
+  // VOLATILE tail — changes per turn (semantic memory) or per response (router identity), so it stays
+  // OUTSIDE the cache breakpoint. The identity is derived from cfg (set by /models · OB1_MODEL ·
+  // persisted settings), never hardcoded. For a router alias (`auto`) the concrete backend varies per
+  // request, so we tell the model what the last request resolved to (cfg.resolvedModel) and that it can
+  // vary, so it answers "which model are you?" honestly instead of parroting the wire protocol.
+  const volatile = [
+    facts ? `${memLabel}:\n${facts}` : "",
+    rels ? `Known relationships:\n${rels}` : "",
+    `Today's date is ${new Date().toISOString().slice(0, 10)}. ${modelIdentity(cfg)}`,
+  ].filter(Boolean).join("\n\n");
+  return [{ text: stable, cache: true }, { text: volatile, cache: false }];
+}
+
+/** The model-identity sentence for the system prompt. A concrete model → its label + id + provider. A
+ *  router alias (`auto`) → an honest description: provider-routed, the concrete backend varies per
+ *  request, and (when known) the model the last request resolved to — so the model doesn't claim to be
+ *  something it isn't. */
+function modelIdentity(cfg: Config): string {
+  if (!isRouterModel(cfg.model)) {
+    return `You are running on ${modelSpec(cfg.model)?.label ?? cfg.model} (model "${cfg.model}", provider ${cfg.provider}).`;
+  }
+  const resolved = cfg.resolvedModel;
+  const base = "You are reached through a model router (an OpenAI-compatible proxy) that selects a model per request, so your exact underlying model can vary between requests and \"openai\" is only the wire protocol, not your vendor.";
+  if (resolved) {
+    return `${base} The most recent request was routed to ${modelSpec(resolved)?.label ?? resolved} (id "${resolved}"). If asked which model you are, say you're provider-routed and that the last/likely model is this one — don't claim to be a specific vendor's assistant or invent a version.`;
+  }
+  return `${base} The concrete model isn't known until a response returns. If asked which model you are, say you're provider-routed and the exact model varies per request — don't guess a specific identity.`;
+}
+
+// One-line, length-capped rendering of a free-text argument (collapses whitespace/newlines so a multi-line
+// command or query stays on a single transcript line).
+function oneline(v: unknown, max = 60): string {
+  const t = String(v ?? "").replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max - 1) + "…" : t;
+}
+const path = (p: unknown): string => String(p ?? "").trim() || "(missing path)";
+
+// Fallback for tools we don't case explicitly (e.g. MCP tools): render a shallow object as compact
+// `key=value · key=value` rather than a raw JSON blob — easier to scan in the transcript.
+function preview(input: any): string {
+  if (input == null || typeof input !== "object" || Array.isArray(input)) return oneline(JSON.stringify(input), 80);
+  const parts = Object.entries(input).map(([k, v]) => {
+    const val = v != null && typeof v === "object" ? (Array.isArray(v) ? `[${v.length}]` : "{…}") : oneline(v, 32);
+    return `${k}=${val}`;
+  });
+  return oneline(parts.join(" · "), 80);
+}
+
+// manage_skill: turn the action verb into a present-tense gerund for the NL label.
+function skillVerb(action: unknown): string {
+  switch (String(action ?? "").toLowerCase()) {
+    case "install": return "Installing";
+    case "remove": case "uninstall": return "Removing";
+    case "enable": return "Enabling";
+    case "disable": return "Disabling";
+    case "update": case "upgrade": return "Updating";
+    default: return "Managing";
+  }
+}
+
+/** A short, NATURAL-LANGUAGE label for a tool call, shown in the transcript (`→ …`) and the approval
+ *  prompt — written as the action in progress ("Reading …", "Searching the web for …") so it reads like
+ *  a plain status line rather than a function call. The identifying argument is included (path / query /
+ *  command), capped to one line. Unknown/MCP tools fall through to a humanized "Calling …" form. */
+export function describe(name: string, input: any): string {
+  const i = input ?? {};
+  switch (name) {
+    // ── Files ──
+    case "read_file": {
+      const range = i.offset != null || i.limit != null
+        ? ` (from line ${Number(i.offset ?? 0) + 1}${i.limit != null ? `, ${i.limit} lines` : ""})`
+        : "";
+      return `Reading ${path(i.path)}${range}`;
+    }
+    case "write_file": return `Writing ${path(i.path)}`;
+    case "edit_file": return `Editing ${path(i.path)}`;
+    case "architect_edit": return `Editing ${path(i.file)} (architect)`;
+    case "list_dir": return `Listing ${oneline(i.path, 60) || "the current directory"}`;
+    case "diagnostics": return `Checking diagnostics for ${path(i.path)}`;
+
+    // ── Shell ──
+    case "run_bash": return `Running${i.background ? " in the background" : ""}: ${oneline(i.command, 72)}`;
+    case "list_bash": return "Listing background processes";
+    case "kill_bash": return `Stopping process #${i.id}`;
+    case "restart_bash": return `Restarting process #${i.id}`;
+
+    // ── Verify · browser · ports ──
+    case "verify": return `Running checks (${oneline(i.checks ?? "auto", 40)})`;
+    case "browser_check": {
+      const steps = Array.isArray(i.steps) ? i.steps.length : 0;
+      return `Checking ${oneline(i.url, 50)} in the browser${steps ? ` (${steps} step${steps === 1 ? "" : "s"})` : ""}`;
+    }
+    case "expose_port": return `Exposing port ${i.port}`;
+
+    // ── Web ──
+    case "web_fetch": return `Fetching ${oneline(i.url, 64)}`;
+    case "web_search": return `Searching the web for "${oneline(i.query)}"`;
+
+    // ── Memory · knowledge ──
+    case "memory_add": return `Saving to memory: ${oneline(i.fact)}`;
+    case "memory_search": return `Searching memory for "${oneline(i.query)}"`;
+    case "relate": return `Linking ${oneline(i.src, 22)} →${oneline(i.rel, 16)}→ ${oneline(i.dst, 22)}`;
+    case "repo_map": return "Mapping the repository";
+    case "read_topic": return `Reading topic "${oneline(i.name, 40)}"`;
+
+    // ── Skills · tasks · user ──
+    case "use_skill": return `Using skill "${i.name ?? "?"}"`;
+    case "manage_skill": return `${skillVerb(i.action)} skill "${i.name ?? "?"}"`;
+    case "update_tasks": {
+      const ts = Array.isArray(i.tasks) ? i.tasks : [];
+      const done = ts.filter((t: any) => /^(completed|done|complete)$/i.test(String(t?.status ?? ""))).length;
+      return ts.length ? `Updating tasks (${done}/${ts.length} done)` : "Clearing the task list";
+    }
+    case "ask_user": return `Asking you: ${oneline(i.question)}`;
+
+    // ── Data · secrets ──
+    case "execute_sql": return `Running SQL${i.db ? ` on ${oneline(i.db, 20)}` : ""}: ${oneline(i.sql, 56)}`;
+    case "request_secret": return `Requesting secret ${oneline(i.name, 40)}`;
+    case "check_secret": return `Checking for secret ${oneline(i.name, 40)}`;
+
+    // ── PRs · orchestration ──
+    case "create_pr": return `Opening PR: ${oneline(i.title)}`;
+    case "pr_checks": return i.pr ? `Checking PR #${i.pr}` : "Checking PR status";
+    case "spawn_subagents": { const n = Array.isArray(i.subtasks) ? i.subtasks.length : 0; return `Spawning ${n} subagent${n === 1 ? "" : "s"}`; }
+    case "spawn_write_subagents": { const n = Array.isArray(i.subtasks) ? i.subtasks.length : 0; return `Spawning ${n} write subagent${n === 1 ? "" : "s"}`; }
+
+    default: {
+      // Unknown / MCP tool: humanize the name (mcp__figma__create_text → "figma · create text") and append
+      // a compact arg preview so the line still reads as plain language.
+      const pretty = name.startsWith("mcp__") ? name.slice(5).replace(/__/g, " · ").replace(/_/g, " ") : name;
+      const args = i && typeof i === "object" && Object.keys(i).length ? ` (${preview(input)})` : "";
+      return `Calling ${pretty}${args}`;
+    }
+  }
+}
+
+/** A colored diff preview of a pending file mutation, shown before the approval gate. null if none. */
+function previewFileChange(cfg: Config, name: string, input: any): string | null {
+  try {
+    if (name === "edit_file") return renderDiff(String(input.old_string ?? ""), String(input.new_string ?? ""), input.path) || null;
+    if (name === "write_file") {
+      let before = "";
+      try { before = readFileSync(resolve(cfg.cwd, input.path), "utf8"); } catch { /* new file */ }
+      return renderDiff(before, String(input.content ?? ""), input.path) || null;
+    }
+  } catch { /* ignore preview failures */ }
+  return null;
+}
+
+// Make bash activity VISIBLE to the user — a run_bash result is otherwise seen only by the model, so a
+// long build or a failing command looks like a silent hang. Show a concise outcome: a checkmark on a
+// clean exit, and on a non-zero exit / timeout the exit code plus a short tail of the output so failures
+// aren't hidden. Routing through `log` (which commits line-by-line to scrollback) also means long error
+// text is NOT streamed through the one-line live region — sidestepping the overflow-garble bug.
+function surfaceBashOutcome(out: string, log: (s: string) => void): void {
+  const first = out.split("\n", 1)[0];
+  if (first.startsWith("started background process")) {
+    log(c.gray("  ⚙ " + first));
+    for (const l of out.split("\n").slice(1)) if (l.startsWith("⚠")) log(c.yellow("  " + l)); // duplicate/port warning
+    return;
+  }
+  const timedOut = out.startsWith("timed out");
+  const m = first.match(/^exit (\d+)/);
+  const code = m ? Number(m[1]) : null;
+  const body = (m ? out.slice(first.length + 1) : out).replace(/\s+$/, ""); // drop the "exit N" header we already show
+  if (!timedOut && code === 0) {
+    const lines = body ? body.split("\n").length : 0;
+    log(c.gray(`  ✓ exit 0${lines ? ` · ${lines} line${lines > 1 ? "s" : ""} of output` : ""}`));
+    return;
+  }
+  log(c.yellow(`  ⚠ ${timedOut ? first : `run_bash exit ${code}`}`));
+  for (const l of body.split("\n").slice(-12)) if (l.trim()) log(c.gray("    " + l.slice(0, 200)));
+}
+
+function normalizeShellCommand(command: string): string {
+  return command
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\s+(?:2>&1|1>&2)$/g, "")
+    .trim();
+}
+
+function isSuccessfulForegroundCommand(output: string): boolean {
+  return output === "exit 0" || output.startsWith("exit 0\n");
+}
+
+// A command that RUNS a test suite, recognized DIRECTLY — so the agent running its own tests counts as
+// verification even in a project with no manifest detectChecks keys off (a bare `python3 test_x.py`,
+// `node --test`, `bun test`, `pytest`, …). Pairs with detectChecks' bare-test-file fallback. Input is the
+// already-normalized command (single-spaced, redirections stripped).
+function looksLikeTestCommand(norm: string): boolean {
+  if (!norm) return false;
+  return (
+    /\b(?:bun|deno) test\b/.test(norm) ||
+    /\bnode\b[^|;&]*--test\b/.test(norm) ||
+    /\b(?:npx |pnpm dlx |yarn dlx |bunx )?(?:jest|vitest|mocha|ava)\b/.test(norm) ||
+    /\bpytest\b/.test(norm) ||
+    /\bpython3?\b[^|;&]*\b-m\s+(?:pytest|unittest)\b/.test(norm) ||
+    /\bpython3?\b[^|;&]*\b(?:test_[\w-]+|[\w-]+_test)\.py\b/.test(norm) ||
+    /\b(?:go|cargo) test\b/.test(norm)
+  );
+}
+
+function isKnownCheckCommand(cwd: string, command: string): boolean {
+  const norm = normalizeShellCommand(command);
+  if (!norm) return false;
+  const checks = detectChecks(cwd);
+  const candidates = new Set(checks.map((check) => normalizeShellCommand(check.command)));
+  if (checks.some((check) => check.kind === "test" || check.name === "test")) {
+    for (const testCmd of ["bun test", "bun run test", "npm test", "npm run test", "pnpm test", "pnpm run test", "yarn test", "yarn run test"]) {
+      candidates.add(testCmd);
+    }
+  }
+  return candidates.has(norm) || looksLikeTestCommand(norm);
+}
+
+/** A tool call the model emitted as TEXT instead of a real tool_use — so it executed NOTHING. Two
+ *  shapes a weak/garbled model produces (both seen in dogfooding):
+ *    • prose:  `write_file(path="x", content="…")`         (the whole message IS the call)
+ *    • JSON:   `{"path":"x","content":"…"}`  (optionally ```json-fenced) — the call serialized into content
+ *  We match only when the WHOLE message is one of these (anchored), so an explanatory answer that merely
+ *  mentions a tool name isn't flagged. Used by the degenerate-turn guard to steer the model back to real
+ *  tool calls rather than silently end a turn that did no work. */
+export function looksLikeUnsentToolCall(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  // (a) the entire message is a single prose call:  name(arg=…, …). Require real-argument syntax inside the
+  //     parens (a `=`/`:` kwarg or a quoted string) so an ordinary parenthetical like "done (first attempt)"
+  //     isn't mistaken for a tool call.
+  if (/^[a-z_][\w.]{2,}\s*\([\s\S]*[=:"'][\s\S]*\)\s*$/i.test(t)) return true;
+  // (b) the entire message (sans a ```json fence) is a JSON object/array carrying a tool's argument keys:
+  //     a write/edit (path + content/old_string/new_string/text) or a run_bash (command/cmd).
+  const body = t.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  if (!/^[[{][\s\S]*[\]}]$/.test(body)) return false;
+  const hasPath = /"(?:path|file_path)"\s*:/.test(body);
+  const hasWriteBody = /"(?:content|old_string|new_string|new_str|text)"\s*:/.test(body);
+  const hasCommand = /"(?:command|cmd)"\s*:/.test(body);
+  return (hasPath && hasWriteBody) || hasCommand;
+}
+
+function looksLikeToolCapabilityRefusal(text: string): boolean {
+  const t = text.replace(/\s+/g, " ").trim();
+  if (!t) return false;
+  const deniesCapability = /\b(?:can't|cannot|unable to|not able to|don't have (?:the )?(?:capability|ability)|do not have (?:the )?(?:capability|ability)|no capability)\b/i.test(t);
+  const namesFileWork = /\b(?:create|write|edit|modify|save|add|delete)\b.{0,120}\b(?:file|files|workspace|disk|directly)\b/i.test(t);
+  return deniesCapability && namesFileWork;
+}
+
+export async function runTurn(userInput: string, history: Message[], deps: TurnDeps): Promise<TurnOutcome> {
+  const { cfg, tools, store, approve, log } = deps;
+  const call = deps._callModel ?? callModel;
+  // A model is reachable with an API key OR a configured provider profile OR a runtime env route
+  // (OB1_BASE_URL) — a keyless Custom/LAN endpoint (key optional) has no key but is fully usable (the
+  // OpenAI-compatible path just omits the auth header). Mirror index.ts's modelReachable().
+  if (!cfg.apiKey && !cfg.providerProfile && !cfg.envProviderSource) {
+    log(c.yellow("No model provider configured — run `ob1 login`, or use /models to connect one (a key, or a local/LAN endpoint). Memory and /commands still work."));
+    return {};
+  }
+
+  history.push({ role: "user", content: userInput });
+  deps.readCache?.clear(); // start each turn with a clean read-dedup cache (token optimization)
+  const qualityMode = cfg.qualityMode ?? "normal";
+  const quality = qualityMode === "off" ? null : new QualityRun(cfg.cwd, userInput, qualityMode);
+
+  let mutated = false;           // did a write/edit/bash run since the last verification? → drives auto-verify
+  let explicitCheckPassedSinceMutation = false; // the agent already ran a detected check after editing
+  let fixRounds = 0;             // self-correction rounds spent this turn
+  let unverifiedNudges = 0;      // one-time nudge when a file change matched NO automated check
+  const callCounts = new Map<string, number>(); // exact (tool+input) signatures → executions, for the loop-breaker
+  let stepsWithTools = 0;        // steps that emitted ≥1 tool call — for degenerate-no-op detection
+  let noopRetries = 0;           // one-time retry when a turn ends having taken no action + given no answer
+  // Self-fix round budget: explicit dep ▸ OB1_AUTOFIX_MAX env (0 is valid — escalate on the FIRST verified
+  // failure; used to demo/measure the escalation trigger deterministically) ▸ default 3. A malformed env
+  // value falls back to the default rather than poisoning the comparison below with NaN.
+  const envAutofixRaw = process.env.OB1_AUTOFIX_MAX?.trim();
+  const envAutofix = envAutofixRaw ? Number(envAutofixRaw) : Number.NaN; // "" ⇒ NaN ⇒ default (Number("")===0!)
+  const autofixMax = deps.autofixMax ?? (Number.isFinite(envAutofix) && envAutofix >= 0 ? Math.floor(envAutofix) : 3);
+  // Consecutive mid-stream model failures (e.g. the free router falling back to another model
+  // after we'd already streamed output — which the gateway can't safely retry). Resets on any success;
+  // when it trips we re-issue the step instead of killing the whole turn. OB1_STEP_RETRIES overrides.
+  let stepRetries = 0;
+  const maxStepRetries = Math.max(0, Number(process.env.OB1_STEP_RETRIES) || 6);
+
+  // Just-in-time retrieval: pull the top-k facts relevant to THIS turn into context (R3).
+  let retrieved: Fact[] = [];
+  try { retrieved = await store.searchSemantic(userInput, 6); } catch { /* ignore */ }
+  for (const f of retrieved) quality?.addContext(`memory:#${f.id} ${f.fact}`);
+  const system = systemPrompt(cfg, store, retrieved);
+  // Config-stable toggle instructions belong in the CACHED stable block (index 0). Per-turn guidance
+  // belongs in the volatile tail (index 1), otherwise it would bust the prompt cache every task.
+  const addStable = (s: string) => { system[0].text += "\n\n" + s; };
+  const addVolatile = (s: string) => { system[1].text += "\n\n" + s; };
+  if (quality) addVolatile(renderTaskQualityContract(quality.ledger.profile, qualityMode));
+  if (deps.canSpawn)
+    addStable("Subagents are ON: you have the `spawn_subagents` tool. For a big task that splits into INDEPENDENT parts (investigate several files/areas, research several options, audit several modules), call it with one self-contained sub-task per part to run them in parallel and get each one's findings; then synthesize and act yourself. Don't use it for small, serial, or interdependent work.");
+  if (deps.canSpawnWrite)
+    addStable("Write-subagents are ON: you have the `spawn_write_subagents` tool for editing tasks that split into parts touching DISJOINT files. Assign each agent an explicit, non-overlapping `files` lane; they edit in isolated worktrees and the merge is approval-gated. Any file overlap aborts the batch. Prefer editing yourself for small or interdependent changes.");
+  if (tools.has("update_tasks"))
+    addStable("For a longer task with several distinct steps, keep a visible task list with `update_tasks`: create it up front with the planned steps (status \"pending\"), mark the step you're starting \"in_progress\" (a single one at a time), and flip each to \"completed\" the moment it's done. Always pass the FULL list (it replaces the previous one); clear it with an empty `tasks` array when the whole task is finished. Skip it for simple one- or two-step tasks.");
+  // Delivery surface (PR/CI, DB, secrets, public hosting) — guidance only when the tool is wired, so the
+  // prompt that "follows the capability" never advertises a tool this context doesn't have.
+  if (tools.has("create_pr"))
+    addStable("Shipping a change as a PR: do the work, then commit it with run_bash (`git add -A && git commit -m \"…\"`) on a feature branch — never commit straight to the default branch — then call `create_pr` (title + a real body) to push and open the PR. It does NOT commit for you and refuses an empty PR. After opening, run `pr_checks` (wait:true) and DON'T report the task done until CI is green — fix failures and re-check until it passes (or say plainly why a failure is pre-existing).");
+  if (tools.has("execute_sql"))
+    addStable("Database work: use `execute_sql` for SQLite (Bun built-in; default file .ob1/app.db). Reads (SELECT) are free; for changes prefer scoped statements (always a WHERE on UPDATE/DELETE) and do schema changes as explicit CREATE/ALTER migrations. A DROP/TRUNCATE or a whole-table DELETE/UPDATE is refused unless you pass allow_destructive:true — only do that when the user clearly wants data wiped.");
+  if (tools.has("request_secret"))
+    addStable("Secrets: when a command needs an API key/token/password, call `request_secret` (UPPER_SNAKE name) so the USER types it into a masked prompt — never ask them to paste a secret into the chat, and never put a literal key in a command. The value is exposed to run_bash as $NAME (reference it as \"$NAME\"); you never see it. NEVER print, echo, log, or commit a secret value. Use `check_secret` to see if one is already set.");
+  if (tools.has("expose_port"))
+    addStable("Public preview: only call `expose_port` when the user explicitly asks to share, publish, or open a public preview URL. For normal verification, prefer browser_check against a static file path or localhost. If a public preview is requested, start the dev server with run_bash background, then call `expose_port` with the port to get a temporary public https URL (throwaway tunnel; not production hosting).");
+
+  for (let step = 0; step < MAX_STEPS; step++) {
+    if (deps.signal?.aborted) return {}; // ESC between steps — the drain loop prints "⊘ stopped" once
+    // Scale compaction to the ACTIVE model's context window (resolved-model first, like the TUI footer):
+    // a 1M-token model should not compact at a 128k model's thresholds. Env vars still override (context.ts).
+    const ctxModel = cfg.resolvedModel ?? cfg.model;
+    const edit = editContext(history, { model: ctxModel });
+    // Eviction removes older tool-result bodies from history — invalidate the read-dedup cache so a
+    // pointer can never reference content that was just evicted (keeps dedup provably quality-neutral).
+    if (edit.cleared) deps.readCache?.clear();
+    // Only surface an eviction worth mentioning (~200+ tokens) — tiny reclaims are noise.
+    if (edit.cleared && edit.savedChars >= 800) log(c.gray(`  [context-edit: evicted ${edit.cleared} stale tool result(s), ~${Math.round(edit.savedChars / 4)} tokens freed]`));
+    // LLM-summary compaction: once history blows past a hard cap, summarize the oldest turns (R3). This
+    // makes its OWN model call, which can throw (network/5xx/out-of-credits); it runs before the step's
+    // try/catch, so guard it here — a failed compaction is best-effort, just proceed with full history.
+    let compacted = false;
+    try {
+      compacted = await compactIfNeeded(history, {
+        model: ctxModel,
+        summarize: async (older) => {
+          const r = await callModel({
+            provider: cfg.provider, apiKey: cfg.apiKey!, baseUrl: cfg.baseUrl, model: cfg.model, maxTokens: cfg.maxTokens,
+            system: summaryPrompt(),
+            messages: [{ role: "user", content: older.map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))).join("\n").slice(0, 120_000) }],
+          });
+          return r.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim() || "(summary unavailable)";
+        },
+      });
+    } catch { /* compaction is best-effort; on failure keep the full history and proceed */ }
+    if (compacted) log(c.gray("  [compacted older turns into a summary to free context]"));
+
+    // Recompute each step so tools activated mid-turn (e.g. via load_mcp_tool) become available.
+    const toolDefs: ToolDef[] = [...tools.values()].map((t) => t.def);
+    if (deps.canSpawn) toolDefs.push(SPAWN_TOOL);        // parallel subagents: Solo-only, advertised only when cfg.subagents on
+    if (deps.canSpawnWrite) toolDefs.push(SPAWN_WRITE_TOOL); // parallel write-subagents: opt-in (OB1_SUBAGENTS_WRITE)
+    let resp;
+    let streamed = false;
+    // Even spacing: one blank line before this response block, emitted on the FIRST output (reasoning or
+    // text) so a tool-only step doesn't leave a dangling gap.
+    let gapped = false;
+    const gapOnce = () => { if (!gapped) { gapped = true; deps.gap?.(); } };
+    try {
+      resp = await call({
+        provider: cfg.provider,
+        apiKey: cfg.apiKey!,
+        baseUrl: cfg.baseUrl,
+        model: cfg.model,
+        maxTokens: cfg.maxTokens,
+        // Only attach effort for models that take it (omitted for known non-reasoning models); pick the
+        // right wire param via the endpoint (OpenRouter unified vs legacy reasoning_effort).
+        effort: supportsEffort(cfg.model) ? cfg.effort : undefined,
+        openrouter: isOpenRouterEndpoint(cfg),
+        // On a stream-interrupt retry, append a transient hint so the model CHANGES strategy (smaller
+        // output / incremental file build) instead of re-emitting the same too-long response that just got
+        // cut off. Non-cached + retry-only, so it never disturbs the warm cached prefix on the happy path.
+        system: stepRetries > 0
+          ? [...system, { text: "Your previous response was cut off mid-stream — likely too long for this provider to finish in one go. This step, produce a SMALLER response: if you're writing a large file, create a minimal skeleton with write_file first (or split it across several smaller edit_file calls) rather than emitting the whole file at once.", cache: false }]
+          : system,
+        messages: history,
+        tools: toolDefs,
+        onText: deps.onText ? (d) => { gapOnce(); deps.onText!(d); streamed = true; } : undefined,
+        onReasoning: deps.onReasoning ? (d) => { gapOnce(); deps.onReasoning!(d); } : undefined,
+        onRetry: ({ attempt, max, delayMs, error }) =>
+          log(c.yellow(`  ⚠ ${explainError(error, { providerProfile: cfg.providerProfile }).title.toLowerCase()} — retrying (${attempt}/${max}) in ${Math.round(delayMs / 1000)}s…`)),
+        signal: deps.signal,
+      });
+    } catch (e) {
+      if (streamed) deps.endText?.();
+      deps.endReasoning?.();
+      const err = e as Error;
+      const aborted = deps.signal?.aborted || err.name === "AbortError";
+      // Mid-stream failure the gateway couldn't retry (it had already streamed output — typically the
+      // proxy's router falling back to a different model). Don't kill the whole turn: re-issue this step.
+      // History is unchanged (the assistant message is only pushed on success), so the re-issue is clean.
+      // Bounded by maxStepRetries CONSECUTIVE failures; `step--` so a retry doesn't burn the step budget.
+      if (!aborted && isRetryable(err) && stepRetries < maxStepRetries) {
+        stepRetries++;
+        log(c.yellow(`  ⚠ model stream interrupted (likely a proxy model fallback) — retrying step (${stepRetries}/${maxStepRetries})`));
+        step--;
+        continue;
+      }
+      // On abort (ESC) the drain loop prints "⊘ stopped" once — don't duplicate it here. Only a real
+      // upstream failure (not an abort) gets surfaced as an error.
+      if (!aborted) {
+        const fe = explainError(err.message, { providerProfile: cfg.providerProfile });
+        // In the TUI the action is a focusable button above the prompt (onErrorAction) — don't ALSO print
+        // it inline (it'd appear twice). Under the REPL there's no banner, so keep the inline link.
+        log(renderFriendly(fe, { action: !deps.onErrorAction }));
+        // Recovery recipe: if this is a recognized failure scenario, surface its known fix so the next
+        // step is informed (after the gateway's automatic retries are already exhausted).
+        const hint = recoveryHint(err.message);
+        if (hint) log(c.dim(`  ↻ ${hint}`));
+        deps.onErrorAction?.(fe.action);
+        quality?.recordFailure("model", "model-call", err.message);
+        quality?.finish("error", err.message);
+      }
+      return {};
+    }
+    stepRetries = 0; // a successful model call clears the consecutive-failure counter
+    if (streamed) deps.endText?.();
+    deps.endReasoning?.(); // commit any trailing reasoning (e.g. a reasoning-then-tool-only turn)
+    if (resp.usage) deps.onUsage?.(resp.usage);
+    if (resp.model) deps.onResolvedModel?.(resp.model);
+
+    // Text already streamed live via onText; only re-log if nothing streamed (e.g. tool-only turn).
+    if (!streamed) for (const b of resp.content) if (b.type === "text" && b.text.trim()) { gapOnce(); log(b.text.trim()); }
+    history.push({ role: "assistant", content: resp.content });
+
+    const toolUses = resp.content.filter((b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use");
+    // Terminate on the ABSENCE of tool calls, not on stop_reason: the Anthropic path reports the real
+    // stop_reason (e.g. "max_tokens"), so a turn that emitted tool_use blocks but didn't finish would
+    // otherwise return here WITHOUT answering them — leaving dangling tool_use in `history` that 400s the
+    // very next turn (and stays broken until /clear). If tool_use blocks exist, we must answer them.
+    if (toolUses.length === 0) {
+      // Degenerate no-op guard: a weak/garbled model can end a turn having taken NO action and given no real
+      // answer — e.g. it "describes" a tool call in prose (`read_file(path="x")`) instead of emitting one
+      // (a real dogfooding case). Silently returning leaves the user staring at a turn that did nothing.
+      // Nudge + retry once; if it recurs, say so plainly instead of pretending the turn succeeded.
+      const finalText = resp.content.filter((b) => b.type === "text").map((b: any) => b.text).join("").trim();
+      // A tool call mis-emitted as TEXT (prose or a serialized JSON object) executed NOTHING. This can
+      // happen AFTER real work too — a weak model does a few steps, then serializes its fix into content
+      // and stalls (the task-09 dogfooding case), so it must fire regardless of stepsWithTools/mutated.
+      const unsentToolCall = looksLikeUnsentToolCall(finalText);
+      const capabilityRefusal = !mutated && stepsWithTools === 0 && looksLikeToolCapabilityRefusal(finalText);
+      // The legacy weaker signal (a bare mention like `read_file(` mid-text) stays scoped to a turn that
+      // did nothing — broadening it would flag explanatory answers that name a tool after real work.
+      const legacyNoopProse = /\b(?:read_file|write_file|edit_file|run_bash|list_dir|web_search|web_fetch)\b\s*[({]/.test(finalText);
+      const noopTurn = !mutated && stepsWithTools === 0 && (finalText.length === 0 || unsentToolCall || legacyNoopProse || capabilityRefusal);
+      const degenerate = (unsentToolCall || capabilityRefusal || noopTurn) && !deps.signal?.aborted;
+      if (degenerate) {
+        if (noopRetries < 1) {
+          noopRetries++;
+          log(c.yellow(unsentToolCall
+            ? "  ⚠ the model wrote a tool call as text instead of invoking it — retrying once"
+            : capabilityRefusal
+            ? "  ⚠ the model claimed it could not write files, but file tools are available — retrying once"
+            : "  ⚠ the model ended without taking any action — retrying once"));
+          history.push({ role: "user", content: unsentToolCall
+            ? "Your previous message described or serialized a tool call as TEXT — prose like `write_file(path=\"…\")`, or a JSON object such as {\"path\":\"…\",\"content\":\"…\"} — instead of actually invoking it, so NOTHING happened. Re-issue it NOW as a REAL tool call (read_file / edit_file / write_file / run_bash); never print a tool call as text or JSON. If the task is genuinely complete, run the project's check and give a one-line answer."
+            : capabilityRefusal
+            ? "You incorrectly claimed you cannot create or write files. In this CLI you DO have file tools available. Use a REAL write_file or edit_file tool call now to make the requested change; do not just provide code for the user to save manually."
+            : "You ended the turn without calling any tool or giving a complete answer. If this task needs changes, USE THE TOOLS now (read_file / edit_file / write_file / run_bash) to actually do the work — do NOT just describe a tool call in prose. If genuinely no action is needed, give a complete answer." });
+          continue;
+        }
+        log(c.yellow(unsentToolCall
+          ? "  ⚠ the model kept emitting tool calls as text — they did not run, so the task may be unfinished. Try again or rephrase."
+          : capabilityRefusal
+          ? "  ⚠ the model kept claiming it could not write files, so the task may be unfinished. Try again or rephrase."
+          : "  ⚠ the model produced no action and no answer — nothing was done this turn. Try again or rephrase the task."));
+      }
+      // Auto-verify + self-correct: the model thinks it's done, but if it CHANGED files, run the project's
+      // fast checks. On failure, feed the errors back and let it fix them — looping until green or the
+      // round budget is spent. This is what turns "I edited the file" into "I edited the file and it works".
+      if (deps.verify && mutated && !deps.signal?.aborted) {
+        log(c.gray("  ⚙ verifying changes… (compile check; Esc to skip)"));
+        const v = await deps.verify();
+        quality?.recordAutoVerification(v);
+        quality?.save();
+        // ESC during the check: the user asked to stop — don't self-correct or nudge, just finish. (The
+        // check was killed via the signal, so v would otherwise look like a failure and re-trigger a fix.)
+        if (deps.signal?.aborted) {
+          log(c.yellow("  ⚠ verification skipped (Esc) — changes left unverified"));
+        } else if (v?.timedOut) {
+          // A check blew its timeout — a hang, not a proved failure. Re-running it (the self-correct loop)
+          // would just re-hang, which is exactly the "stuck on verifying" symptom. Surface it and finish.
+          log(c.yellow("  ⚠ verification timed out — skipping (run the project's checks manually)"));
+        } else if (v?.ran && !v.ok) {
+          if (fixRounds < autofixMax) {
+            fixRounds++;
+            log(c.yellow(`  ↻ checks failed — self-correcting (${fixRounds}/${autofixMax})`));
+            history.push({ role: "user", content:
+              `Automated verification of your changes FAILED. Fix the problems below, then finish. Keep going until the checks pass (or, if a failure is pre-existing / unrelated to your change, say so explicitly).\n\n${v.report}` });
+            mutated = false; // a fresh fix attempt re-arms verification
+            continue;        // re-enter the model loop with the failures in context
+          }
+          // Verified failure: the self-fix budget is spent and the objective check STILL fails. When
+          // escalation is allowed (default; forced off on apply turns + Plan mode), hand the whole turn to
+          // Fusion best-of-N — the SIGNAL decides this, no LLM router and no regex. The dispatcher runs
+          // Fusion ONCE with this report as context; at most one escalation per user turn. Otherwise (off /
+          // plan / aborted) fall through to the legacy "leave the changes for review" outcome.
+          if (shouldEscalate({ canEscalateOnFailure: deps.canEscalateOnFailure, planMode: cfg.planMode, aborted: deps.signal?.aborted })) {
+            log(c.yellow(`  ↗ verified failure after ${autofixMax} self-fix rounds — escalating to fusion (best-of-N)`));
+            return { escalate: { reason: `verification still failing after ${autofixMax} self-correction rounds`, report: v.report } };
+          }
+          log(c.yellow(`  ⚠ checks still failing after ${autofixMax} self-correction round(s) — leaving the changes for you to review`));
+        } else if (v?.ran && v.ok) {
+          log(c.green("  ✓ verified — checks pass"));
+        } else if (v && !v.ran && explicitCheckPassedSinceMutation) {
+          log(c.green("  ✓ verified — explicit check passed"));
+        } else if (v && !v.ran && unverifiedNudges < 1) {
+          // No automated check matched this project (e.g. a JS app with no typecheck/test script). That is
+          // NOT the same as "verified" — a build-less UI change can compile and still do nothing. Nudge the
+          // model ONCE to prove behaviour (browser_check for UI) or explicitly state why no runtime check is
+          // needed, then let it finish. Bounded to a single nudge so a genuinely check-less change can't loop.
+          unverifiedNudges++;
+          log(c.yellow("  ⚠ no automated checks ran — changes are NOT verified yet"));
+          history.push({ role: "user", content:
+            "Your changes weren't covered by any automated check, so they are NOT verified. If this was a UI / visual / interactive change (a toggle, button, styling, route), VERIFY IT NOW with browser_check. For static HTML/CSS/JS, pass the workspace file path directly (e.g. site/index.html) and avoid a local server. For framework apps, make sure the dev server is running (run_bash background → call the list_bash TOOL for its URL), then browser_check that URL — perform the actual interaction and assert the observable result changed. If the current sandbox blocks local networking and the app cannot be opened as a static file, say that plainly instead of retrying server variants. If it was a change that genuinely has no runtime behaviour to check (docs, config, comments), just say so in one line and finish. Do not claim a visual feature works without a passing browser_check." });
+          mutated = false; // re-arm so the follow-up turn's changes get checked too
+          continue;
+        } else if (v && !v.ran) {
+          // No automated check exists for this project and the one-time nudge is already spent. Log a clear
+          // OUTCOME so a finished turn never dangles at "⚙ verifying changes…" (which reads as a freeze).
+          log(c.yellow("  ⚠ not verified — no automated checks detected (run the project's tests, or browser_check for UI work)"));
+        } else if (!v) {
+          log(c.yellow("  ⚠ verification could not run — changes left unverified"));
+        }
+      }
+      if (resp.usage) {
+        const u = resp.usage;
+        log(c.gray(`  [tokens in:${u.input_tokens} out:${u.output_tokens}${u.cache_read_input_tokens ? ` cache-read:${u.cache_read_input_tokens}` : ""}${u.estimated ? " (est)" : ""}]`));
+      }
+      quality?.finish("completed", finalText);
+      return {};
+    }
+    stepsWithTools++; // this step emitted ≥1 tool call — the turn did real work (not a degenerate no-op)
+
+    const results: ContentBlock[] = [];
+    for (const tu of toolUses) {
+      // ESC mid-batch: once aborted, don't START any further tool in this batch. We still emit a
+      // tool_result for every remaining tool_use so the assistant message stays well-formed (the API
+      // 400s on a tool_use with no matching tool_result); the step loop then exits at the top via the
+      // signal check. The tool that was ALREADY running gets ESC'd via the signal threaded into run().
+      if (deps.signal?.aborted) {
+        results.push({ type: "tool_result", tool_use_id: tu.id, content: "Stopped by user (ESC).", is_error: true });
+        continue;
+      }
+      deps.gap?.(); // even spacing: a blank line before each tool call
+      // Parallel subagents: a normal tool whose result feeds back into Solo (it keeps working). Handled
+      // inline because it needs the turn's cfg/tools/progress/abort from `deps`, not the static registry.
+      if (tu.name === "spawn_subagents" && deps.canSpawn) {
+        log(c.gray(`  → ${describe(tu.name, tu.input)}`));
+        try {
+          const out = await handleSpawn(tu.input, deps, userInput);
+          quality?.recordTool(tu.name, tu.input, true, out, false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
+        } catch (e) {
+          const msg = (e as Error).message;
+          quality?.recordFailure(tu.name, `${tu.name}:${msg}`, msg); quality?.recordTool(tu.name, tu.input, false, msg, false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: `error: ${msg}`, is_error: true });
+        }
+        // The finished batch stays in the footer (with done/failed status) so the user can review it
+        // while Solo synthesizes; the dispatcher clears the registry when the whole turn ends.
+        continue;
+      }
+      if (tu.name === "spawn_write_subagents" && deps.canSpawnWrite) {
+        log(c.gray(`  → ${describe(tu.name, tu.input)}`));
+        try {
+          const out = await handleSpawnWrite(tu.input, deps);
+          quality?.recordTool(tu.name, tu.input, true, out, true); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: out });
+        } catch (e) {
+          const msg = (e as Error).message;
+          quality?.recordFailure(tu.name, `${tu.name}:${msg}`, msg); quality?.recordTool(tu.name, tu.input, false, msg, true); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: `error: ${msg}`, is_error: true });
+        }
+        continue;
+      }
+      const tool = tools.get(tu.name);
+      if (!tool) {
+        quality?.recordFailure(tu.name, `unknown-tool:${tu.name}`, `unknown tool: ${tu.name}`); quality?.save();
+        results.push({ type: "tool_result", tool_use_id: tu.id, content: `unknown tool: ${tu.name}`, is_error: true });
+        continue;
+      }
+      // Loop-breaker for a stuck model re-issuing the SAME read-only call (e.g. the identical web_search 25×
+      // seen in dogfooding): after MAX_IDENTICAL_CALLS executions of an identical NON-mutating call, stop
+      // running it and tell the model the result won't change — forcing a different move. Mutating tools are
+      // exempt (re-applying an edit is rarer and the diff preview already gives feedback).
+      if (!tool.mutating) {
+        const sig = `${tu.name}:${JSON.stringify(tu.input ?? {})}`;
+        const prior = callCounts.get(sig) ?? 0;
+        if (prior >= MAX_IDENTICAL_CALLS) {
+          log(c.yellow(`  ⊘ ${tu.name} skipped — identical call repeated ${prior}× (the result won't change)`));
+          quality?.recordTool(tu.name, tu.input, false, "Skipped: identical call repeated", false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content:
+            `You have already run this exact ${tu.name} call ${prior} times with identical arguments; the result will not change. Stop repeating it — use the result you already have and take a DIFFERENT action (read or edit the relevant file directly, or finish).`, is_error: true });
+          continue;
+        }
+        callCounts.set(sig, prior + 1);
+      }
+      // Plan-mode gate. Some statically mutating tools have read-only calls (run_bash ls/grep/git log,
+      // execute_sql SELECT/PRAGMA), and investigation is the point of Plan mode.
+      const mutatingCall = toolCallMutates(tool, tu.name, tu.input);
+      if (mutatingCall && cfg.planMode) {
+        log(c.yellow(`  ⛔ ${tu.name} blocked (Plan mode is read-only)`));
+        quality?.recordTool(tu.name, tu.input, false, "Blocked: Plan mode is read-only", false); quality?.save();
+        results.push({ type: "tool_result", tool_use_id: tu.id, content: "Blocked: Plan mode is read-only. User must /act to allow this.", is_error: true });
+        continue;
+      }
+      // Diff viewer: show what a file mutation will change, before approving it.
+      if (tool.mutating) { const diff = previewFileChange(cfg, tu.name, tu.input); if (diff) log(diff); }
+      // Decision context for the policy engine + approval tokens (computed once).
+      const cmd = tu.name === "run_bash" ? String((tu.input as any)?.command ?? "") : undefined;
+      const callCtx = { tool: tu.name, command: cmd, intent: cmd != null ? classifyIntent(cmd) : undefined, path: (tu.input as any)?.path };
+      // Policy engine: a declarative rule can pre-decide a mutating call before the interactive gate.
+      // deny → block; allow → auto-approve (skip the prompt); warn → tag the prompt. No match → "ask".
+      let preApproved = false;
+      let policyNote = "";
+      if (deps.policy?.length && mutatingCall) {
+        const d = evaluatePolicy(deps.policy, callCtx);
+        if (d.action === "deny") {
+          log(c.yellow(`  ⛔ ${tu.name} denied by policy rule "${d.rule?.name}"`));
+          quality?.recordTool(tu.name, tu.input, false, `Blocked by policy rule "${d.rule?.name}"`, false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: `Blocked by policy rule "${d.rule?.name}". This action is not permitted in this workspace.`, is_error: true });
+          continue;
+        }
+        if (d.action === "allow") preApproved = true;
+        else if (d.action === "warn") policyNote = c.yellow(`  [policy: ${d.rule?.name}]`);
+      }
+      // Capability tokens: a user-granted standing approval (/allow) auto-approves a matching call so the
+      // gate doesn't re-prompt for, e.g., every git command. Consumes a finite token's use.
+      if (!preApproved && mutatingCall && deps.approvals?.consume(callCtx)) {
+        preApproved = true;
+        log(c.dim(`  ✓ pre-approved by an active /allow grant`));
+      }
+      // Approval gate — "autopilot" never prompts; "ask" (default) prompts for every mutating tool. A
+      // Read-only calls change nothing, so they are never gated and never mark the turn mutated. A policy
+      // "allow" or a token also skips the interactive prompt.
+      const destructive = tool.destructive || isDestructiveCall(tu.name, tu.input);
+      // `forceAsk` tools (e.g. expose_port — a PUBLIC tunnel) always require explicit confirmation, even
+      // in autopilot, because the side effect is outward-facing. Everything else is gated only outside
+      // autopilot. A policy `allow` / an /allow token (preApproved) is an explicit grant and still counts.
+      const forceAsk = tool.forceAsk === true;
+      if (mutatingCall && !preApproved && (forceAsk || cfg.permissionMode !== "autopilot")) {
+        const ok = await approve(describe(tu.name, tu.input) + (destructive ? c.red("  [destructive]") : "") + policyNote);
+        if (!ok) {
+          // Distinguish a real "no" from a non-interactive session that COULDN'T prompt (piped / non-TTY
+          // stdin → approve returns false at EOF), so the model and the user understand the actual reason
+          // instead of a misleading "user denied".
+          const nonInteractive = deps.interactive === false;
+          const reason = nonInteractive
+            ? (forceAsk
+                ? `Auto-denied: ${tu.name} always requires explicit confirmation (even in autopilot), but this session is non-interactive (piped / non-TTY stdin) so it can't be confirmed. Re-run interactively to approve.`
+                : `Auto-denied: this action needs approval, but this session is non-interactive (piped / non-TTY stdin) so it can't prompt. Re-run interactively to approve, or enable autopilot (OB1_PERMISSION=autopilot, and /trust this folder) to run edits and commands without prompting.`)
+            : "User denied this action.";
+          log(c.yellow(`  ✗ denied: ${tu.name}${nonInteractive ? " (non-interactive — can't prompt)" : ""}`));
+          quality?.recordTool(tu.name, tu.input, false, nonInteractive ? "Auto-denied: non-interactive session can't prompt" : "User denied this action", false); quality?.save();
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: reason, is_error: true });
+          continue;
+        }
+      }
+      const workspaceChange = toolCallChangesWorkspace(tu.name, tu.input)
+        && !(tu.name === "run_bash" && isKnownCheckCommand(cfg.cwd, String((tu.input as any)?.command ?? "")));
+      if (workspaceChange) {
+        mutated = true; deps.onMutate?.(); invalidateRepoMap(); // workspace change → ESC-warning + auto-verify + refresh repo map next turn
+        // …but only a DEFINITE file write invalidates a prior passing explicit check. An ambiguous bash
+        // command after the tests passed (e.g. running the program to show its output) must NOT silently
+        // downgrade the turn back to "unverified" — a dogfooding regression caught on the greenfield task.
+        if (toolCallWritesFiles(tu.name, tu.input)) explicitCheckPassedSinceMutation = false;
+      }
+      // PreToolUse hooks: a user-defined command runs BEFORE the tool and can block it (exit 2 /
+      // {"decision":"block"}) or inject context. No-op when no hooks are configured.
+      const hooks = deps.hooks; const hookExec = deps.hookExec;
+      if (hooks?.length && hookExec) {
+        const pre = await runHooks(hooks, { event: "PreToolUse", tool: tu.name, input: tu.input }, hookExec);
+        if (pre.decision === "block") {
+          log(c.yellow(`  ⛔ ${tu.name} blocked by a PreToolUse hook`));
+          results.push({ type: "tool_result", tool_use_id: tu.id, content: `Blocked by a PreToolUse hook: ${pre.reason ?? "policy"}`, is_error: true });
+          continue;
+        }
+        if (pre.feedback) log(c.dim(`  ⎇ hook: ${pre.feedback.split("\n")[0].slice(0, 160)}`));
+      }
+      log(c.gray(`  → ${describe(tu.name, tu.input)}`));
+      try {
+        const { text, images } = normalizeToolOutput(await tool.run(tu.input, { signal: deps.signal }));
+        let out = text;
+        // PostToolUse hooks: feed the model lint/format/notes from a successful tool result.
+        if (hooks?.length && hookExec) {
+          const post = await runHooks(hooks, { event: "PostToolUse", tool: tu.name, input: tu.input, output: out }, hookExec);
+          if (post.feedback) out += `\n\n[PostToolUse hook]\n${post.feedback}`;
+        }
+        if (tu.name === "run_bash") {
+          const command = String((tu.input as any)?.command ?? "");
+          const recovery = quality?.recordCommandOutcome(command, out);
+          if (recovery) out += `\n\n[Quality recovery]\n${recovery}`;
+        }
+        const qualityOk = tu.name === "verify"
+          ? !/^✗|FAILED|.*NOT met/i.test(out)
+          : tu.name === "browser_check"
+            ? out.startsWith("✓ browser_check PASSED")
+            : tu.name === "run_bash"
+              ? isSuccessfulForegroundCommand(out) || out.startsWith("started background process")
+              : true;
+        quality?.recordTool(tu.name, tu.input, qualityOk, out, workspaceChange);
+        quality?.save();
+        // Carry images (a browser_check screenshot) as a content-block array so a vision model can SEE
+        // them; otherwise a plain string keeps the overwhelmingly-common text-only case on the wire.
+        results.push({ type: "tool_result", tool_use_id: tu.id, content: toolResultContent(out, images) });
+        if (tu.name === "run_bash") {
+          surfaceBashOutcome(out, log); // make bash activity/errors visible to the user
+          const command = String((tu.input as any)?.command ?? "");
+          if (mutated && isSuccessfulForegroundCommand(out) && isKnownCheckCommand(cfg.cwd, command)) {
+            explicitCheckPassedSinceMutation = true;
+          }
+        } else if (tu.name === "browser_check" && mutated && out.startsWith("✓ browser_check PASSED")) {
+          explicitCheckPassedSinceMutation = true;
+        }
+      } catch (e) {
+        const msg = (e as Error).message;
+        let content = `error: ${msg}`;
+        // PostToolUseFailure hooks: a fix hint injected into the error result (a self-correction trigger).
+        if (hooks?.length && hookExec) {
+          const fail = await runHooks(hooks, { event: "PostToolUseFailure", tool: tu.name, input: tu.input, error: msg }, hookExec);
+          if (fail.feedback) content += `\n\n[PostToolUseFailure hook]\n${fail.feedback}`;
+        }
+        const repeat = quality?.recordFailure(tu.name, `${tu.name}:${msg}`, msg) ?? 0;
+        if (repeat >= 2) content += `\n\n[Quality recovery]\nRepeated ${tu.name} failure (${repeat}×). Diagnose the root cause and run the smallest targeted check before retrying.`;
+        quality?.recordTool(tu.name, tu.input, false, msg, workspaceChange);
+        quality?.save();
+        results.push({ type: "tool_result", tool_use_id: tu.id, content, is_error: true });
+        log(c.red(`  ✗ ${tu.name} failed: ${msg.split("\n")[0].slice(0, 200)}`)); // surface tool errors, don't swallow them
+      }
+    }
+    history.push({ role: "user", content: results });
+  }
+  log(c.yellow(
+    UNCAPPED
+      // The runaway safety net tripped — almost always a stuck loop, not a real task that needed 1000 rounds.
+      ? `  (safety stop after ${MAX_STEPS} steps — likely a stuck loop; the work so far is kept, say "continue" to resume)`
+      : `  (paused after ${MAX_STEPS} steps — the work so far is kept; say "continue" to keep going, or raise the limit with OB1_MAX_STEPS)`,
+  ));
+  quality?.finish("blocked", `stopped after ${MAX_STEPS} steps`);
+  return {};
+}

@@ -1,0 +1,216 @@
+name: fresh install
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag to test, e.g. v0.1.1. Use latest for the latest release."
+        default: latest
+        required: true
+  release:
+    types:
+      - published
+  schedule:
+    - cron: "17 9 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  curl-install:
+    if: github.event_name != 'pull_request'
+    name: curl install (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+            asset: ob1-darwin-arm64.tar.gz
+          - name: macOS x64
+            runner: macos-15-intel
+            asset: ob1-darwin-x64.tar.gz
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            asset: ob1-linux-arm64.tar.gz
+          - name: Linux x64
+            runner: ubuntu-24.04
+            asset: ob1-linux-x64.tar.gz
+    steps:
+      - name: Resolve release version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version || 'latest' }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "release" ]; then
+            echo "OB1_TEST_VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
+          else
+            echo "OB1_TEST_VERSION=$INPUT_VERSION" >> "$GITHUB_ENV"
+          fi
+      - name: Install with curl script
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ob1-bin"
+          if [ "$OB1_TEST_VERSION" = "latest" ]; then
+            install_url="https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh"
+          else
+            install_url="https://github.com/overbrilliant/ob-1/releases/download/${OB1_TEST_VERSION}/install.sh"
+          fi
+          install_output="$(
+            curl -fsSL "$install_url" |
+              OB1_INSTALL_DIR="$RUNNER_TEMP/ob1-bin" sh -s -- --version "$OB1_TEST_VERSION" 2>&1
+          )"
+          echo "$install_output"
+          echo "$install_output" | grep "${{ matrix.asset }}"
+          "$RUNNER_TEMP/ob1-bin/ob1" --version | tee "$RUNNER_TEMP/ob1-version.txt"
+          "$RUNNER_TEMP/ob1-bin/ob1" --help | head -20
+          tmp_home="$(mktemp -d)"
+          trap 'rm -rf "$tmp_home"' EXIT
+          mkdir -p "$tmp_home/home"
+          printf '/exit\n' | HOME="$tmp_home/home" OB1_SETTINGS_DIR="$tmp_home/settings" "$RUNNER_TEMP/ob1-bin/ob1"
+          if [ "$OB1_TEST_VERSION" != "latest" ]; then
+            expected="${OB1_TEST_VERSION#v}"
+            actual="$(cat "$RUNNER_TEMP/ob1-version.txt")"
+            [ "$actual" = "$expected" ]
+          fi
+
+  homebrew-install:
+    if: github.event_name != 'pull_request'
+    name: Homebrew install (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+          - name: macOS x64
+            runner: macos-15-intel
+    steps:
+      - name: Install from Homebrew tap
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          set -euo pipefail
+          brew install overbrilliant/tap/ob1
+          ob1 --version
+          ob1 --help | head -20
+          tmp_home="$(mktemp -d)"
+          trap 'rm -rf "$tmp_home"' EXIT
+          mkdir -p "$tmp_home/home"
+          printf '/exit\n' | HOME="$tmp_home/home" OB1_SETTINGS_DIR="$tmp_home/settings" ob1
+
+  npm-install:
+    if: github.event_name != 'pull_request'
+    name: npm install
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - name: Resolve npm version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version || 'latest' }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "release" ]; then
+            echo "OB1_TEST_VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
+          else
+            echo "OB1_TEST_VERSION=$INPUT_VERSION" >> "$GITHUB_ENV"
+          fi
+      - name: Install from npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$OB1_TEST_VERSION" = "latest" ]; then
+            package="@overbrilliant/ob1@latest"
+          else
+            package="@overbrilliant/ob1@${OB1_TEST_VERSION#v}"
+          fi
+          npm install --prefix "$RUNNER_TEMP/ob1-npm" "$package"
+          "$RUNNER_TEMP/ob1-npm/node_modules/.bin/ob1" --version | tee "$RUNNER_TEMP/ob1-npm-version.txt"
+          "$RUNNER_TEMP/ob1-npm/node_modules/.bin/ob1" --help | head -20
+          tmp_home="$(mktemp -d)"
+          trap 'rm -rf "$tmp_home"' EXIT
+          mkdir -p "$tmp_home/home"
+          printf '/exit\n' | HOME="$tmp_home/home" OB1_SETTINGS_DIR="$tmp_home/settings" "$RUNNER_TEMP/ob1-npm/node_modules/.bin/ob1"
+          if [ "$OB1_TEST_VERSION" != "latest" ]; then
+            expected="${OB1_TEST_VERSION#v}"
+            actual="$(cat "$RUNNER_TEMP/ob1-npm-version.txt")"
+            [ "$actual" = "$expected" ]
+          fi
+
+  free-first-token:
+    if: github.event_name != 'pull_request'
+    name: Free models first-token journey
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve release version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version || 'latest' }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "release" ]; then
+            echo "OB1_TEST_VERSION=$RELEASE_TAG" >> "$GITHUB_ENV"
+          else
+            echo "OB1_TEST_VERSION=$INPUT_VERSION" >> "$GITHUB_ENV"
+          fi
+      - name: Install with curl script
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ob1-bin"
+          if [ "$OB1_TEST_VERSION" = "latest" ]; then
+            install_url="https://github.com/overbrilliant/ob-1/releases/latest/download/install.sh"
+          else
+            install_url="https://github.com/overbrilliant/ob-1/releases/download/${OB1_TEST_VERSION}/install.sh"
+          fi
+          curl -fsSL "$install_url" |
+            OB1_INSTALL_DIR="$RUNNER_TEMP/ob1-bin" sh -s -- --version "$OB1_TEST_VERSION"
+          "$RUNNER_TEMP/ob1-bin/ob1" --version
+      - name: Free first-token smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          OB1_BIN="$RUNNER_TEMP/ob1-bin/ob1" python3 scripts/free-fresh-install-e2e.py
+
+  free-first-token-source:
+    if: github.event_name == 'pull_request'
+    name: Free models first-token journey (source)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Create source launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' '#!/usr/bin/env sh' 'exec bun run "$GITHUB_WORKSPACE/src/index.ts" "$@"' > "$RUNNER_TEMP/ob1-source"
+          chmod +x "$RUNNER_TEMP/ob1-source"
+      - name: Free first-token smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          OB1_BIN="$RUNNER_TEMP/ob1-source" python3 scripts/free-fresh-install-e2e.py

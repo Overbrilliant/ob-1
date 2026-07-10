@@ -1,0 +1,229 @@
+// Tiny zero-dependency ANSI helpers + banner. (Ink/TUI is a later phase; R7.)
+import { CLI_VERSION } from "../version.ts";
+
+const ESC = "\x1b[";
+function colorEnabled(): boolean {
+  return !Object.prototype.hasOwnProperty.call(process.env, "NO_COLOR");
+}
+const wrap = (code: string) => (s: string) => colorEnabled() ? `${ESC}${code}m${s}${ESC}0m` : s;
+
+export const c = {
+  get reset() { return colorEnabled() ? `${ESC}0m` : ""; },
+  dim: wrap("2"),
+  bold: wrap("1"),
+  red: wrap("31"),
+  green: wrap("32"),
+  yellow: wrap("33"),
+  blue: wrap("34"),
+  magenta: wrap("35"),
+  cyan: wrap("36"),
+  brightCyan: wrap("96"),
+  gray: wrap("90"),
+  // Diff highlights: a solid background bar (not just a foreground tint) so add/del lines POP. Bright-white
+  // text (97) on a DARK background, chosen for contrast: white on the basic-bright green (code 42) is only
+  // ~2:1 and fails WCAG AA, so additions use xterm-256 colour 22 (#005f00, ~8:1 contrast — passes AA/AAA).
+  // 256-colour backgrounds are supported by essentially all modern terminals.
+  addHi: wrap("48;5;22;97"), // additions: dark-green highlight (#005f00), bright-white text
+  delHi: wrap("41;97"),      // deletions: red highlight, bright-white text
+};
+
+/** Per-mode accent, mirroring the plan's colour language. */
+export function modeColor(mode: string): (s: string) => string {
+  switch (mode) {
+    case "fusion": return c.blue;
+    default: return c.gray; // solo
+  }
+}
+
+/** Line-level diff via LCS. Returns tagged lines: " " keep, "-" removed, "+" added. */
+export function diffLines(before: string, after: string): { t: " " | "-" | "+"; s: string }[] {
+  const a = before.split("\n"), b = after.split("\n");
+  const m = a.length, n = b.length;
+  if (m * n > 4_000_000) { // too large for an O(mn) table — fall back to a coarse replace
+    return [...a.map((s) => ({ t: "-" as const, s })), ...b.map((s) => ({ t: "+" as const, s }))];
+  }
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--)
+    for (let j = n - 1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const out: { t: " " | "-" | "+"; s: string }[] = [];
+  let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) { out.push({ t: " ", s: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ t: "-", s: a[i] }); i++; }
+    else { out.push({ t: "+", s: b[j] }); j++; }
+  }
+  while (i < m) out.push({ t: "-", s: a[i++] });
+  while (j < n) out.push({ t: "+", s: b[j++] });
+  return out;
+}
+
+/** Render a colored unified-style diff for the CLI. Empty string when nothing changed. */
+export function renderDiff(before: string, after: string, path = "", cap = 60): string {
+  const lines = diffLines(before, after);
+  if (!lines.some((l) => l.t !== " ")) return "";
+  const shown = lines.slice(0, cap);
+  const body = shown
+    // Keep the left gutter plain, then a green/red highlighted bar from the +/- marker through the line
+    // content (the marker stays so add vs del reads without relying on colour alone).
+    .map((l) => (l.t === "+" ? "  " + c.addHi("+ " + l.s) : l.t === "-" ? "  " + c.delHi("- " + l.s) : c.dim("    " + l.s)))
+    .join("\n");
+  const more = lines.length > cap ? c.dim(`\n    … ${lines.length - cap} more line(s)`) : "";
+  return c.dim(`  ┌─ diff: ${path} ─`) + "\n" + body + more;
+}
+
+// ─── Friendly error formatting ────────────────────────────────────────────────
+// Upstream/model failures arrive as terse strings — often `API <status>: {json}` from http.ts. Dumping
+// that raw JSON at the user is unreadable. explainError() turns it into a short, human message + the
+// right next step (a clickable action for things you fix in a browser; "continue" only when a retry
+// could actually help), and renderError() lays it out as a compact red block for the transcript.
+
+/** A clickable terminal hyperlink (OSC 8). Degrades to "label (url)" when hyperlinks won't work (no TTY,
+ *  a dumb terminal, or OB1_NO_HYPERLINKS=1) so the URL is never lost. */
+export function link(label: string, url: string): string {
+  const supported = !!process.stdout.isTTY && process.env.TERM !== "dumb" && process.env.OB1_NO_HYPERLINKS !== "1";
+  if (!supported) return `${label} (${url})`;
+  const OSC = "\x1b]8;;", BEL = "\x07";
+  return `${OSC}${url}${BEL}${label}${OSC}${BEL}`;
+}
+
+export interface FriendlyError {
+  title: string;                              // short heading ("Subscription required")
+  detail?: string;                            // one human sentence of explanation
+  action?: { label: string; url: string };   // a clickable call-to-action (e.g. upgrade)
+  hint?: string;                              // a non-URL next step ("Run `ob1 login`.")
+  retry: boolean;                             // true ⇒ a retry might help ⇒ offer "continue"
+}
+
+export interface ErrorExplainContext {
+  /** Active /models provider profile, when the request did not go through the managed OB-1 server. */
+  providerProfile?: string;
+}
+
+/** Map a raw error string to a human-readable, actionable shape. Pure + tested. */
+export function explainError(raw: string, ctx: ErrorExplainContext = {}): FriendlyError {
+  const msg = String(raw ?? "").trim();
+  // `API <status>: <body>` (http.ts). Body may be JSON ({error, upgrade_url, resets_in_days, …}).
+  const m = msg.match(/^API (\d{3}):\s*([\s\S]*)$/);
+  const status = m ? Number(m[1]) : undefined;
+  const body = m ? m[2] : msg;
+  let parsed: any;
+  try { parsed = JSON.parse(body); } catch { /* not JSON — keep the raw body */ }
+  const serverMsg: string | undefined =
+    parsed?.error?.message ?? (typeof parsed?.error === "string" ? parsed.error : undefined) ?? parsed?.message;
+  const upgradeUrl: string | undefined = parsed?.upgrade_url ?? parsed?.upgradeUrl;
+  const resets: number | undefined = typeof parsed?.resets_in_days === "number" ? parsed.resets_in_days : undefined;
+  const resetHint = resets != null ? `Credits reset in ${resets} day${resets === 1 ? "" : "s"}.` : undefined;
+  const providerProfile = ctx.providerProfile;
+
+  switch (status) {
+    case 402: {
+      const exhausted = /exhaust|credit/i.test(serverMsg ?? "");
+      return {
+        title: exhausted ? "Monthly credits exhausted" : "Subscription required",
+        detail: serverMsg || (exhausted ? "Your hosted monthly credits are used up." : "Your plan doesn't cover intelligent models."),
+        action: upgradeUrl ? { label: exhausted ? "Upgrade for more credits" : "Upgrade your plan", url: upgradeUrl } : undefined,
+        hint: [resetHint, exhausted ? "Free models and custom endpoints keep working outside hosted credits." : undefined].filter(Boolean).join(" ") || undefined,
+        retry: false,
+      };
+    }
+    case 401:
+      if (providerProfile === "free") return {
+        title: "Free provider key rejected",
+        detail: serverMsg || "A free provider rejected a saved API key.",
+        hint: "Fix or remove the key with `/free` (keys file) — keyless providers keep working.", retry: false,
+      };
+      if (providerProfile === "custom") return {
+        title: "Provider authentication failed",
+        detail: serverMsg || "The configured Custom API endpoint rejected the saved key.",
+        hint: "Run `/models` to update the Custom API key or endpoint.", retry: false,
+      };
+      return {
+        title: "Sign-in needed",
+        detail: serverMsg || "Your session has expired.",
+        hint: "Run `ob1 login` to sign back in.", retry: false,
+      };
+    case 403:
+      if (providerProfile === "free") return {
+        title: "Free provider access denied",
+        detail: serverMsg || "A free provider rejected this request.",
+        hint: "Check the key with `/free`, or pick another model via `/models` → Free models.", retry: false,
+      };
+      if (providerProfile === "custom") return {
+        title: "Provider access denied",
+        detail: serverMsg || "The configured Custom API endpoint rejected this request.",
+        hint: "Run `/models` to update the Custom API key, endpoint, or model.", retry: false,
+      };
+      return {
+        title: "Access denied",
+        detail: serverMsg || "This account can't use that model or feature.",
+        action: upgradeUrl ? { label: "See plans", url: upgradeUrl } : undefined, retry: false,
+      };
+    case 404: return {
+      title: "Not found",
+      detail: serverMsg || "The model or endpoint wasn't found — check the model id.", retry: false,
+    };
+    case 429:
+      if (providerProfile === "free") return {
+        title: "Free models: pool busy",
+        detail: serverMsg || "Every free model is rate-limited or out of capacity right now.",
+        hint: "Add more provider keys with `/free` for headroom, switch strategy, or wait for limits to reset.",
+        retry: true,
+      };
+      return {
+        title: "Rate limited",
+        detail: serverMsg || "Too many requests right now.",
+        hint: "Wait a moment, then retry.", retry: true,
+      };
+  }
+  if (status && status >= 500) return {
+    title: "Provider error",
+    detail: serverMsg || `The model provider returned a ${status}.`,
+    hint: "Usually temporary.", retry: true,
+  };
+  if (/stream idle|request failed after|fetch failed|network|ECONN|ENOTFOUND|EAI_AGAIN|timed out|timeout|socket/i.test(msg)) return {
+    title: "Connection problem",
+    detail: "Couldn't reach the model — the network or proxy dropped.",
+    hint: "Check your connection, or that the server is running.", retry: true,
+  };
+  // Unknown shape: surface the cleanest text we have, trimmed — never a wall of JSON.
+  return { title: "Model error", detail: (serverMsg || msg).slice(0, 300), retry: true };
+}
+
+/** Lay a FriendlyError out as a compact, indented red block for the transcript. The action line is a
+ *  clickable (OSC 8) link. Pass `{ action: false }` when the action is also surfaced elsewhere (the TUI's
+ *  focusable banner above the prompt) so it isn't shown twice; the REPL has no banner, so it keeps it. */
+export function renderFriendly(e: FriendlyError, opts: { action?: boolean } = {}): string {
+  const lines = [`  ${c.red("✗ " + e.title)}`];
+  if (e.detail) lines.push(`    ${e.detail}`);
+  if (e.hint) lines.push(`    ${c.dim(e.hint)}`);
+  if (opts.action !== false && e.action) lines.push(`    ${c.cyan("↗ " + link(e.action.label, e.action.url))}`);
+  if (e.retry) lines.push(`    ${c.dim('Say "continue" to retry.')}`);
+  return lines.join("\n");
+}
+
+/** Convenience: parse a raw error string and render it. */
+export function renderError(raw: string, ctx: ErrorExplainContext = {}): string {
+  return renderFriendly(explainError(raw, ctx));
+}
+
+export function banner(): string {
+  const art = [
+    "   ██████╗ ██████╗      ██╗",
+    "  ██╔═══██╗██╔══██╗    ███║",
+    "  ██║   ██║██████╔╝═══ ╚██║",
+    "  ██║   ██║██╔══██╗     ██║",
+    "  ╚██████╔╝██████╔╝     ██║",
+    "   ╚═════╝ ╚═════╝      ╚═╝",
+  ].join("\n");
+  const rule = "  " + "─".repeat(58);
+  return [
+    "",
+    c.bold(c.brightCyan(art)),                              // prominent wordmark
+    "",
+    "  " + c.bold(c.cyan("OB-1")) + c.dim("  free, multi-agent, token-efficient coding agent") + c.gray(`   ·   v${CLI_VERSION}`),
+    c.gray(rule),
+    c.cyan("  /help") + c.dim(" commands   ·   ") + c.cyan("/models") + c.dim(" setup   ·   press ") + c.cyan("/") + c.dim(" for menu"), // model shown once, below
+    "",
+  ].join("\n");
+}
