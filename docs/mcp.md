@@ -9,15 +9,13 @@ Configure servers in the same spirit as:
 
 ```json
 {
-  "mcp": {
-    "servers": {
-      "docs": {
-        "command": "npx",
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
-      },
-      "remote": {
-        "url": "https://example.com/mcp"
-      }
+  "mcpServers": {
+    "docs": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "remote": {
+      "url": "https://example.com/mcp"
     }
   }
 }
