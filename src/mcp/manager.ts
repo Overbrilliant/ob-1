@@ -21,12 +21,19 @@ export function createMcpClient(name: string, sc: McpServerConfig): McpClient {
   return new StdioMcpClient(name, sc);
 }
 
-/** Config lives at .ob1/mcp.json or mcp.json. Each server is one of:
+/**
+ * Config lives at .ob1/mcp.json, mcp.json, .ob1/.mcp.json or .mcp.json.
+ * Each server is one of:
  *    stdio: { "command": "...", "args": [...], "env": {...} }   (default when command present)
  *    http:  { "type": "http", "url": "https://...", "headers": {...} }
  *    sse:   { "type": "sse",  "url": "https://...", "headers": {...} } */
 export async function loadMcpServers(cwd: string): Promise<McpLoadResult> {
-  const cfgPath = [join(cwd, ".ob1", "mcp.json"), join(cwd, "mcp.json")].find((p) => existsSync(p));
+  const cfgPath = [
+    join(cwd, ".ob1", "mcp.json"),
+    join(cwd, "mcp.json"),
+    join(cwd, ".ob1", ".mcp.json"),
+    join(cwd, ".mcp.json"),
+  ].find((p) => existsSync(p));
   if (!cfgPath) return { clients: [], tools: [], summary: [] };
 
   let conf: { mcpServers?: Record<string, McpServerConfig> };

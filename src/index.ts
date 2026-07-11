@@ -1567,7 +1567,7 @@ async function handleCommand(line: string): Promise<boolean> {
       break;
     }
     case "mcp": {
-      if (!mcp.clients.length) { console.log(c.dim("  no MCP servers connected (configure .ob1/mcp.json or mcp.json)")); break; }
+      if (!mcp.clients.length) { console.log(c.dim("  no MCP servers connected (configure .ob1/.mcp.json or .mcp.json)")); break; }
       const active = new Set([...tools.keys()].filter((k) => k.startsWith("mcp__")));
       console.log(c.bold(`  ${mcp.clients.length} server(s) · ${deferredMcp.size} tools (deferred; load_mcp_tool activates)`));
       for (const k of deferredMcp.keys()) console.log(`    ${c.cyan(k)}${active.has(k) ? c.green("  ● active") : c.dim("  ○ deferred")}`);
