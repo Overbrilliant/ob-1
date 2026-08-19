@@ -207,7 +207,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s\n' '#!/usr/bin/env sh' 'exec bun run "$GITHUB_WORKSPACE/src/index.ts" "$@"' > "$RUNNER_TEMP/ob1-source"
+          # The smoke harness execs this launcher with an environment it builds
+          # from scratch, to simulate a clean machine. GITHUB_WORKSPACE is not on
+          # that whitelist, so a reference left for the launcher to expand at run
+          # time resolves to empty and bun is asked for /src/index.ts. Bake the
+          # absolute path in here, while the variable is still set.
+          entry="$GITHUB_WORKSPACE/src/index.ts"
+          if [ ! -f "$entry" ]; then
+            echo "::error::source launcher entry point not found: $entry"
+            exit 1
+          fi
+          printf '%s\n' '#!/usr/bin/env sh' "exec bun run \"$entry\" \"\$@\"" > "$RUNNER_TEMP/ob1-source"
           chmod +x "$RUNNER_TEMP/ob1-source"
       - name: Free first-token smoke
         shell: bash
