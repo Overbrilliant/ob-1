@@ -2,6 +2,13 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.8] - 2026-08-19
+
+- Rewrote the npm package description around what OB-1 actually gives you: a free open-source coding
+  agent that runs with no account, no API key and no card.
+- Added npm keywords for the terms people search when they want exactly that, including `free`,
+  `no-api-key`, `keyless`, `open-source` and `ai-coding-agent`.
+
 ## [0.3.7] - 2026-07-08
 
 - Free-model catalog refresh now starts in the background when the Free models provider is active, then
