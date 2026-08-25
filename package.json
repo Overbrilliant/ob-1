@@ -1,6 +1,6 @@
 {
   "name": "@overbrilliant/ob1",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Free open-source coding agent for your terminal. No account, no API key, no card. Persistent project memory, runs in any repo.",
   "license": "Apache-2.0",
   "author": "Neu Software LLC",
