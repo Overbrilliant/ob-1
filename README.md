@@ -182,7 +182,7 @@ Update checks are non-blocking and skip CI. Set `OB1_NO_UPDATE_CHECK=1` to disab
 | Memory | It stores facts, revisions, relationships, embeddings, and graph edges in SQLite. |
 | AGENTS.md | `/agents regen` refreshes the project memory index while keeping human-owned notes intact. |
 | Tools | It can read files, edit files, run shell commands, inspect the repo map, search memory, use MCP tools, and run checks. |
-| MCP | It connects to stdio, HTTP, and SSE MCP servers and exposes their tools inside the agent. |
+| MCP | It connects to stdio, HTTP, and SSE MCP servers and exposes their tools inside the agent. The config file is shared with Claude Code — a project's existing `.mcp.json` works as-is. |
 | Skills | Markdown skills stay discoverable without loading the full instructions into every prompt. |
 | Safety | Approval gates, shell validation, macOS Seatbelt, Linux bubblewrap, and secret checks reduce accidental damage. |
 

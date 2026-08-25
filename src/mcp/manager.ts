@@ -21,29 +21,58 @@ export function createMcpClient(name: string, sc: McpServerConfig): McpClient {
   return new StdioMcpClient(name, sc);
 }
 
-/**
- * Config lives at .ob1/mcp.json, mcp.json, .ob1/.mcp.json or .mcp.json.
- * Each server is one of:
+/** Accepted config paths, in PRECEDENCE order (first one that exists wins). The dot-forms come
+ *  first so a Claude Code project config (`.mcp.json`) is what OB-1 picks up: the file shape is
+ *  identical, so one file serves both tools. The undotted forms stay supported for back-compat. */
+export const MCP_CONFIG_PATHS = [
+  join(".ob1", ".mcp.json"),
+  ".mcp.json",
+  join(".ob1", "mcp.json"),
+  "mcp.json",
+] as const;
+
+export interface McpConfigResult {
+  /** The file we read, or null when none of MCP_CONFIG_PATHS exists. */
+  cfgPath: string | null;
+  servers: Record<string, McpServerConfig>;
+  summary: string[];
+}
+
+/** Resolve + parse the MCP config. Pure: touches the filesystem but connects to nothing and NEVER
+ *  throws — a malformed or wrong-shaped file yields zero servers plus a `summary` line saying why.
+ *  Each server is one of:
  *    stdio: { "command": "...", "args": [...], "env": {...} }   (default when command present)
  *    http:  { "type": "http", "url": "https://...", "headers": {...} }
  *    sse:   { "type": "sse",  "url": "https://...", "headers": {...} } */
-export async function loadMcpServers(cwd: string): Promise<McpLoadResult> {
-  const cfgPath = [
-    join(cwd, ".ob1", "mcp.json"),
-    join(cwd, "mcp.json"),
-    join(cwd, ".ob1", ".mcp.json"),
-    join(cwd, ".mcp.json"),
-  ].find((p) => existsSync(p));
-  if (!cfgPath) return { clients: [], tools: [], summary: [] };
+export function readMcpConfig(cwd: string): McpConfigResult {
+  const cfgPath = MCP_CONFIG_PATHS.map((p) => join(cwd, p)).find((p) => existsSync(p));
+  if (!cfgPath) return { cfgPath: null, servers: {}, summary: [] };
 
-  let conf: { mcpServers?: Record<string, McpServerConfig> };
+  let conf: unknown;
   try { conf = JSON.parse(readFileSync(cfgPath, "utf8")); }
-  catch (e) { return { clients: [], tools: [], summary: [`mcp: bad config ${cfgPath}: ${(e as Error).message}`] }; }
+  catch (e) { return { cfgPath, servers: {}, summary: [`mcp: bad config ${cfgPath}: ${(e as Error).message}`] }; }
 
-  const servers = conf.mcpServers ?? {};
+  const obj = (conf && typeof conf === "object" ? conf : {}) as Record<string, unknown>;
+  const servers = obj.mcpServers;
+  // `{"mcpServers": {}}` is a deliberate empty config — stay silent. Anything else that parsed but
+  // has no usable map used to load zero servers with no diagnostic at all; now it says why.
+  if (servers && typeof servers === "object") {
+    return { cfgPath, servers: servers as Record<string, McpServerConfig>, summary: [] };
+  }
+  return {
+    cfgPath,
+    servers: {},
+    summary: ["mcp" in obj
+      ? `mcp: ${cfgPath} has a "mcp" key but no "mcpServers" — OB-1 (like Claude Code) reads a top-level "mcpServers" map. No servers loaded.`
+      : `mcp: ${cfgPath} has no "mcpServers" key — no servers loaded.`],
+  };
+}
+
+/** Read the config (see readMcpConfig) and connect to every server it declares. */
+export async function loadMcpServers(cwd: string): Promise<McpLoadResult> {
+  const { servers, summary } = readMcpConfig(cwd);
   const clients: McpClient[] = [];
   const tools: Tool[] = [];
-  const summary: string[] = [];
 
   for (const [name, sc] of Object.entries(servers)) {
     const client = createMcpClient(name, sc);

@@ -20,6 +20,7 @@ const SMOKES = [
   "memory-rank-smoke.ts",     // weighted retrieval: recency/importance/relevance min-max re-rank + back-compat
   "memory-evolve-smoke.ts",   // LLM-managed evolution: ADD/UPDATE/DELETE/NOOP + id-validation + ADD-on-failure
   "memory-reflect-smoke.ts",  // reflection trees: threshold trigger + grounded distillation + derived_from + depth cap
+  "mcp-config-smoke.ts",      // MCP config resolution: 4 accepted paths + precedence + wrong-shape warnings
   "mcp-smoke.ts",             // stdio MCP client + deferred tool loading
   "mcp-http-smoke.ts",        // http/sse transport factory + session id (local mocks)
   "mcp-auth-smoke.ts",        // authed http/sse: bearer + custom headers + 401 + session replay

@@ -2,6 +2,20 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [0.3.9] - 2026-08-25
+
+- MCP config is now shared with Claude Code: OB-1 reads `.mcp.json` and `.ob1/.mcp.json` in addition to
+  the existing `.ob1/mcp.json` and `mcp.json`. The file shape was already identical, so a project's
+  existing Claude Code config works with no second file to maintain. Dot-forms take precedence; every
+  previously supported path keeps working. Thanks @LoneRifle (#16, #18).
+- An MCP config that parses but has no top-level `mcpServers` key now warns at startup instead of
+  silently loading nothing — including the common `{"mcp": {"servers": ...}}` mistake. A deliberate
+  `{"mcpServers": {}}` stays silent. Corrected the config shape shown in `docs/mcp.md`. Thanks
+  @LoneRifle (#17).
+- New "blast-radius" eval task (`side-effect-after-txn-commit`): a multi-call-site fixture that grades
+  completeness of a fix across a call graph — direct, transitive and nested violations plus an
+  already-correct decoy — rather than single-function synthesis. Thanks @LoneRifle (#19, #20).
+
 ## [0.3.8] - 2026-08-19
 
 - Rewrote the npm package description around what OB-1 actually gives you: a free open-source coding
