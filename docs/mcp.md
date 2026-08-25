@@ -24,6 +24,22 @@ Configure servers in the same spirit as:
 Use stdio for local tools and HTTP/SSE for hosted tools. Keep credentials in environment variables or
 the server's own secret store; do not commit them into project config.
 
+## Where the config lives
+
+OB-1 reads the first of these that exists, in precedence order:
+
+1. `.ob1/.mcp.json`
+2. `.mcp.json`
+3. `.ob1/mcp.json`
+4. `mcp.json`
+
+The shape is identical to Claude Code's `.mcp.json` — a top-level `mcpServers` map — so a project
+that already has `.mcp.json` works in OB-1 with no second file to maintain. The dot-forms take
+precedence; the undotted paths remain supported, so existing `mcp.json` setups keep working.
+
+Only the first matching file is read (they are not merged). A file that parses but has no top-level
+`mcpServers` key loads no servers and says so at startup, rather than failing silently.
+
 ## Safety
 
 MCP tools still pass through OB-1's tool approval, sandbox, and secret-redaction layers. Treat new MCP

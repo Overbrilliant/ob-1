@@ -47,10 +47,10 @@ if not bun:
     sys.exit(0)
 
 tmp = tempfile.mkdtemp(prefix="ob1-tui-pty-")
-# Clean, minimal env, cwd=tmp so Bun loads no .env and finds no .ob1/mcp.json. A DUMMY OB-1 token
-# configures the managed provider route (never used — we submit no model task) so /models opens the
-# static model PICKER rather than the provider-setup tab (which is what /models does when nothing is
-# configured).
+# Clean, minimal env, cwd=tmp so Bun loads no .env and finds no .ob1/mcp.json or .ob1/.mcp.json.
+# A DUMMY OB-1 token configures the managed provider route (never used — we submit no model task)
+# so /models opens the static model PICKER rather than the provider-setup tab (which is what
+# /models does when nothing is configured).
 # OB1_MODEL pins the highlight to the FIRST registry entry so one ↓ lands on a real model, not the
 # appended "Free models ▸" row. NO inherited CI flag.
 env = {
