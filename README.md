@@ -26,9 +26,13 @@
 
 *`/memory` shows the facts and relationship graph OB-1 built from real work.*
 
-OB-1 is a free, open-source CLI coding agent with persistent project memory. Run `ob1` in a
-repository and it can read the codebase, build a repo map, edit files, run checks, inspect memory, and
-coordinate deeper multi-agent passes when the task deserves more compute.
+OB-1 is a free, open-source CLI coding agent built around parallel work: it fans independent
+sub-tasks out to isolated read-only subagents, and escalates hard changes to Fusion, which generates N
+candidate solutions in separate copies of the project and selects the candidate that passes your real
+checks. It keeps going until your checks pass — up to three self-correction rounds by default — then
+escalates or hands the changes back rather than reporting a silent success. No account, no card, no
+API key, and no ads: run `ob1` in a repository and it reads the codebase, builds a repo map, edits
+files, runs checks, and keeps persistent project memory you can inspect between sessions.
 
 The default path is free out of the box: OB-1 has an embedded free-models router built into the CLI
 process — no server, no clone, no Docker/Node dependency — backed by a signed free-model catalog.
