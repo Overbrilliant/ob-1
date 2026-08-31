@@ -14,6 +14,10 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Overbrilliant/ob-1)
 
+**The coding agent that needs no account.** Gemini CLI's free tier now routes through Antigravity
+(account required) and Codex's free plan needs a login. `ob1` still answers your first message with
+no account, no card, and no API key — install it and start.
+
 ![OB-1 start-free demo](docs/media/start-free.gif)
 
 *Start free: OB-1 works instantly with the free-model catalog — no account or card. Free users get newly released free models after 30 days; hosted plans get them immediately. Add your own provider keys to `~/.ob1/keys.env` for higher limits.*
