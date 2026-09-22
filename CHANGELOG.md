@@ -12,6 +12,16 @@ All notable OB-1 CLI changes are documented here.
   quality ledger. `OB1_TEST_EDIT_GUARD=refuse|flag|off` (default `refuse`). Answers the "what stops the
   loop from patching the test instead of the bug" question.
 
+## [0.3.10] - 2026-09-22
+
+- Bash safety: `env …`, `timeout …` and `nice …` wrappers are now stripped before a command is
+  classified, so `env rm -rf /` no longer passes as read-only and `timeout 5 rm -rf /` no longer
+  slips through as unknown. Wrapper forms that cannot be parsed fail closed to `unknown`.
+- `web_fetch`: redirects are followed manually (at most five hops) and every hop is re-checked
+  against the SSRF guard, both by literal host and by what it resolves to — a public page that
+  302s to the cloud metadata IP or a loopback service is refused. Also blocks the v4-compatible
+  IPv6 spelling of loopback (`::7f00:1`), `localhost.` and the CGNAT range 100.64.0.0/10.
+
 ## [0.3.9] - 2026-08-25
 
 - MCP config is now shared with Claude Code: OB-1 reads `.mcp.json` and `.ob1/.mcp.json` in addition to
