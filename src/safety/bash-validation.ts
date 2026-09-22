@@ -31,14 +31,47 @@ const PROCESS = new Set(["kill", "pkill", "killall", "systemctl", "service", "la
 const WRITE = new Set(["cp", "mv", "mkdir", "rmdir", "touch", "tee", "ln", "chmod", "chown", "chgrp", "install", "patch", "git"]);
 const DESTRUCTIVE = new Set(["rm", "shred", "srm", "mkfs", "dd", "fdisk", "parted", "wipefs", "format"]);
 
-/** Strip leading `sudo`/`env VAR=…`/timeout wrappers and return the real leading token of a segment. */
+/** Strip leading `sudo`/`env …`/`timeout …`/`nice …` wrappers and return the real leading token of a
+ *  segment. `env` and `timeout` are the dangerous ones: `env` used to fall through UNstripped and sits in
+ *  READ_ONLY, so `env rm -rf /` classified as read-only — the catastrophic-delete block never ran and the
+ *  command executed. `timeout` fell through as `unknown`, skipping every intent-gated check.
+ *  Conservative by construction: a wrapper we can't fully parse (e.g. `env -S '…'`) stops stripping and
+ *  yields a bogus token → `unknown`, never a false `read-only`. */
 function leadingToken(segment: string): { tok: string; rest: string } {
   let s = segment.trim();
   // drop env assignments (FOO=bar baz) and common wrappers
   for (;;) {
-    const m = s.match(/^([A-Za-z_][\w]*=\S*|sudo|command|nohup|time|nice|exec)\s+/);
-    if (!m) break;
-    s = s.slice(m[0].length);
+    const m = s.match(/^([A-Za-z_][\w]*=\S*|sudo|command|nohup|time|exec)\s+/);
+    if (m) { s = s.slice(m[0].length); continue; }
+    // `env [-flags] [VAR=val …] cmd …` — `env` with nothing after it just prints the environment, and
+    // with only flags/assignments still to come it stays `env` (read-only) because the loop stops below.
+    if (/^env(\s|$)/.test(s)) {
+      s = s.replace(/^env\s*/, "");
+      let m2: RegExpExecArray | null;
+      while ((m2 = /^(?:-\S+|[A-Za-z_]\w*=\S*)\s+/.exec(s))) s = s.slice(m2[0].length); // skip -i and FOO=bar
+      if (!s) return { tok: "env", rest: "" };                                          // `env -i` alone → read-only
+      if (/^-\S+$/.test(s)) return { tok: "env", rest: "" };                             // trailing flag w/ arg (`env -u PATH`) → conservative
+      continue;
+    }
+    // `timeout [-flags] DURATION cmd …` (GNU coreutils). Stop on anything unrecognized → `timeout` token → unknown.
+    if (/^timeout(\s|$)/.test(s)) {
+      const m2 = s.match(/^timeout\s+(?:-\S+\s+)*(?:\d+(?:\.\d+)?[smhdw]?|\d+(?:\.\d+)?:\d+(?::\d+)?)\s+/);
+      if (!m2) return { tok: "timeout", rest: s.slice("timeout".length) };
+      s = s.slice(m2[0].length);
+      continue;
+    }
+    // `nice [-n ADJ] cmd` / `nice ADJ cmd` — strip the adjustment so `nice -n 5 cp a b` classifies as write.
+    if (/^nice(\s|$)/.test(s)) {
+      const m2 = s.match(/^nice\s+(?:-n\s+-?\d+|-?\d+\s)\s*/);
+      if (m2) { s = s.slice(m2[0].length); continue; }
+      if (/^nice\s+-n\s*$/.test(s)) return { tok: "nice", rest: "" };
+      // bare `nice` (prints scheduling priority) → read-only
+      if (s === "nice") return { tok: "nice", rest: "" };
+      // plain `nice cmd …` (no adjustment): strip the wrapper like before, so `nice rm -rf /` stays destructive.
+      s = s.replace(/^nice\s+/, "");
+      continue;
+    }
+    break;
   }
   const tok = s.split(/\s+/, 1)[0] ?? "";
   // strip a path prefix (/usr/bin/rm → rm)

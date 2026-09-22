@@ -131,35 +131,81 @@ function mappedIpv4(host: string): string | null {
   return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
 }
 
+/** Expand an IPv6 address (brackets already stripped, `::` compressed allowed) into its eight 16-bit
+ *  hex groups, or null if it isn't parseable IPv6. Used to detect embedded-IPv4 forms. */
+function ipv6Groups(h: string): string[] | null {
+  if (!h.includes(":")) return null;
+  let head = h, tail: string[] = [];
+  const dc = h.indexOf("::");
+  if (dc !== -1) { head = h.slice(0, dc); tail = h.slice(dc + 2).split(":").filter(Boolean); }
+  const headParts = head ? head.split(":") : [];
+  const groups = [...headParts];
+  while (groups.length + tail.length < 8) groups.push("0");
+  groups.push(...tail);
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return null;
+  return groups;
+}
+
+/** Embedded IPv4 inside an IPv6 address: v4-MAPPED (`::ffff:7f00:1`) or legacy v4-COMPATIBLE
+ *  (`::7f00:1` — what `URL` normalizes `http://[::127.0.0.1]/` to). Both hide loopback/private
+ *  addresses from a dotted-quad-only check. Returns dotted form, or null when no embedded v4. */
+function embeddedIpv4(groups: string[]): string | null {
+  const hi = groups.slice(0, 5).join(":"), h6 = groups[5];
+  const low = (parseInt(groups[6], 16) >> 8) & 255, lo2 = parseInt(groups[6], 16) & 255;
+  const lo3 = (parseInt(groups[7], 16) >> 8) & 255, lo4 = parseInt(groups[7], 16) & 255;
+  if (hi === "0:0:0:0:0" && h6 === "ffff") return `${low}.${lo2}.${lo3}.${lo4}`; // ::ffff:a.b.c.d
+  if (hi === "0:0:0:0:0" && h6 === "0") return `${low}.${lo2}.${lo3}.${lo4}`;    // ::a.b.c.d compatible
+  return null;
+}
+
 export function isBlockedHost(hostname: string): boolean {
-  const h = hostname.toLowerCase().replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+  // Strip IPv6 brackets and a trailing FQDN dot (`localhost.` is the same host as `localhost`).
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
   if (!h || h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
   if (h === "::1" || h === "::" || h === "0.0.0.0") return true;
-  const mapped = mappedIpv4(h);
-  if (h.startsWith("::ffff:") && !mapped) return true;      // a v4-mapped form we can't decode → refuse (defense in depth)
-  const ipv4 = mapped ?? h;                                 // test the embedded IPv4 when present
-  const m = ipv4.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const a = Number(m[1]), b = Number(m[2]);
-    if (a === 0 || a === 127) return true;                  // this-host / loopback
-    if (a === 10) return true;                              // 10.0.0.0/8
-    if (a === 172 && b >= 16 && b <= 31) return true;       // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;                // 192.168.0.0/16
-    if (a === 169 && b === 254) return true;                // link-local incl. 169.254.169.254 metadata
+  let ipv4: string | null = mappedIpv4(h);
+  if (!ipv4 && /^\d{1,3}(\.\d{1,3}){3}$/.test(h)) ipv4 = h; // plain dotted-quad host
+  const undecodableMapped = h.startsWith("::ffff:") && !ipv4;
+  const groups = ipv6Groups(h);
+  if (!ipv4 && groups) {
+    ipv4 = embeddedIpv4(groups);
+    // Any compressed/oblique v4-mapped form we can't decode → refuse (defense in depth).
+    if (undecodableMapped) return true;
   }
-  if (/^(fe80:|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:)/i.test(h)) return true; // IPv6 loopback/ULA/link-local
+  if (ipv4) {
+    const m = ipv4.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!m) return true; // embedded form we failed to parse → refuse
+    if (m) {
+      const a = Number(m[1]), b = Number(m[2]);
+      if (a === 0 || a === 127) return true;                  // this-host / loopback
+      if (a === 10) return true;                              // 10.0.0.0/8
+      if (a === 172 && b >= 16 && b <= 31) return true;       // 172.16.0.0/12
+      if (a === 100 && b >= 64 && b <= 127) return true;      // 100.64.0.0/10 CGNAT (Tailscale/VPN nets)
+      if (a === 192 && b === 168) return true;                // 192.168.0.0/16
+      if (a === 169 && b === 254) return true;                // link-local incl. 169.254.169.254 metadata
+    }
+  }
+  if (/^(fe80:|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:)/i.test(h)) return true; // IPv6 ULA/link-local
+  // v4-compatible IPv6 with any zero-prefixed form not caught above (e.g. hand-written `::7f00:1`
+  // reached un-normalized) → if it parses as all-zero-prefix IPv6, treat it as the embedded IPv4.
+  if (groups && groups.slice(0, 6).every((g) => Number.parseInt(g, 16) === 0)) return true;
   return false;
 }
 
 /** Fetch an http(s) URL and return readable text (HTML stripped), truncated to `maxChars`. By default
  *  refuses internal/loopback/metadata hosts (SSRF guard); pass `allowPrivate` (OB1_WEB_FETCH_ALLOW_PRIVATE=1)
- *  to fetch e.g. a localhost dev server. */
+ *  to fetch e.g. a localhost dev server.
+ *  Redirects are followed MANUALLY (max 5 hops) and every hop's host re-checked against the SSRF guard:
+ *  with the default `redirect: "follow"`, a public page answering 302 → http://169.254.169.254/ would
+ *  silently defeat the pre-flight check. */
 export async function webFetch(opts: { url: string; maxChars?: number; allowPrivate?: boolean; fetchFn?: Fetcher; lookupFn?: HostLookup; signal?: AbortSignal }): Promise<string> {
   const { url, maxChars = 20_000, allowPrivate = false, fetchFn = fetch, lookupFn = dnsLookup, signal } = opts;
   if (!/^https?:\/\//i.test(url)) throw new Error("web_fetch: url must start with http:// or https://");
-  let host: string;
-  try { host = new URL(url).hostname; } catch { throw new Error("web_fetch: invalid URL"); }
-  if (!allowPrivate) {
+  // Applied to the first URL AND to every redirect target.
+  const guard = async (u: string): Promise<string> => {
+    let host: string;
+    try { host = new URL(u).hostname; } catch { throw new Error("web_fetch: invalid URL"); }
+    if (allowPrivate) return u;
     if (isBlockedHost(host)) {
       throw new Error(`web_fetch: refusing to fetch a private/internal/loopback address (${host}); set OB1_WEB_FETCH_ALLOW_PRIVATE=1 to allow`);
     }
@@ -173,13 +219,26 @@ export async function webFetch(opts: { url: string; maxChars?: number; allowPriv
     if (bad) {
       throw new Error(`web_fetch: refusing to fetch ${host} — it resolves to a private/internal address (${bad}); set OB1_WEB_FETCH_ALLOW_PRIVATE=1 to allow`);
     }
+    return u;
+  };
+  let target = await guard(url);
+  let res: Response | undefined;
+  for (let hop = 0; hop <= 5; hop++) {
+    try {
+      res = await fetchFn(target, { headers: { "user-agent": UA }, redirect: "manual", signal: reqSignal(signal) });
+    } catch (e) {
+      throw new Error(`web_fetch: request failed (${(e as Error).message})`);
+    }
+    // 3xx with a Location → validate the next hop's host, then follow it ourselves.
+    const location = res.status >= 301 && res.status < 400 ? res.headers.get("location") : null;
+    if (!location) break;
+    if (hop === 5) throw new Error("web_fetch: too many redirects (more than 5)");
+    let next: string;
+    try { next = new URL(location, target).toString(); } catch { throw new Error(`web_fetch: invalid redirect Location (${location})`); }
+    if (!/^https?:\/\//i.test(next)) throw new Error("web_fetch: redirect to a non-http(s) target refused");
+    target = await guard(next);
   }
-  let res: Response;
-  try {
-    res = await fetchFn(url, { headers: { "user-agent": UA }, signal: reqSignal(signal) });
-  } catch (e) {
-    throw new Error(`web_fetch: request failed (${(e as Error).message})`);
-  }
+  if (!res) throw new Error("web_fetch: request failed (no response)");
   const ct = res.headers.get("content-type") ?? "";
   const raw = await res.text();
   const text = htmlToText(raw, ct);

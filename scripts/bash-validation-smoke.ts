@@ -38,6 +38,19 @@ const intent: [string, string][] = [
   [":(){ :|:& };:", "destructive"],            // fork bomb
   ["make", "unknown"],
   ["./configure", "unknown"],
+  // wrapper escape (fix/bash-wrapper-escape): env/timeout must reveal the wrapped command.
+  ["env rm -rf /", "destructive"],                  // was read-only (env ∈ READ_ONLY) → catastrophic delete executed
+  ["env FOO=bar rm -rf build", "destructive"],      // env + assignment + wrapper
+  ["env -i rm -rf /etc/nginx", "destructive"],      // env with flags
+  ["env FOO=1 timeout 3 rm x", "destructive"],      // stacked wrappers
+  ["timeout 5 rm -rf /", "destructive"],            // timeout was unclassified (unknown)
+  ["timeout 30 kill -9 123", "process"],
+  ["timeout 1.5s curl https://example.com", "network"],
+  ["nice -n 5 cp a b", "write"],
+  ["nice rm -rf /", "destructive"],                 // plain nice (no -n) must still be stripped
+  ["nice cp a b", "write"],
+  ["timeout 5s", "unknown"],                        // timeout with no command
+  ["env -S \"rm -rf /\"", "unknown"],               // unparseable env flag form → unknown, NEVER read-only
 ];
 for (const [cmd, want] of intent) check(`intent: ${cmd}  → ${want}`, classifyIntent(cmd) === want);
 

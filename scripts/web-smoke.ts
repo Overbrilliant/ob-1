@@ -16,7 +16,7 @@ async function throws(fn: () => Promise<unknown>, re: RegExp): Promise<boolean> 
   try { await fn(); return false; } catch (e) { return re.test((e as Error).message); }
 }
 /** A fake fetch that returns a scripted Response and records the request. */
-function fakeFetch(opts: { status?: number; json?: unknown; text?: string; contentType?: string; throwErr?: string }): { fn: Fetcher; calls: { url: string; headers: Record<string, string> }[] } {
+function fakeFetch(opts: { status?: number; json?: unknown; text?: string; contentType?: string; throwErr?: string; location?: string | null }): { fn: Fetcher; calls: { url: string; headers: Record<string, string> }[] } {
   const calls: { url: string; headers: Record<string, string> }[] = [];
   const fn = (async (url: any, init: any) => {
     calls.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
@@ -25,7 +25,7 @@ function fakeFetch(opts: { status?: number; json?: unknown; text?: string; conte
     return {
       ok: status >= 200 && status < 300,
       status,
-      headers: { get: (h: string) => (h.toLowerCase() === "content-type" ? (opts.contentType ?? "application/json") : null) },
+      headers: { get: (h: string) => (h.toLowerCase() === "content-type" ? (opts.contentType ?? "application/json") : h.toLowerCase() === "location" ? (opts.location ?? null) : null) },
       json: async () => { if (opts.json === undefined) throw new Error("not json"); return opts.json; },
       text: async () => opts.text ?? "",
     } as any;
@@ -91,6 +91,42 @@ check("webFetch truncates", (await webFetch({ url: "https://e", maxChars: 10, lo
 // SSRF: a PUBLIC-looking host that RESOLVES to a private/metadata IP must still be refused (DNS-aware guard).
 check("webFetch: refuses a public name resolving to a private IP (SSRF)",
   await throws(() => webFetch({ url: "https://sneaky.example.com/", lookupFn: async () => ["169.254.169.254"], fetchFn: okFetch.fn }), /resolves to a private\/internal address/));
+
+// --- SSRF via redirect: the guard must re-check EVERY hop, not just the first URL ---
+// A sequence fake: answers each scripted response in order (the redirect chain), recording URLs.
+function seqFetch(...responses: { status?: number; location?: string; text?: string; contentType?: string }[]) {
+  const urls: string[] = [];
+  let i = 0;
+  const fn = (async (url: any) => {
+    urls.push(String(url));
+    const r = responses[Math.min(i++, responses.length - 1)];
+    const status = r.status ?? 200;
+    return {
+      ok: status >= 200 && status < 300, status,
+      headers: { get: (h: string) => (h.toLowerCase() === "content-type" ? (r.contentType ?? "text/plain") : h.toLowerCase() === "location" ? (r.location ?? null) : null) },
+      text: async () => r.text ?? "", json: async () => ({}),
+    } as any;
+  }) as Fetcher;
+  return { fn, urls };
+}
+const redir = seqFetch({ status: 302, location: "http://169.254.169.254/latest/meta-data/" }, { text: "secret" });
+check("webFetch: refuses a public URL that 302s to the metadata IP (SSRF redirect guard)",
+  await throws(() => webFetch({ url: "https://evil.example", lookupFn: pubLookup, fetchFn: redir.fn }), /private\/internal\/loopback/));
+check("webFetch: never issued the request to the internal redirect target", !redir.urls.some((u) => u.includes("169.254")));
+const redirOk = seqFetch({ status: 301, location: "https://else.example/page" }, { text: "<p>moved content</p>", contentType: "text/html" });
+const redirOut = await webFetch({ url: "https://start.example", lookupFn: pubLookup, fetchFn: redirOk.fn });
+check("webFetch: follows a public→public redirect manually", redirOk.urls[1] === "https://else.example/page" && redirOut.includes("moved content"));
+const redirLoop = seqFetch({ status: 302, location: "https://a.example" });
+check("webFetch: gives up after 5 redirect hops", await throws(() => webFetch({ url: "https://a.example", lookupFn: pubLookup, fetchFn: redirLoop.fn }), /too many redirects/));
+
+// --- isBlockedHost oblique forms (URL-normalized v4-compatible IPv6, FQDN dot, CGNAT) ---
+// These mirror what `new URL(...).hostname` yields for the obfuscated spellings — the guard sees
+// the normalized form, so these exact strings must be blocked.
+check("isBlockedHost: v4-compatible IPv6 loopback (::7f00:1) blocked", isBlockedHost("::7f00:1"));
+check("isBlockedHost: v4-mapped metadata (::ffff:a9fe:a9fe) blocked", isBlockedHost("::ffff:a9fe:a9fe"));
+check("isBlockedHost: FQDN dot (localhost.) blocked", isBlockedHost("localhost."));
+check("isBlockedHost: CGNAT 100.64.0.0/10 blocked, 100.128.0.1 allowed", isBlockedHost("100.64.0.1") && isBlockedHost("100.127.255.255") && !isBlockedHost("100.128.0.1"));
+check("isBlockedHost: public IPv6 still allowed", !isBlockedHost("2606:2800:220:1:248:1893:25c8:1946"));
 
 // --- abort threading (ESC): the turn's AbortSignal cancels an in-flight request, not just the model ---
 // A signal-aware fake fetch: rejects the instant the passed signal aborts (mirrors real fetch), so this
