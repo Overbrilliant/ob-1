@@ -26,6 +26,11 @@ The default is Solo: one model, one pass, with an automatic self-fix loop that r
 checks after a file-changing turn and corrects failures until they pass or a small round budget is
 spent. OB-1 spends more compute only when it earns its tokens against plain Solo:
 
+- The self-fix loop cannot get to green by rewriting the test. During a self-correction round, edits to
+  files matching test patterns (`test/`, `tests/`, `spec/`, `__tests__/`, `*.test.*`, `*.spec.*`,
+  `*_test.*`, `test_*.py`) are refused; after any failing check, a test-file edit is allowed but flagged in
+  the run output and the quality ledger. `OB1_TEST_EDIT_GUARD` (`refuse` default, `flag`, `off`) sets the
+  posture.
 - On a *verified* failure (checks still failing after self-fix), the turn escalates once to Fusion
   best-of-N — the objective signal decides this, not a router model.
 - `/fusion` runs best-of-N deliberately, scoring candidates against the project's real checks and

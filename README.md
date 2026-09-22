@@ -212,7 +212,18 @@ Use `/mode` for the execution posture:
 
 The normal orchestration path is still Solo: after a file-changing turn it reruns the project's checks and
 fixes failures. On a *verified* failure it escalates once to Fusion best-of-N automatically (`/escalation`
-toggles this). Use `/fusion` to force best-of-N for future turns, `/review` for an independent
+toggles this).
+
+**The self-fix loop cannot edit your tests.** The easy way to "make the checks pass" is to weaken an
+assertion or patch the test instead of the bug, so the loop guards against it. During a self-correction
+round, a `write_file` / `edit_file` / `architect_edit` to a path matching a test pattern (`test/`, `tests/`,
+`spec/`, `__tests__/`, `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`) is refused, and the model is told
+to fix the source or to say plainly that the test itself is wrong and leave it for you. Outside a fix round,
+a test-file edit that follows any failing check in the same turn is allowed but flagged: a `⚠ TEST FILE
+EDIT after a failing check` line in the run output, a review finding in the quality ledger (`/quality`),
+and a reminder next to the final `✓ verified` line. Set `OB1_TEST_EDIT_GUARD=flag` to allow flagged test
+edits during self-correction, or `off` to disable the guard. Shell commands that rewrite a test are not
+intercepted; they stay visible through the normal diff and approval path. Use `/fusion` to force best-of-N for future turns, `/review` for an independent
 refute-reviewer over your diff, and `/deep <task>` for an adaptive AB-MCTS search. Any mode that cannot
 beat Solo at equal tokens is deleted — see
 [`docs/multimind.md`](docs/multimind.md).

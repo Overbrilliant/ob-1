@@ -28,6 +28,7 @@ back to disk.
 | `OB1_EFFORT` | `low`, `medium`, `high` | Reasoning effort hint. |
 | `OB1_SUBAGENTS` | `on`, `off` | Read-only subagent planning/reporting. On by default. |
 | `OB1_ESCALATION` | `on`, `off` | On verified failure (checks still failing after Solo's self-fix rounds), escalate the turn to Fusion best-of-N. On by default. |
+| `OB1_TEST_EDIT_GUARD` | `refuse`, `flag`, `off` | Test-edit guard for the self-fix loop. `refuse` (default): a self-correction round may not edit files matching test patterns, and a test edit after a failing check is flagged. `flag`: never refuse, always flag. `off`: disable. |
 | `OB1_REPO_MAP` | `on`, `off` | Automatic repository map context. |
 | `OB1_CHECKPOINT` | `on`, `off` | Shadow-git checkpoints and `/rewind`. |
 | `OB1_QUALITY` | `off`, `normal`, `strict` | Task-quality reminders and verification pressure. |
