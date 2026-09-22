@@ -19,6 +19,7 @@ import { repoMapSummary, invalidateRepoMap } from "../context/repomap.ts";
 import { listSkills } from "../skills/registry.ts";
 import { editContext, compactIfNeeded, summaryPrompt } from "./context.ts";
 import { detectChecks } from "./verify.ts";
+import { describeTestEdits, guardTestEdit, parseGuardMode } from "./test-guard.ts";
 import { QualityRun, renderTaskQualityContract } from "./task-quality.ts";
 import { c, renderDiff, renderFriendly, explainError } from "../cli/ui.ts";
 import { runWorker, type WorkerEvent } from "../multimind/runtime.ts";
@@ -566,6 +567,12 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
   let explicitCheckPassedSinceMutation = false; // the agent already ran a detected check after editing
   let fixRounds = 0;             // self-correction rounds spent this turn
   let unverifiedNudges = 0;      // one-time nudge when a file change matched NO automated check
+  // Test-edit guard (test-guard.ts): a self-fix round may not edit test files (default: refused), and a
+  // test-file edit that follows a failing check is flagged loudly here and in the quality ledger, so a
+  // green result can never quietly come from a weakened test. OB1_TEST_EDIT_GUARD=refuse|flag|off.
+  const testGuardMode = parseGuardMode(process.env.OB1_TEST_EDIT_GUARD);
+  let failedCheckSeen = false;   // any check (auto-verify, verify tool, known test command) failed this turn
+  const flaggedTestEdits = new Set<string>(); // test paths written after a failing check (for the outcome line)
   const callCounts = new Map<string, number>(); // exact (tool+input) signatures → executions, for the loop-breaker
   let stepsWithTools = 0;        // steps that emitted ≥1 tool call — for degenerate-no-op detection
   let noopRetries = 0;           // one-time retry when a turn ends having taken no action + given no answer
@@ -774,6 +781,7 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
           // would just re-hang, which is exactly the "stuck on verifying" symptom. Surface it and finish.
           log(c.yellow("  ⚠ verification timed out — skipping (run the project's checks manually)"));
         } else if (v?.ran && !v.ok) {
+          failedCheckSeen = true;
           if (fixRounds < autofixMax) {
             fixRounds++;
             log(c.yellow(`  ↻ checks failed — self-correcting (${fixRounds}/${autofixMax})`));
@@ -794,8 +802,10 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
           log(c.yellow(`  ⚠ checks still failing after ${autofixMax} self-correction round(s) — leaving the changes for you to review`));
         } else if (v?.ran && v.ok) {
           log(c.green("  ✓ verified — checks pass"));
+          if (flaggedTestEdits.size) log(c.yellow(`  ⚠ ${describeTestEdits(flaggedTestEdits)}`));
         } else if (v && !v.ran && explicitCheckPassedSinceMutation) {
           log(c.green("  ✓ verified — explicit check passed"));
+          if (flaggedTestEdits.size) log(c.yellow(`  ⚠ ${describeTestEdits(flaggedTestEdits)}`));
         } else if (v && !v.ran && unverifiedNudges < 1) {
           // No automated check matched this project (e.g. a JS app with no typecheck/test script). That is
           // NOT the same as "verified" — a build-less UI change can compile and still do nothing. Nudge the
@@ -896,6 +906,24 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
         results.push({ type: "tool_result", tool_use_id: tu.id, content: "Blocked: Plan mode is read-only. User must /act to allow this.", is_error: true });
         continue;
       }
+      // Test-edit guard: the self-fix loop must not get to green by rewriting the test. During a
+      // self-correction round a write to a test-pattern path is refused (the model is told to fix the
+      // source or say the test is wrong); after any failing check it is allowed but flagged loudly.
+      const testEdit = guardTestEdit({ name: tu.name, input: tu.input, inFixRound: fixRounds > 0, afterFailedCheck: failedCheckSeen, mode: testGuardMode });
+      if (testEdit.refuse) {
+        log(c.yellow(`  ⛔ ${tu.name} refused — self-correction may not edit test files (${testEdit.paths.join(", ")})`));
+        quality?.recordTool(tu.name, tu.input, false, "Refused: test-file edit during self-correction", false);
+        quality?.addReviewFinding(`self-correction tried to edit a test file: ${testEdit.paths.join(", ")}`);
+        quality?.save();
+        results.push({ type: "tool_result", tool_use_id: tu.id, content: testEdit.reason ?? "Refused: test-file edit during self-correction.", is_error: true });
+        continue;
+      }
+      if (testEdit.flag) {
+        for (const p of testEdit.paths) flaggedTestEdits.add(p);
+        log(c.yellow(`  ⚠ TEST FILE EDIT after a failing check: ${testEdit.paths.join(", ")} — check that the test was not weakened to pass`));
+        quality?.addReviewFinding(testEdit.reason ?? describeTestEdits(testEdit.paths));
+        quality?.save();
+      }
       // Diff viewer: show what a file mutation will change, before approving it.
       if (tool.mutating) { const diff = previewFileChange(cfg, tu.name, tu.input); if (diff) log(diff); }
       // Decision context for the policy engine + approval tokens (computed once).
@@ -992,6 +1020,10 @@ export async function runTurn(userInput: string, history: Message[], deps: TurnD
               : true;
         quality?.recordTool(tu.name, tu.input, qualityOk, out, workspaceChange);
         quality?.save();
+        // A failed check the MODEL ran (verify tool, or a known test command) arms the test-edit guard's
+        // flagging, the same as a failed auto-verify: any test-file edit from here on is called out.
+        if (tu.name === "verify" && !qualityOk) failedCheckSeen = true;
+        if (tu.name === "run_bash" && !qualityOk && isKnownCheckCommand(cfg.cwd, String((tu.input as any)?.command ?? ""))) failedCheckSeen = true;
         // Carry images (a browser_check screenshot) as a content-block array so a vision model can SEE
         // them; otherwise a plain string keeps the overwhelmingly-common text-only case on the wire.
         results.push({ type: "tool_result", tool_use_id: tu.id, content: toolResultContent(out, images) });

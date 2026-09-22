@@ -2,6 +2,16 @@
 
 All notable OB-1 CLI changes are documented here.
 
+## [Unreleased]
+
+- Test-edit guard for the self-fix loop: during a self-correction round, `write_file` / `edit_file` /
+  `architect_edit` to a path matching a test pattern (`test/`, `tests/`, `spec/`, `__tests__/`,
+  `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`) is refused and the model is told to fix the source or
+  say the test is wrong. Outside a fix round, a test-file edit that follows a failing check is allowed
+  but flagged in the run output, next to the final `✓ verified` line, and as a review finding in the
+  quality ledger. `OB1_TEST_EDIT_GUARD=refuse|flag|off` (default `refuse`). Answers the "what stops the
+  loop from patching the test instead of the bug" question.
+
 ## [0.3.9] - 2026-08-25
 
 - MCP config is now shared with Claude Code: OB-1 reads `.mcp.json` and `.ob1/.mcp.json` in addition to
