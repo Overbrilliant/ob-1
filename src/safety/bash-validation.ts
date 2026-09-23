@@ -29,7 +29,7 @@ const READ_ONLY = new Set(["ls", "cat", "bat", "grep", "rg", "ag", "find", "fd",
 const NETWORK = new Set(["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp", "ping", "dig", "nslookup", "host"]);
 const PROCESS = new Set(["kill", "pkill", "killall", "systemctl", "service", "launchctl", "reboot", "shutdown", "halt", "poweroff"]);
 const WRITE = new Set(["cp", "mv", "mkdir", "rmdir", "touch", "tee", "ln", "chmod", "chown", "chgrp", "install", "patch", "git"]);
-const DESTRUCTIVE = new Set(["rm", "shred", "srm", "mkfs", "dd", "fdisk", "parted", "wipefs", "format"]);
+const DESTRUCTIVE = new Set(["rm", "shred", "srm", "mkfs", "dd", "fdisk", "parted", "wipefs", "format", "truncate", "unlink"]);
 
 /** Strip leading `sudo`/`env …`/`timeout …`/`nice …` wrappers and return the real leading token of a
  *  segment. `env` and `timeout` are the dangerous ones: `env` used to fall through UNstripped and sits in
@@ -41,7 +41,7 @@ function leadingToken(segment: string): { tok: string; rest: string } {
   let s = segment.trim();
   // drop env assignments (FOO=bar baz) and common wrappers
   for (;;) {
-    const m = s.match(/^([A-Za-z_][\w]*=\S*|sudo|command|nohup|time|exec)\s+/);
+    const m = s.match(/^([A-Za-z_][\w]*=\S*|sudo|command|nohup|time|exec|busybox)\s+/);
     if (m) { s = s.slice(m[0].length); continue; }
     // `env [-flags] [VAR=val …] cmd …` — `env` with nothing after it just prints the environment, and
     // with only flags/assignments still to come it stays `env` (read-only) because the loop stops below.
@@ -79,9 +79,24 @@ function leadingToken(segment: string): { tok: string; rest: string } {
   return { tok: base, rest: s.slice(tok.length) };
 }
 
+/** Skip `xargs`'s own options and return the command it will run (`xargs -n 1 -I {} rm {}` → `rm {}`). */
+function xargsCommand(rest: string): string {
+  let s = rest.trimStart();
+  for (;;) {
+    // options whose argument is a SEPARATE word (`-n 1`, `-I {}`, `--max-args 1`), then any other flag/attached form
+    const m = s.match(/^(?:-[aEdILnPs]|--(?:arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var))\s+\S+\s*/)
+      ?? s.match(/^-\S*\s*/);
+    if (!m || !m[0]) return s;
+    s = s.slice(m[0].length);
+  }
+}
+
 /** Classify the STRONGEST intent across a whole command line (split on pipes/&&/||/;). */
 export function classifyIntent(command: string): CommandIntent {
-  const cmd = String(command ?? "");
+  return classify(String(command ?? ""), 0);
+}
+
+function classify(cmd: string, depth: number): CommandIntent {
   // Start at the LEAST severe so a benign command stays read-only; each segment can only raise severity.
   let worst: CommandIntent = "read-only";
   const bump = (i: CommandIntent) => { if (INTENT_RANK[i] > INTENT_RANK[worst]) worst = i; };
@@ -93,6 +108,22 @@ export function classifyIntent(command: string): CommandIntent {
   if (/(^|[^>&])>>?\s*\S/.test(redir) || /&>>?\s*[^&\s]/.test(cmd) || /\btee\b/.test(cmd)) bump("write");
   // Fork-bomb / truncation idioms.
   if (/:\s*\(\s*\)\s*\{|\b:\(\)\{/.test(cmd) || /\bDROP\s+TABLE\b/i.test(cmd)) bump("destructive");
+  // Commands hidden in ARGUMENTS. Per-segment classification only sees the leading token, so a command
+  // that runs another command (`find -exec X`, `fd -x X`, `xargs X`, `sh -c 'X'`, `eval X`) must be
+  // classified as at least X — otherwise `find / -exec rm -rf {} ;`, `xargs -n1 rm`, and even
+  // `sh -c 'rm -rf /'` ran with read-only/unknown intent and skipped every gate (plan mode, the
+  // destructive warning, the catastrophic-path block). `find … -delete` is rm by another name.
+  const sub = (inner: string) => { if (depth < 4 && inner.trim()) bump(classify(inner, depth + 1)); };
+  // find's `\;` / `';'` terminator is not a shell separator — neutralise it so `find … -exec … \; -delete` is seen.
+  const fcmd = cmd.replace(/\\;|';'|";"/g, " \u0000 ");
+  if (/(?:^|[\s/])find\s/.test(cmd)) {
+    if (/(?:^|[\s/])find\s(?:[^|;&]*\s)?-delete\b/.test(fcmd)) bump("destructive");
+    for (const m of fcmd.matchAll(/\s-(?:exec|execdir|ok|okdir)\s+([^\u0000]+?)(?=\s\u0000|\s\+(?:\s|$)|$)/g)) sub(m[1]!);
+  }
+  for (const m of cmd.matchAll(/(?:^|[\s/])fd\s(?:[^|;&]*?\s)?(?:-x|-X|--exec|--exec-batch)(?:\s+|=)(.+)/g)) sub(m[1]!);
+  for (const m of cmd.matchAll(/(?:^|[\s/|;&(])xargs(?:\s+(.*)|$)/g)) sub(xargsCommand(m[1] ?? ""));
+  for (const m of cmd.matchAll(/(?:^|[\s/|;&(])(?:ba|z|da|k)?sh\s+(?:-[-a-zA-Z]+\s+)*-[a-zA-Z]*c[a-zA-Z]*\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)"|([^\s;&|]+))/g)) sub(m[1] ?? m[2] ?? m[3] ?? "");
+  for (const m of cmd.matchAll(/(?:^|[\s|;&(])eval\s+(.+)/g)) sub(m[1]!.replace(/['"]/g, ""));
   for (const seg of cmd.split(/\|\||&&|;|\||\n/)) {
     if (!seg.trim()) continue;
     const { tok, rest } = leadingToken(seg);
