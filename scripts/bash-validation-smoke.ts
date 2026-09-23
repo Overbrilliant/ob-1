@@ -36,6 +36,38 @@ const intent: [string, string][] = [
   ["dd if=/dev/zero of=disk.img", "destructive"],
   ["npm run build && rm -rf dist", "destructive"], // strongest across &&
   [":(){ :|:& };:", "destructive"],            // fork bomb
+  ["find . -name node_modules -delete", "destructive"],   // -delete is rm by another name
+  ["find / -type f -exec rm -rf {} ;", "destructive"],     // rm hidden inside find -exec
+  ["find . -name '*.log' -exec shred {} +", "destructive"],
+  ["xargs rm < filelist", "destructive"],
+  ["truncate -s 0 big.log", "destructive"],                // truncate blanks files
+  // same class, forms the first cut missed: arg-taking xargs flags, path-prefixed/wrapped inner commands,
+  // -ok/-execdir, find's `\;` terminator, fd -x, `sh -c '…'`/eval, busybox, unlink.
+  ["xargs -n 1 rm", "destructive"],
+  ["xargs -I {} rm -rf {}", "destructive"],
+  ["xargs -0 -P 4 sudo rm", "destructive"],
+  ["xargs sh -c 'rm \"$@\"' _", "destructive"],
+  ["find . -exec /bin/rm -f {} +", "destructive"],
+  ["find . -okdir rm {} ;", "destructive"],
+  [String.raw`find . -exec grep -q secret {} \; -delete`, "destructive"], // -delete AFTER an escaped terminator
+  [String.raw`find . -exec sh -c 'rm "$1"' _ {} \;`, "destructive"],
+  ["find -delete", "destructive"],
+  ["fd -e log -x rm", "destructive"],
+  ["fd --exec-batch=rm", "destructive"],
+  ["sh -c 'rm -rf /'", "destructive"],                      // was unknown → catastrophic delete executed unflagged
+  ["bash -lc \"rm -rf build\"", "destructive"],
+  ["eval 'rm -rf dist'", "destructive"],
+  ["busybox rm -rf x", "destructive"],
+  ["unlink foo", "destructive"],
+  // …without false positives on the harmless forms
+  ["find . -name x", "read-only"],
+  ["find . -exec grep -l foo {} +", "read-only"],
+  ["grep -r truncate src", "read-only"],
+  ["grep -r -- -delete .", "read-only"],
+  ["fd -e ts", "read-only"],
+  ["git log --find-renames", "read-only"],
+  ["busybox ls", "read-only"],
+  ["find . -exec cp {} out ;", "write"],
   ["make", "unknown"],
   ["./configure", "unknown"],
   // wrapper escape (fix/bash-wrapper-escape): env/timeout must reveal the wrapped command.
@@ -73,6 +105,14 @@ check("block: rm -rf $HOME", isBlock("rm -rf $HOME"));
 check("block: rm -rf /etc/nginx", isBlock("rm -rf /etc/nginx"));
 check("block: dd of=/dev/sda", isBlock("dd if=/dev/zero of=/dev/sda"));
 check("block: mkfs", isBlock("mkfs.ext4 /dev/sdb"));
+check("block: sh -c 'rm -rf /'", isBlock("sh -c 'rm -rf /'"));
+check("block: bash -c \"rm -rf ~\"", isBlock('bash -c "rm -rf ~"'));
+check("block: busybox rm -rf /", isBlock("busybox rm -rf /"));
+check("block: find / -delete", isBlock("find / -delete"));
+check("block: truncate -s0 ~/.bashrc", isBlock("truncate -s0 ~/.bashrc"));
+check("plan mode blocks find -delete", isBlock("find . -name '*.tmp' -delete", { planMode: true }));
+check("plan mode blocks xargs -n1 rm", isBlock("ls | xargs -n 1 rm", { planMode: true }));
+check("plan mode ALLOWS plain find", isAllow("find . -name '*.ts'", { planMode: true }));
 // legitimate-but-dangerous → WARN (runs, but the gate flags it)
 check("warn (not block): rm -rf node_modules", isWarn("rm -rf node_modules"));
 check("warn (not block): rm -rf dist/build", isWarn("rm -rf dist/build"));
