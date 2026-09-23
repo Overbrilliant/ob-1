@@ -4,6 +4,14 @@ All notable OB-1 CLI changes are documented here.
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-09-23
+
+- Bash safety: commands run from another command's arguments are now classified too. `find … -delete`
+  and the command behind `find -exec/-execdir/-ok/-okdir`, `fd -x/-X`, `xargs`, `sh/bash/zsh -c '…'` and
+  `eval` count toward the line's intent, so `find / -exec rm -rf {} \;`, `xargs -n1 rm`,
+  `sh -c 'rm -rf /'` and `busybox rm -rf /` are no longer read-only or unknown: plan mode blocks them,
+  the approval prompt flags them, and root/home/system-path targets are refused. `truncate` and
+  `unlink` are now destructive, and `busybox` is stripped like `sudo`.
 - Test-edit guard for the self-fix loop: during a self-correction round, `write_file` / `edit_file` /
   `architect_edit` to a path matching a test pattern (`test/`, `tests/`, `spec/`, `__tests__/`,
   `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`) is refused and the model is told to fix the source or
