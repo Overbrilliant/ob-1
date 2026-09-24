@@ -4,6 +4,19 @@ All notable OB-1 CLI changes are documented here.
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-09-24
+
+- Bash safety: commands smuggled into another command's arguments are now classified by what they
+  actually run. Interpreter one-liners (`python3 -c`, `perl -e/-E`, `node -e/--eval/-p`, `ruby -e`,
+  `php -r`, `deno eval`, …) are scanned for destructive file APIs (`shutil.rmtree`, `os.remove`,
+  `fs.rmSync`, `unlinkSync`, `rm_rf`, …), shell-outs (`os.system`, `subprocess`, `execSync`, `system()`)
+  and file writes, and harmless ones stay `unknown` rather than `write`. Also covered: `awk`/`gawk`/`mawk`
+  `system()` and pipes to `sh`, `watch`, `parallel`/`sem`, `sed` `e`/`s///e`, tar `--checkpoint-action=exec`
+  / `--to-command`, command-valued `git -c` keys, `rsync --delete*`/`--remove-source-files`, `docker
+  run/exec/compose`, and `$(…)`/backtick substitution. `doas`, `pkexec` and `run0` are stripped like
+  `sudo` (value-taking flags such as `sudo -u root` are now skipped too), so `doas rm -rf /` is refused.
+  Root/home targets inside code (`system("rm -rf /")`, `shutil.rmtree('/')`) are refused like `rm -rf /`.
+
 ## [0.3.11] - 2026-09-23
 
 - Bash safety: commands run from another command's arguments are now classified too. `find … -delete`
