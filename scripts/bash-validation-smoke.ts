@@ -59,6 +59,108 @@ const intent: [string, string][] = [
   ["eval 'rm -rf dist'", "destructive"],
   ["busybox rm -rf x", "destructive"],
   ["unlink foo", "destructive"],
+  // embedded-command runners (#4 + #5 combined): commands smuggled into a runner's ARGUMENTS — interpreter
+  // one-liners, awk system(), watch/parallel, sed `e`, tar/git exec hooks, docker run/exec, rsync --delete,
+  // and the sudo look-alikes doas/pkexec/run0.
+  [`python3 -c "import shutil; shutil.rmtree('/tmp/x')"`, "destructive"],
+  [`python -c "import shutil; shutil.rmtree('/')"`, "destructive"],
+  [`python3.12 -c "import os; os.system('rm -rf /tmp/x')"`, "destructive"],
+  [`python3 -I -c "import os; os.unlink('x')"`, "destructive"],
+  [`python3 -c "import os; os.remove('x')"`, "destructive"],
+  [`python3 -c "__import__('os').system('rm -rf x')"`, "destructive"],
+  [`python3 -c "import subprocess; subprocess.run(['rm', '-rf', 'x'])"`, "destructive"],
+  [`python3 -c "import subprocess; subprocess.run(cmd, shell=True)"`, "destructive"],  // opaque command → worst case
+  [`python -c "exec(open('evil.py').read())"`, "destructive"],                          // exec of non-literal code
+  [`perl -e 'unlink @ARGV' file`, "destructive"],
+  [`perl -E 'system("rm -rf /tmp/x")'`, "destructive"],
+  [`ruby -e 'FileUtils.rm_rf("x")'`, "destructive"],
+  [`node -e "require('fs').rmSync('/tmp/x',{recursive:true})"`, "destructive"],
+  [`node -e "require('fs').unlinkSync('x')"`, "destructive"],
+  [`node --eval "require('child_process').execSync('rm -rf x')"`, "destructive"],
+  [`node -p "require('child_process').execSync('rm -rf x')"`, "destructive"],
+  [`php -r 'unlink("x");'`, "destructive"],
+  [`osascript -e 'do shell script "rm -rf ~/x"'`, "destructive"],
+  [`env python3 -c "import os; os.system('rm -rf x')"`, "destructive"],
+  [`awk 'BEGIN{system("rm -rf /tmp/x")}'`, "destructive"],
+  [`gawk 'BEGIN{system("rm -rf x")}'`, "destructive"],
+  [`mawk 'BEGIN{system("rm x")}'`, "destructive"],
+  [`awk 'BEGIN{print "rm -rf x" | "sh"}'`, "destructive"],
+  [`awk '{ "rm -rf x" | getline }'`, "destructive"],
+  ["watch -n1 rm -rf /tmp/x", "destructive"],
+  ["watch -n 1 rm -rf build", "destructive"],                  // space before the interval
+  ["watch rm -rf build", "destructive"],
+  [`watch "rm -rf build"`, "destructive"],                     // quoted inner command
+  ["watch -d -n 1 rm -rf build", "destructive"],
+  ["parallel rm {} ::: /tmp/x", "destructive"],
+  ["parallel -j4 rm {} ::: a b", "destructive"],
+  ["ls | parallel rm", "destructive"],
+  ["sem rm -rf x", "destructive"],
+  [`parallel ::: "rm -rf a" "ls"`, "destructive"],             // no command: each ::: arg is a command
+  ["doas rm -rf /tmp/x", "destructive"],
+  ["doas -u root rm -rf x", "destructive"],
+  ["pkexec rm -rf x", "destructive"],
+  ["run0 rm -rf x", "destructive"],
+  ["sudo -u root rm -rf x", "destructive"],                    // sudo flags with a value were never skipped either
+  ["doas -n cp a b", "write"],
+  ["rsync --delete-before /tmp/empty/ target/", "destructive"],
+  ["rsync -a --delete src/ dst/", "destructive"],
+  ["rsync -a --remove-source-files src/ dst/", "destructive"],
+  [`sed '1e rm -rf /tmp/x' file`, "destructive"],
+  [`sed -n '1e rm -rf x' file`, "destructive"],
+  [`sed 's/x/date/e' file`, "destructive"],
+  [`sed -n '/x/w out.txt' file`, "write"],
+  [`tar xf a.tar --checkpoint-action=exec='rm -rf /tmp/x'`, "destructive"],
+  [`tar xf a.tar --to-command='rm -rf x'`, "destructive"],
+  [`git -c core.pager='rm -rf /tmp/x' log`, "destructive"],
+  [`git -c alias.x='!rm -rf build' x`, "destructive"],
+  ["docker run -v /:/host alpine rm -rf /host", "destructive"],
+  [`docker run --rm -v /:/h alpine sh -c 'rm -rf /h'`, "destructive"],
+  ["docker compose run --rm web rm -rf /app/tmp", "destructive"],
+  [`echo $(python3 -c "import shutil; shutil.rmtree('x')")`, "destructive"],
+  [`echo "$(rm -rf x)"`, "destructive"],                       // command substitution runs first, even in "…"
+  ["echo `rm -rf x`", "destructive"],
+  ["echo $(rm -rf x)", "destructive"],
+  [`node -e "console.log(\`rm -rf x\`)"`, "destructive"],      // backticks in "…" are the SHELL's, not JS's
+  ["python3 -c \"open('out','w').write('x')\"", "write"],      // file-writing one-liner is a write
+  ["perl -i -pe 's/a/b/' f", "write"],                         // in-place edit
+  [`php -r 'file_put_contents("x","y");'`, "write"],
+  // …and the harmless forms of the same runners do NOT move (were read-only/unknown/network/write before).
+  [`python -c "print(1)"`, "unknown"],                         // no write/destructive signal → unknown, not write
+  [`node -e "console.log(1)"`, "unknown"],
+  [`node --eval "console.log(1)"`, "unknown"],
+  [`perl -e 'print "hi\n"'`, "unknown"],
+  [`python3 -c "x=[1,2]; x.remove(1); print(x)"`, "unknown"],  // list.remove is not a file delete
+  [`python3 -c "import sys; sys.stdout.write('x')"`, "unknown"],
+  [`python3 -c "print('system')"`, "unknown"],
+  ["python script.py", "unknown"],
+  ["python3 script.py -c 'rm x'", "unknown"],                  // -c after the script is the script's argument
+  ["perl -pe 's/a/b/' f", "unknown"],
+  ["perl -ne 'print if /x/' f", "unknown"],
+  [`echo "use python -c to run"`, "read-only"],
+  [`grep 'system("x")' f | awk '{print}'`, "read-only"],       // awk/perl detection keys off the command word only
+  [`grep -r "perl -e" docs`, "read-only"],
+  [`grep "rsync --delete" README.md`, "read-only"],
+  ["awk '{print $1}' f.txt", "read-only"],
+  [`awk '{print $1 | "sort -u"}' f`, "unknown"],                  // unchanged: the plain split already sees `"sort -u"`
+  ["tar -xf a.tar", "unknown"],
+  ["tar -czf out.tgz src", "unknown"],
+  ["rsync -av src/ dst/", "network"],
+  ["rsync -av --exclude=delete src/ dst/", "network"],
+  ["watch ls", "unknown"],
+  ["watch -n 2 git status", "unknown"],
+  ["watch -n 1 date", "unknown"],
+  ["parallel --jobs 4 echo done", "unknown"],
+  ["sed -n 1p f", "unknown"],
+  ["sed 's/e /x/' f", "unknown"],
+  [`docker run --rm node:20 sh -c "npm test"`, "unknown"],     // inner command decides, not the sh wrapper
+  ["docker run -it ubuntu bash", "unknown"],
+  ["git -c user.name='Jo Doe' commit -m x", "write"],          // plain config value is not a command
+  ["git -c user.name='Jo Doe' log", "read-only"],
+  ["git -c color.ui=always log", "read-only"],
+  ["doas -s", "unknown"],
+  [`ls "$(pwd)"`, "read-only"],
+  [`echo '$(rm -rf x)'`, "read-only"],                         // single quotes: no substitution
+  ["echo $((1+2))", "read-only"],                              // arithmetic, not a command
   // …without false positives on the harmless forms
   ["find . -name x", "read-only"],
   ["find . -exec grep -l foo {} +", "read-only"],
@@ -112,6 +214,25 @@ check("block: find / -delete", isBlock("find / -delete"));
 check("block: truncate -s0 ~/.bashrc", isBlock("truncate -s0 ~/.bashrc"));
 check("plan mode blocks find -delete", isBlock("find . -name '*.tmp' -delete", { planMode: true }));
 check("plan mode blocks xargs -n1 rm", isBlock("ls | xargs -n 1 rm", { planMode: true }));
+check("block: doas rm -rf /", isBlock("doas rm -rf /"));
+check("block: pkexec rm -rf /", isBlock("pkexec rm -rf /"));
+check("block: doas -u root rm -rf /", isBlock("doas -u root rm -rf /"));
+check("block: run0 rm -rf ~", isBlock("run0 rm -rf ~"));
+check("block: watch -n 1 'rm -rf /'", isBlock("watch -n 1 'rm -rf /'"));
+check("block: python3 -c shutil.rmtree('/')", isBlock(`python3 -c "import shutil; shutil.rmtree('/')"`));
+check("block: python3 -c os.system('rm -rf /')", isBlock(`python3 -c "import os; os.system('rm -rf /')"`));
+check("block: awk system(\"rm -rf /\")", isBlock(`awk 'BEGIN{system("rm -rf /")}'`));
+check("block: perl -E system(\"rm -rf /\")", isBlock(`perl -E 'system("rm -rf /")'`));
+check("block: subprocess.run(['rm','-rf','/'])", isBlock(`python3 -c "import subprocess; subprocess.run(['rm','-rf','/'])"`));
+check("block: node rmSync('/')", isBlock(`node -e "require('fs').rmSync('/',{recursive:true})"`));
+check("block: git -c core.pager='rm -rf /'", isBlock("git -c core.pager='rm -rf /' log"));
+check("plan mode blocks awk system()", isBlock(`awk 'BEGIN{system("rm -rf x")}'`, { planMode: true }));
+check("plan mode blocks python -c file write", isBlock(`python3 -c "open('o','w').write('x')"`, { planMode: true }));
+check("warn (not block): watch -n 1 rm -rf build", isWarn("watch -n 1 rm -rf build"));
+check("warn (not block): rsync --delete", isWarn("rsync -a --delete src/ dst/"));
+check("plan mode blocks echo \"$(rm -rf x)\"", isBlock(`echo "$(rm -rf x)"`, { planMode: true }));
+check("allow: awk '{print $1}' in plan mode", isAllow("awk '{print $1}' f", { planMode: true }));
+check("allow: grep 'system(…)' | awk in plan mode", isAllow(`grep 'system("x")' f | awk '{print}'`, { planMode: true }));
 check("plan mode ALLOWS plain find", isAllow("find . -name '*.ts'", { planMode: true }));
 // legitimate-but-dangerous → WARN (runs, but the gate flags it)
 check("warn (not block): rm -rf node_modules", isWarn("rm -rf node_modules"));
