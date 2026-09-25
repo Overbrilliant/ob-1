@@ -4,6 +4,17 @@ All notable OB-1 CLI changes are documented here.
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-09-25
+
+- Bash safety: commands run through scheduling and buffering wrappers are now classified by the command
+  they run. `ionice`, `stdbuf`, `taskset`, `chrt`, `setsid` and `unbuffer` are parsed like `sudo`/`env`/
+  `timeout`, including their own options (`ionice -c 3 -n 7`, `stdbuf -o L`, `taskset -c 0` or a mask,
+  `chrt -f 99`, `setsid -fw`, `--`). So `ionice -c3 rm -rf /` or `taskset -c 0 rm -rf /` is refused, not
+  run as `unknown`. Path-prefixed wrappers (`/usr/bin/env`, `/usr/bin/sudo`, `/usr/bin/nice`, …) are
+  stripped too: `/usr/bin/env rm -rf /` used to read as read-only and could run in Plan mode. Also:
+  `nice -n5`, `nice --adjustment=N`, `timeout -s SIG` / `-k DUR`. `taskset -p`, `chrt -p` and
+  `ionice -p` (which change a running process) are no longer read-only.
+
 ## [0.3.12] - 2026-09-24
 
 - Bash safety: commands smuggled into another command's arguments are now classified by what they
