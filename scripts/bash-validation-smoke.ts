@@ -267,5 +267,55 @@ check("allow: npm run build", isAllow("npm run build"));
   check("isDestructiveCall: non-bash tool is never destructive", !isDestructiveCall("read_file", { path: "x" }));
 }
 
+// scheduling/buffering wrappers must not smuggle a command past the gates (same class as env/timeout)
+check("destructive: ionice -c2 rm -rf /", isBlock("ionice -c2 rm -rf /"));
+check("destructive: stdbuf -oL rm -rf ~", isBlock("stdbuf -oL rm -rf ~"));
+check("destructive: taskset 0x3 rm -rf /", isBlock("taskset 0x3 rm -rf /"));
+check("destructive: chrt -r 10 rm -rf /", isBlock("chrt -r 10 rm -rf /"));
+check("destructive: setsid -f -w rm -rf /", isBlock("setsid -f -w rm -rf /"));
+check("destructive: unbuffer rm -rf /", isBlock("unbuffer rm -rf /"));
+check("destructive: taskset --cpu-list 0,1 rm -rf /", isBlock("taskset --cpu-list 0,1 rm -rf /"));
+check("destructive: ionice --class=0 rm -rf /", isBlock("ionice --class=0 rm -rf /"));
+check("intent: stdbuf -oL -eL curl is network", classifyIntent("stdbuf -oL -eL curl https://x") === "network");
+check("intent: taskset -c 1 cat is read-only", classifyIntent("taskset -c 1 cat f") === "read-only");
+check("intent: ionice -p PID (pid mode, no COMMAND) is the wrapper itself → unknown", classifyIntent("ionice -p 1234") === "unknown");
+check("plan mode blocks ionice rm", isBlock("ionice -c2 rm -rf build", { planMode: true }));
+check("plan mode blocks stdbuf rm", isBlock("stdbuf -oL rm x", { planMode: true }));
+// option values as a SEPARATE word, `--`, clustered/less common flags, absolute paths, nesting, unparseable flags
+for (const c of [
+  "ionice -c 3 -n 7 rm -rf /", "ionice -c3 -n7 rm -rf /", "ionice -t -c3 rm -rf /", "ionice --class idle rm -rf /", "ionice -c3 -- rm -rf /",
+  "stdbuf -o L rm -rf /", "stdbuf -i0 -o0 -e0 rm -rf /", "stdbuf --output L rm -rf /",
+  "taskset -c 0 rm -rf /", "taskset -ac 0 rm -rf /", "taskset -a 0x3 rm -rf /", "taskset -- 0x3 rm -rf /", "taskset -c 0 -- rm -rf /",
+  "chrt -f 99 rm -rf /", "chrt 10 rm -rf /", "chrt -v -f 99 rm -rf /", "chrt -R -o 0 rm -rf /", "chrt -vf 99 rm -rf /", "chrt --other rm -rf /",
+  "chrt -d -T 100000 -P 200000 -D 200000 0 rm -rf /", "chrt --sched-runtime=1 --deadline 0 rm -rf /", "chrt -i 0 rm -rf /",
+  "setsid -f rm -rf /", "setsid -fw rm -rf /", "setsid --ctty rm -rf /", "unbuffer -p rm -rf /",
+  "/usr/bin/ionice -c3 rm -rf /", "/usr/bin/stdbuf -oL rm -rf /", "/usr/bin/taskset -c 0 rm -rf /", "/usr/bin/chrt -f 99 rm -rf /",
+  "/usr/bin/setsid rm -rf /", "/usr/bin/unbuffer rm -rf /", "/usr/bin/env rm -rf /", "/usr/bin/nice rm -rf /", "/usr/bin/timeout 5 rm -rf /",
+  "/usr/bin/sudo rm -rf /", "/usr/bin/nohup rm -rf /", "/bin/busybox rm -rf /",
+  "nice -n5 rm -rf /", "nice --adjustment=5 rm -rf /", "nice --adjustment 5 rm -rf /", "timeout -s KILL 5 rm -rf /", "timeout -k 1 5 rm -rf /",
+  "timeout --kill-after 1 --preserve-status 5 rm -rf /",
+  "nice -n 10 ionice -c3 rm -rf /", "ionice -c3 nice -n 19 rm -rf /", "timeout 60 stdbuf -oL rm -rf /", "env FOO=1 taskset -c 0 rm -rf /",
+  "nohup setsid -f rm -rf /", "sudo chrt -f 99 rm -rf /", "sudo /usr/bin/ionice -c3 rm -rf /",
+  "stdbuf -oL ionice -c3 taskset -c 0 chrt -f 1 setsid unbuffer rm -rf /",
+  "chrt --some-future-flag 5 rm -rf /", "ionice -Z rm -rf /", "timeout --bogus 5 rm -rf /", // unparseable flag → keyword fallback
+  "ionice -c3 python3 -c \"import shutil; shutil.rmtree('/')\"",
+]) check(`block: ${c}`, isBlock(c));
+check("warn: ionice -c 3 rm -rf build", isWarn("ionice -c 3 rm -rf build"));
+check("plan mode blocks /usr/bin/env rm (was a false read-only)", isBlock("/usr/bin/env rm x", { planMode: true }));
+check("plan mode blocks taskset -p MASK PID (sets affinity)", classifyIntent("taskset -p 0x3 1234") !== "read-only");
+check("plan mode blocks chrt -p PRIO PID (sets priority)", classifyIntent("chrt -f -p 99 1234") !== "read-only");
+check("plan mode blocks ionice -c3 -p PID (sets io class)", classifyIntent("ionice -c3 -p 1234") !== "read-only");
+check("unparseable wrapper flag is never read-only", classifyIntent("chrt --some-future-flag 5 cat f") !== "read-only");
+// benign uses keep the wrapped command's own intent (no false positives)
+for (const [c, want] of [
+  ["ionice -c 3 cat f", "read-only"], ["ionice -c3 -n7 grep -r x .", "read-only"], ["stdbuf -o L tail -f log", "read-only"],
+  ["taskset -c 0-3 ls", "read-only"], ["chrt -f 99 make", "unknown"], ["setsid -f code .", "unknown"], ["unbuffer -p cat f", "read-only"],
+  ["/usr/bin/ionice -c3 cat f", "read-only"], ["/usr/bin/env ls", "read-only"], ["/usr/bin/nice -n 5 cp a b", "write"],
+  ["timeout -s INT 30 curl https://x", "network"], ["nice -n5 ls", "read-only"], ["stdbuf -oL git log", "read-only"],
+  ["nohup ionice -c3 make -j8", "unknown"], ["chrt --some-future-flag 5 make", "unknown"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+check("allow: ionice -c 3 rm -rf build is only a warn, not a block", !isBlock("ionice -c 3 rm -rf build"));
+check("allow: stdbuf -oL grep rm f (rm is an argument)", isAllow("stdbuf -oL grep rm f"));
+
 if (fail) { console.error("\n✗ bash-validation smoke FAILED"); process.exit(1); }
 console.log("\n✓ bash-validation smoke passed");

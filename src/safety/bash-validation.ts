@@ -29,6 +29,8 @@ const READ_ONLY = new Set(["ls", "cat", "bat", "grep", "rg", "ag", "find", "fd",
 const NETWORK = new Set(["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp", "ping", "dig", "nslookup", "host"]);
 const PROCESS = new Set(["kill", "pkill", "killall", "systemctl", "service", "launchctl", "reboot", "shutdown", "halt", "poweroff"]);
 const WRITE = new Set(["cp", "mv", "mkdir", "rmdir", "touch", "tee", "ln", "chmod", "chown", "chgrp", "install", "patch", "git"]);
+/** Command-running wrappers that fall back to a keyword scan of their arguments when their options don't parse. */
+const WRAPPER_FALLBACK = new Set(["ionice", "stdbuf", "taskset", "chrt", "setsid", "unbuffer", "timeout"]);
 const DESTRUCTIVE = new Set(["rm", "shred", "srm", "mkfs", "dd", "fdisk", "parted", "wipefs", "format", "truncate", "unlink"]);
 
 /** Strip leading `sudo`/`env …`/`timeout …`/`nice …` wrappers and return the real leading token of a
@@ -41,6 +43,10 @@ function leadingToken(segment: string): { tok: string; rest: string } {
   let s = segment.trim();
   // drop env assignments (FOO=bar baz) and common wrappers
   for (;;) {
+    // `/usr/bin/env rm -rf /`, `/usr/bin/sudo …`, `/usr/bin/ionice …`: a path-prefixed WRAPPER is the same
+    // wrapper. Without this, `/usr/bin/env rm -rf /` classified as `env` → read-only (runs in Plan mode, and
+    // the catastrophic-path block never fired) and every other path-prefixed wrapper as `unknown`.
+    s = s.replace(WRAPPER_PATH, "");
     const m = s.match(/^([A-Za-z_][\w]*=\S*|command|nohup|time|exec|busybox)\s+/);
     if (m) { s = s.slice(m[0].length); continue; }
     // Privilege wrappers: sudo and its look-alikes doas (BSD), pkexec (polkit), run0 (systemd). Skip their
@@ -66,20 +72,36 @@ function leadingToken(segment: string): { tok: string; rest: string } {
     }
     // `timeout [-flags] DURATION cmd …` (GNU coreutils). Stop on anything unrecognized → `timeout` token → unknown.
     if (/^timeout(\s|$)/.test(s)) {
-      const m2 = s.match(/^timeout\s+(?:-\S+\s+)*(?:\d+(?:\.\d+)?[smhdw]?|\d+(?:\.\d+)?:\d+(?::\d+)?)\s+/);
+      // `-s SIG` / `-k DUR` / `--signal SIG` / `--kill-after DUR` take a separate-word value.
+      const m2 = s.match(/^timeout\s+(?:(?:-[sk]|--signal|--kill-after)\s+\S+\s+|-\S+\s+)*(?:\d+(?:\.\d+)?[smhdw]?|\d+(?:\.\d+)?:\d+(?::\d+)?)\s+/);
       if (!m2) return { tok: "timeout", rest: s.slice("timeout".length) };
       s = s.slice(m2[0].length);
       continue;
     }
     // `nice [-n ADJ] cmd` / `nice ADJ cmd` — strip the adjustment so `nice -n 5 cp a b` classifies as write.
     if (/^nice(\s|$)/.test(s)) {
-      const m2 = s.match(/^nice\s+(?:-n\s+-?\d+|-?\d+\s)\s*/);
+      const m2 = s.match(/^nice\s+(?:-n\s*[-+]?\d+\s|--adjustment(?:=|\s+)[-+]?\d+\s|-?\d+\s)\s*/);
       if (m2) { s = s.slice(m2[0].length); continue; }
       if (/^nice\s+-n\s*$/.test(s)) return { tok: "nice", rest: "" };
       // bare `nice` (prints scheduling priority) → read-only
       if (s === "nice") return { tok: "nice", rest: "" };
       // plain `nice cmd …` (no adjustment): strip the wrapper like before, so `nice rm -rf /` stays destructive.
       s = s.replace(/^nice\s+/, "");
+      continue;
+    }
+    // Scheduling / buffering wrappers (coreutils, util-linux, expect) that exec a COMMAND after their own
+    // options — the same failure mode as `env`/`timeout` above: `ionice -c2 rm -rf /` and friends classified
+    // as `unknown`, skipping plan-mode enforcement, the destructive warning, and the catastrophic-path block.
+    const sw = s.match(/^(ionice|stdbuf|taskset|chrt|setsid|unbuffer)(?=\s|$)/);
+    if (sw) {
+      const name = sw[1]!;
+      const t = wrapperRest(s.slice(name.length), SCHED_WRAPPERS[name]!);
+      // No COMMAND (bare wrapper, `-p PID` / `--help` mode) → the wrapper token itself → `unknown` (never
+      // `read-only`: `taskset -p 0x3 PID` / `chrt -p 99 PID` change a running process). An option we can't
+      // parse also stops here, but keeps the rest so classify() can fall back to a keyword scan.
+      if (t.kind === "none") return { tok: name, rest: "" };
+      if (t.kind === "fail") return { tok: name, rest: t.rest };
+      s = t.rest;
       continue;
     }
     break;
@@ -92,6 +114,79 @@ function leadingToken(segment: string): { tok: string; rest: string } {
 
 /** sudo/doas/pkexec/run0 flags that take a value (`-u root`, `-uroot`, `--user=root`, `--chdir /x`). */
 const PRIV_FLAG = /^(?:-[ugCDhprtUTa](?:\s+|(?=\S))[^\s-]\S*|--(?:user|group|chdir|close-from|host|prompt|role|type|other-user|command-timeout|setenv|nice|unit|property|description|slice|machine|background)(?:=|\s+)\S+)(?:\s+|$)/;
+
+/** Wrapper names recognised with a path prefix (`/usr/bin/env` → `env`). */
+const WRAPPER_PATH = /^\S*\/(?=(?:sudo|doas|pkexec|run0|env|timeout|nice|nohup|time|busybox|ionice|stdbuf|taskset|chrt|setsid|unbuffer)(?:\s|$))/;
+
+/** Option grammar of a `WRAPPER [options] [positional] COMMAND …` wrapper. Short letters may cluster (`-vf`);
+ *  a value letter takes the rest of its word or the next word (`-c3`, `-c 3`); long options take `=v` or a
+ *  separate word. `none` letters/names (`-p PID`, `--help`) mean no COMMAND follows. */
+interface WrapperSpec {
+  shortVal?: string; shortBool?: string; none?: string;
+  longVal?: string[]; longBool?: string[]; longNone?: string[];
+  /** One optional positional before COMMAND (taskset's mask, chrt's priority). */
+  positional?: RegExp;
+  /** Options that replace the positional (`taskset -c LIST cmd` has no mask word). */
+  replacesPositional?: string[];
+}
+const SCHED_WRAPPERS: Record<string, WrapperSpec> = {
+  ionice: { shortVal: "cn", shortBool: "t", none: "pPuhV", longVal: ["class", "classdata"], longBool: ["ignore"], longNone: ["pid", "pgid", "uid", "help", "version"] },
+  stdbuf: { shortVal: "ioe", none: "hV", longVal: ["input", "output", "error"], longNone: ["help", "version"] },
+  taskset: { shortVal: "c", shortBool: "a", none: "phV", longVal: ["cpu-list"], longBool: ["all-tasks"], longNone: ["pid", "help", "version"], positional: /^\S+$/, replacesPositional: ["c", "cpu-list"] },
+  chrt: {
+    shortVal: "TPD", shortBool: "bdfiorRamv", none: "phV",
+    longVal: ["sched-runtime", "sched-period", "sched-deadline"],
+    longBool: ["batch", "deadline", "fifo", "idle", "other", "rr", "reset-on-fork", "all-tasks", "max", "verbose"],
+    longNone: ["pid", "help", "version"], positional: /^-?\d+$/,
+  },
+  setsid: { shortBool: "cfw", none: "hV", longBool: ["ctty", "fork", "wait"], longNone: ["help", "version"] },
+  unbuffer: { shortBool: "p" },
+};
+
+/** Parse a wrapper's own options off `t` (the text after the wrapper name) and return the COMMAND text.
+ *  `none` = no command follows (bare wrapper, pid/help mode); `fail` = an option outside the grammar, so the
+ *  caller stays conservative (wrapper token → `unknown`, plus a keyword scan of `rest`). Getopt-style: options
+ *  stop at `--` or the first non-option word (all of these wrappers use `+` / POSIXLY_CORRECT parsing). */
+function wrapperRest(t: string, spec: WrapperSpec): { kind: "cmd" | "none" | "fail"; rest: string } {
+  let rest = t.trimStart();
+  const word = () => rest.match(/^\S+/)?.[0] ?? "";
+  const shift = () => { rest = rest.slice(word().length).trimStart(); };
+  let endOpts = false;
+  let positional = spec.positional;
+  for (;;) {
+    const w = word();
+    if (!w) return { kind: "none", rest: "" };
+    if (!endOpts && w === "--") { endOpts = true; shift(); continue; }
+    if (!endOpts && w.startsWith("--")) {
+      const eq = w.indexOf("=");
+      const name = w.slice(2, eq < 0 ? undefined : eq);
+      if (spec.longNone?.includes(name)) return { kind: "none", rest: "" };
+      if (spec.replacesPositional?.includes(name)) positional = undefined;
+      if (spec.longVal?.includes(name)) { shift(); if (eq < 0) shift(); continue; }
+      if (spec.longBool?.includes(name) && eq < 0) { shift(); continue; }
+      return { kind: "fail", rest };
+    }
+    if (!endOpts && /^-./.test(w)) {
+      let takesNext = false;
+      for (let k = 1; k < w.length; k++) {
+        const ch = w[k]!;
+        if (spec.none?.includes(ch)) return { kind: "none", rest: "" };
+        if (spec.shortBool?.includes(ch)) continue;
+        if (spec.shortVal?.includes(ch)) {
+          if (spec.replacesPositional?.includes(ch)) positional = undefined;
+          takesNext = k === w.length - 1;            // `-c 3` (value is the next word) vs `-c3`
+          break;
+        }
+        return { kind: "fail", rest };
+      }
+      shift();
+      if (takesNext) { if (!word()) return { kind: "fail", rest }; shift(); }
+      continue;
+    }
+    if (positional?.test(w)) { positional = undefined; shift(); continue; }
+    return { kind: "cmd", rest };
+  }
+}
 
 /** Skip `xargs`'s own options and return the command it will run (`xargs -n 1 -I {} rm {}` → `rm {}`). */
 function xargsCommand(rest: string): string {
@@ -425,6 +520,18 @@ function classify(cmd: string, depth: number): CommandIntent {
     if (!seg.trim()) continue;
     const { tok, rest } = leadingToken(seg);
     if (!tok) continue;
+    if (WRAPPER_FALLBACK.has(tok) && rest.trim()) {
+      // A scheduling wrapper whose options we couldn't parse (`chrt --new-flag 5 rm -rf /`): we don't know
+      // where its COMMAND starts, so treat any known command word in its arguments as a possible command.
+      // Over-approximate on purpose — only reached for options outside the wrapper's grammar.
+      for (const w of rest.trim().split(/\s+/)) {
+        const b = w.replace(/^['"]+|['"]+$/g, "").replace(/^.*\//, "");
+        if (DESTRUCTIVE.has(b) || b.startsWith("mkfs")) bump("destructive");
+        else if (PROCESS.has(b)) bump("process");
+        else if (WRITE.has(b)) bump("write");
+        else if (NETWORK.has(b)) bump("network");
+      }
+    }
     if (DESTRUCTIVE.has(tok) || tok.startsWith("mkfs")) bump("destructive");
     else if (PROCESS.has(tok)) bump("process");
     else if (tok === "git") {
