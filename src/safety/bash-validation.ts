@@ -485,6 +485,32 @@ function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inn
         sub(kv.slice(eq + 1).replace(/^!/, ""));
       }
     }
+    // `git grep -O[CMD]` / `--open-files-in-pager[=CMD]` pipes hits through CMD (default `less`);
+    // `git bisect run CMD…` executes CMD per bisect step. Both run a caller-supplied command after the
+    // subcommand word, so they live outside the leading-options loop above.
+    for (let i = 0; i < words.length; i++) {
+      const m = words[i]!.match(/^(?:--open-files-in-pager(?:=([\s\S]*))?|-O([\s\S]*))$/);
+      const val = m ? (m[1] ?? m[2] ?? "") : "";
+      if (val.trim()) sub(val);
+      if (words[i] === "bisect" && words[i + 1] === "run") {
+        const inner = words.slice(i + 2);
+        if (inner.length) sub(joinArgv(inner));
+        break;
+      }
+    }
+    return;
+  }
+  if (tok === "sort" || tok === "diff" || tok === "rg") {
+    // Read-only viewers that EXEC a helper passed as an option value: `sort --compress-program CMD`
+    // (runs CMD as the temp-file compressor), `diff --filter CMD` (runs CMD over each file first),
+    // rg `--pre CMD` / `--hostname-bin CMD`. All run their argument through `/bin/sh -c`, so
+    // `rg --pre 'rm -rf /' needle` used to classify as plain read-only — plan mode allowed it and the
+    // catastrophic-path block never looked at it. Same class as `find -exec`/`xargs`: mutation
+    // smuggled as an ARGUMENT of a read-only executable.
+    for (let i = 0; i < words.length; i++) {
+      const m = words[i]!.match(/^--(?:compress-program|filter|pre|hostname-bin)(?:=([\s\S]*))?$/);
+      if (m) sub(m[1] ?? words[++i] ?? "");
+    }
     return;
   }
   if (tok === "env") {

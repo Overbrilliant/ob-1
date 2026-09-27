@@ -111,6 +111,19 @@ const intent: [string, string][] = [
   [`sed -n '/x/w out.txt' file`, "write"],
   [`tar xf a.tar --checkpoint-action=exec='rm -rf /tmp/x'`, "destructive"],
   [`tar xf a.tar --to-command='rm -rf x'`, "destructive"],
+  // read-only viewers that exec an option-value helper via `sh -c`: sort --compress-program,
+  // diff --filter, rg --pre / --hostname-bin (the same smuggling class as find -exec / xargs).
+  [`sort --compress-program='rm -rf /tmp/x' file`, "destructive"],
+  ["sort --compress-program rm -rf file", "destructive"],
+  [`diff --filter='rm -rf /tmp/x' a b`, "destructive"],
+  [`rg --pre='rm -rf /tmp/x' foo .`, "destructive"],
+  [`rg --pre 'rm -rf /' needle`, "destructive"],
+  ["rg --pre wc foo", "read-only"],                              // benign helper stays benign
+  ["sort --compress-program zstd file", "unknown"],
+  [`git grep -O'rm -rf /tmp/x' pat`, "destructive"],             // -O[CMD] pipes hits through CMD
+  ["git bisect run rm -rf /tmp/x", "destructive"],               // bisect run executes CMD per step
+  ["git bisect run npm test", "unknown"],
+  ["git bisect good", "read-only"],
   [`git -c core.pager='rm -rf /tmp/x' log`, "destructive"],
   [`git -c alias.x='!rm -rf build' x`, "destructive"],
   ["docker run -v /:/host alpine rm -rf /host", "destructive"],
