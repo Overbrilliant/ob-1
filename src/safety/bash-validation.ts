@@ -30,7 +30,9 @@ const NETWORK = new Set(["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "n
 const PROCESS = new Set(["kill", "pkill", "killall", "systemctl", "service", "launchctl", "reboot", "shutdown", "halt", "poweroff"]);
 const WRITE = new Set(["cp", "mv", "mkdir", "rmdir", "touch", "tee", "ln", "chmod", "chown", "chgrp", "install", "patch", "git"]);
 /** Command-running wrappers that fall back to a keyword scan of their arguments when their options don't parse. */
-const WRAPPER_FALLBACK = new Set(["ionice", "stdbuf", "taskset", "chrt", "setsid", "unbuffer", "timeout"]);
+const WRAPPER_FALLBACK = new Set(["ionice", "stdbuf", "taskset", "chrt", "setsid", "unbuffer", "timeout",
+  // Namespace/user/tracing runners whose COMMAND position we deliberately don't parse (see leadingToken):
+  "su", "runuser", "chroot", "nsenter", "systemd-run", "script", "strace", "ltrace", "valgrind", "gdb"]);
 const DESTRUCTIVE = new Set(["rm", "shred", "srm", "mkfs", "dd", "fdisk", "parted", "wipefs", "format", "truncate", "unlink"]);
 
 /** Strip leading `sudo`/`env …`/`timeout …`/`nice …` wrappers and return the real leading token of a
@@ -63,12 +65,35 @@ function leadingToken(segment: string): { tok: string; rest: string } {
     // `env [-flags] [VAR=val …] cmd …` — `env` with nothing after it just prints the environment, and
     // with only flags/assignments still to come it stays `env` (read-only) because the loop stops below.
     if (/^env(\s|$)/.test(s)) {
+      // `env -S 'rm -rf /'` / `env --split-string='rm -rf /'` (--split-string): the quoted argument is the
+      // WHOLE command line. The blanket `-\S+` skip below ate `-S` and treated `'rm` as the command word →
+      // token `env` → read-only, so a catastrophic delete planned as read-only and the path block never ran.
+      // Hand the split string's text back as `rest` with tok `env` — WRAPPER_FALLBACK's keyword scan classifies it.
+      const split = s.match(/^env\s+(?:(?:-\S+|[A-Za-z_]\w*=\S*)\s+)*?(?:-S|--split-string)(?:=|\s+)/);
+      if (split) {
+        // Stop stripping; embeddedIntent's env branch extracts and classifies the split-string value.
+        return { tok: "env", rest: s.slice("env".length) };
+      }
       s = s.replace(/^env\s*/, "");
       let m2: RegExpExecArray | null;
       while ((m2 = /^(?:-\S+|[A-Za-z_]\w*=\S*)\s+/.exec(s))) s = s.slice(m2[0].length); // skip -i and FOO=bar
       if (!s) return { tok: "env", rest: "" };                                          // `env -i` alone → read-only
       if (/^-\S+$/.test(s)) return { tok: "env", rest: "" };                             // trailing flag w/ arg (`env -u PATH`) → conservative
       continue;
+    }
+    // Namespace / user-switching / tracing runners that exec a COMMAND exactly like sudo does:
+    // `su [-] USER [-c CMD]`, `runuser [-u USER] [USER] [-c CMD]`, `chroot NEWROOT [CMD]`, `nsenter [-opts] [CMD]`,
+    // `systemd-run [opts] CMD`, `script [-c CMD] [file]`, `strace|ltrace|valgrind|gdb [opts] CMD`. None were
+    // stripped, so all classified as `unknown` — skipping plan-mode enforcement, the destructive warning and the
+    // catastrophic-path block (`chroot /mnt rm -rf /`, `su root -c 'rm -rf /'`, `systemd-run rm -rf /tmp/x`).
+    // Their command-position grammars differ per flavour (user positional before -c, namespaces, --unit=…), so
+    // rather than mis-parse them we stop at the wrapper token and let WRAPPER_FALLBACK keyword-scan the rest:
+    // over-approximate on purpose, never a false read-only.
+    if (/^(?:su|runuser|chroot|nsenter|systemd-run|script|strace|ltrace|valgrind|gdb)(?=\s|$)/.test(s)) {
+      const name = s.match(/^(\S+)/)![1]!;
+      const rest = s.slice(name.length).trim();
+      if (!rest) return { tok: name, rest: "" };
+      return { tok: name, rest };
     }
     // `timeout [-flags] DURATION cmd …` (GNU coreutils). Stop on anything unrecognized → `timeout` token → unknown.
     if (/^timeout(\s|$)/.test(s)) {
@@ -116,7 +141,7 @@ function leadingToken(segment: string): { tok: string; rest: string } {
 const PRIV_FLAG = /^(?:-[ugCDhprtUTa](?:\s+|(?=\S))[^\s-]\S*|--(?:user|group|chdir|close-from|host|prompt|role|type|other-user|command-timeout|setenv|nice|unit|property|description|slice|machine|background)(?:=|\s+)\S+)(?:\s+|$)/;
 
 /** Wrapper names recognised with a path prefix (`/usr/bin/env` → `env`). */
-const WRAPPER_PATH = /^\S*\/(?=(?:sudo|doas|pkexec|run0|env|timeout|nice|nohup|time|busybox|ionice|stdbuf|taskset|chrt|setsid|unbuffer)(?:\s|$))/;
+const WRAPPER_PATH = /^\S*\/(?=(?:sudo|doas|pkexec|run0|env|timeout|nice|nohup|time|busybox|ionice|stdbuf|taskset|chrt|setsid|unbuffer|su|runuser|chroot|nsenter|systemd-run|script|strace|ltrace|valgrind|gdb)(?:\s|$))/;
 
 /** Option grammar of a `WRAPPER [options] [positional] COMMAND …` wrapper. Short letters may cluster (`-vf`);
  *  a value letter takes the rest of its word or the next word (`-c3`, `-c 3`); long options take `=v` or a
@@ -462,6 +487,23 @@ function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inn
     }
     return;
   }
+  if (tok === "env") {
+    // `env -S 'rm -rf /'` / `--split-string='…'`: the argument IS the command line (env splits and execs it).
+    // leadingToken can't reach the inner command through its flag-skipping loop, and a keyword scan of the
+    // raw segment text would fire on plain `env FOO=rm cmd`, so only the split-string VALUE is classified.
+    const split = rest.match(/(?:^|\s)(?:-S|--split-string)(?:=|\s+)("((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|\S+)/);
+    if (split) { sub((split[2] ?? split[3] ?? "").replace(/\\(.)/g, "$1")); }
+    return;
+  }
+  if (tok === "socat") {
+    // socat's EXEC: / SYSTEM: / OPEN: address options run the argument as a program/shell command:
+    // `socat TCP-LISTEN:4444 EXEC:'rm -rf /'` (the classic bind-shell shape) classified as plain `unknown`.
+    for (const m of rest.matchAll(/\b(?:EXEC|SYSTEM|exec|system)\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^,\s]+))/g)) {
+      const inner = (m[1] ?? m[2] ?? m[3] ?? "").replace(/\\(.)/g, "$1");
+      if (inner.trim()) sub(inner); else bump("destructive");
+    }
+    return;
+  }
   if (tok === "docker" || tok === "podman") {
     // `docker run [opts] IMAGE CMD…` / `docker exec [opts] CTR CMD…` / `docker compose run|exec [opts] SVC CMD…`:
     // classify CMD like any command, so `docker run -v /:/h alpine rm -rf /h` is destructive but
@@ -524,8 +566,23 @@ function classify(cmd: string, depth: number): CommandIntent {
       // A scheduling wrapper whose options we couldn't parse (`chrt --new-flag 5 rm -rf /`): we don't know
       // where its COMMAND starts, so treat any known command word in its arguments as a possible command.
       // Over-approximate on purpose — only reached for options outside the wrapper's grammar.
-      for (const w of rest.trim().split(/\s+/)) {
-        const b = w.replace(/^['"]+|['"]+$/g, "").replace(/^.*\//, "");
+      let words = rest.trim().split(/\s+/);
+      if (tok === "script") {
+        // `script [opts] [FILE]` — FILE is the typescript LOG, not a command (`script -q rm` logs to ./rm).
+        // The command comes from `-c/--command CMD` (util-linux) or, on BSD/macOS, the words AFTER FILE.
+        let r = rest;
+        const cm = r.match(/(?:^|\s)(?:-[a-zA-Z]*c|--command)(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/);
+        if (cm) { sub(cm[1]!.replace(/^(["'])([\s\S]*)\1$/, "$2")); r = r.replace(cm[0], " "); }
+        words = r.trim().split(/\s+/).filter(Boolean);
+        const file = words.findIndex(w => !w.startsWith("-"));
+        words = file < 0 ? [] : words.slice(file + 1);
+      }
+      for (let i = 0; i < words.length; i++) {
+        const b = words[i]!.replace(/^['"]+|['"]+$/g, "").replace(/^.*\//, "");
+        // git's intent depends on its subcommand (`strace -f git status` is a read), so classify the git
+        // invocation itself rather than treating the bare word as a write. Keep scanning after it: the word
+        // may be an option value (`su git -c 'rm -rf /'`), so later command words still count.
+        if (b === "git") { sub(words.slice(i).join(" ").replace(/['"]/g, "")); continue; }
         if (DESTRUCTIVE.has(b) || b.startsWith("mkfs")) bump("destructive");
         else if (PROCESS.has(b)) bump("process");
         else if (WRITE.has(b)) bump("write");

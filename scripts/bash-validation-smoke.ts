@@ -184,7 +184,7 @@ const intent: [string, string][] = [
   ["nice rm -rf /", "destructive"],                 // plain nice (no -n) must still be stripped
   ["nice cp a b", "write"],
   ["timeout 5s", "unknown"],                        // timeout with no command
-  ["env -S \"rm -rf /\"", "unknown"],               // unparseable env flag form → unknown, NEVER read-only
+  ["env -S \"rm -rf /\"", "destructive"],           // --split-string: the value IS the command (was unknown; now classified)
 ];
 for (const [cmd, want] of intent) check(`intent: ${cmd}  → ${want}`, classifyIntent(cmd) === want);
 
@@ -316,6 +316,49 @@ for (const [c, want] of [
 ] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
 check("allow: ionice -c 3 rm -rf build is only a warn, not a block", !isBlock("ionice -c 3 rm -rf build"));
 check("allow: stdbuf -oL grep rm f (rm is an argument)", isAllow("stdbuf -oL grep rm f"));
+
+// namespace / user-switching / tracing runners + socat EXEC + env -S: commands smuggled past the classifier
+// because the wrapper token was never stripped (same failure class as env/timeout/scheduling wrappers).
+for (const c of [
+  "su root -c 'rm -rf /'", "su - root -c \"rm -rf /\"", "runuser -u root -- rm -rf /", "runuser root -c 'rm -rf /'",
+  "chroot /mnt rm -rf /", "chroot /mnt /bin/rm -rf /etc", "nsenter -t 1 -m rm -rf /", "nsenter --target 1 --mount -- rm -rf /",
+  "systemd-run rm -rf /", "script -qc 'rm -rf /' /dev/null", "valgrind rm -rf /",
+  "/usr/sbin/chroot /mnt rm -rf /", "sudo su root -c 'rm -rf /'",
+  "socat tcp-listen:1234 EXEC:\"rm -rf /\"",
+  "env -S 'rm -rf /'", "env --split-string='rm -rf /'", "env -i -S 'rm -rf /'",
+]) check(`block: ${c}`, isBlock(c));
+for (const c of [
+  "systemd-run rm -rf /tmp/x", "systemd-run --unit=x --description=y rm -rf /tmp/x",
+  "strace rm -rf /tmp/x", "ltrace -e x rm -rf /tmp/x", "socat - SYSTEM:'rm -rf /tmp/x'",
+]) check(`warn (destructive, /tmp path): ${c}`, isWarn(c));
+check("warn: su root -c 'rm -rf build' (destructive, project path)", isWarn("su root -c 'rm -rf build'"));
+check("warn: strace rm -rf build", isWarn("strace rm -rf build"));
+check("plan mode blocks chroot rm", isBlock("chroot /mnt rm x", { planMode: true }));
+check("plan mode blocks su -c rm", isBlock("su root -c 'rm x'", { planMode: true }));
+check("plan mode blocks systemd-run rm", isBlock("systemd-run rm x", { planMode: true }));
+// benign forms keep sane intent (never false read-only, but no catastrophic block)
+check("intent: su root (bare login shell) is the wrapper, not destructive", classifyIntent("su root") === "unknown");
+check("intent: nsenter -t 1 -m (shell only) is the wrapper", classifyIntent("nsenter -t 1 -m") === "unknown");
+check("intent: strace ls is the wrapper (keyword scan sees only ls)", classifyIntent("strace ls") === "unknown");
+check("allow: gdb -batch -ex run ./x (no known command word)", isAllow("gdb -batch -ex run ./x"));
+check("allow: env FOO=rm cmd (rm is an assignment value, not a command)", classifyIntent("env FOO=rm cmd") !== "destructive");
+check("intent: env -i /bin/ls is not destructive", classifyIntent("env -i /bin/ls") !== "destructive");
+check("allow: socat TCP-LISTEN:80,fork TCP:localhost:8080", isAllow("socat TCP-LISTEN:80,fork TCP:localhost:8080"));
+// git under a tracing/namespace runner is classified by its subcommand, not bumped to write by the bare word.
+for (const c of ["strace -f git status", "valgrind git log", "chroot /mnt git log", "ltrace git diff"]) {
+  check(`plan mode allows read-only git under a runner: ${c}`, !isBlock(c, { planMode: true }) && !["write", "destructive", "process"].includes(classifyIntent(c)));
+}
+check("intent: strace git push --force is destructive", classifyIntent("strace git push --force") === "destructive");
+check("intent: chroot /mnt git commit -m x is a write", classifyIntent("chroot /mnt git commit -m x") === "write");
+check("intent: su git -c 'rm -rf build' (user named git) is still destructive", classifyIntent("su git -c 'rm -rf build'") === "destructive");
+check("intent: su root -c 'rm -rf /' still destructive", classifyIntent("su root -c 'rm -rf /'") === "destructive");
+check("block: su root -c 'rm -rf /' still blocked", isBlock("su root -c 'rm -rf /'"));
+// script's positional FILE is the log file, not a command.
+check("intent: script -q rm (log file named rm) is not destructive", classifyIntent("script -q rm") !== "destructive");
+check("intent: script -c 'rm -rf build' out.log is destructive", classifyIntent("script -c 'rm -rf build' out.log") === "destructive");
+check("intent: script --command='rm x' is destructive", classifyIntent("script --command='rm x'") === "destructive");
+check("intent: script -q log rm -rf build (BSD: command after file) is destructive", classifyIntent("script -q log rm -rf build") === "destructive");
+
 
 if (fail) { console.error("\n✗ bash-validation smoke FAILED"); process.exit(1); }
 console.log("\n✓ bash-validation smoke passed");
