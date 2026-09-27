@@ -372,6 +372,72 @@ check("intent: script -c 'rm -rf build' out.log is destructive", classifyIntent(
 check("intent: script --command='rm x' is destructive", classifyIntent("script --command='rm x'") === "destructive");
 check("intent: script -q log rm -rf build (BSD: command after file) is destructive", classifyIntent("script -q log rm -rf build") === "destructive");
 
+// ── time wrapper, sed -i, SQL clients, docker prune (same smuggling class) ──
+// `time` was stripped only as a bare word; any flag (`-v`, `-p`, `-o FILE`) made the leading token the
+// flag → unknown, so `time -v rm -rf /` skipped plan mode, the destructive warning and the path block.
+for (const [c, want] of [
+  ["time -v rm -rf /tmp/x", "destructive"], ["time -p ls", "read-only"], ["time -o run.log rm x", "destructive"],
+  ["/usr/bin/time -v rm -rf /tmp/x", "destructive"], ["time make", "unknown"], ["time ls", "read-only"],
+  ["nohup time -v rm -rf build", "destructive"], ["time -v -- ls", "read-only"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+check("plan mode blocks time -v rm (flag hid the command)", isBlock("time -v rm -rf /tmp/x", { planMode: true }));
+check("unparseable time flag is never read-only", classifyIntent("time --future-flag 5 cat f") !== "read-only");
+
+// sed -i rewrites the FILE: a write (plan-mode block + approval), not the old `unknown` pass-through.
+for (const [c, want] of [
+  ["sed -i 's/a/b/' f", "write"], ["sed -i.bak 's/a/b/' f", "write"], ["sed --in-place 's/a/b/' f", "write"],
+  ["sed --in-place=.bak 's/a/b/' f", "write"], ["sed -n 5p f", "unknown"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+check("plan mode blocks sed -i (in-place edit is a write)", isBlock("sed -i 's/a/b/' file.txt", { planMode: true }));
+check("allow: plain sed stays a read (no -i)", isAllow("sed 's/a/b/' file.txt"));
+
+// SQL clients run whatever statement they are handed.
+for (const [c, want] of [
+  ["sqlite3 app.db 'delete from users'", "destructive"], ["mysql -e \"drop table t\"", "destructive"],
+  ["psql db -c 'update t set x=1'", "write"], ["psql db -c 'select 1'", "unknown"],
+  ["sqlite3 app.db 'select * from t'", "unknown"], ["mysql -e \"insert into t values (1)\"", "write"],
+] as const) check(`intent: ${c.replace(/\s+/g, " ").slice(0, 42)} → ${want}`, classifyIntent(c) === want);
+check("plan mode blocks sqlite3 DELETE", isBlock("sqlite3 app.db 'delete from t'", { planMode: true }));
+check("warn: mysql DROP TABLE is destructive", isWarn("mysql -e \"drop table t\""));
+// Only the statement text is classified (never a db/file name or redirect target), string literals are
+// stripped, and only each statement's LEADING keyword counts — these used to be false writes/deletes.
+for (const c of [
+  "sqlite3 update.db 'select 1'", "psql -c \"select replace(name,'a','b') from t\"",
+  "sqlite3 app.db \"select * from t where name like '%update%'\"", "psql -c \"select * from audit where action='delete'\"",
+  "sqlite3 app.db < drop.sql", "sqlite3 app.db <drop.sql", "mysql delete_me -e 'select 1'", "psql -f create.sql db",
+]) {
+  const i = classifyIntent(c);
+  check(`sql false positive stays a read: ${c} (${i})`, i !== "write" && i !== "destructive");
+  check(`plan mode allows: ${c}`, !isBlock(c, { planMode: true }));
+}
+for (const [c, want] of [
+  ["psql -c \"delete from t\"", "destructive"], ["sqlite3 a.db \"drop table t\"", "destructive"],
+  ["mysql -e \"update t set x=1\"", "write"], ["mysql --execute='insert into t values (1)'", "write"],
+  ["psql --command='select 1; truncate t'", "destructive"], ["mariadb -e\"alter table t add c int\"", "write"],
+  ["sqlite3 -cmd 'delete from t' a.db", "destructive"], ["psql -c \"  DELETE FROM t\"", "destructive"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+
+// sed in-place inside a combined flag cluster.
+for (const c of ["sed -Ei 's/a/b/' f", "sed -ni 'p' f", "sed -i.bak 's/a/b/' f", "sed -nEi.bak 's/a/b/' f"]) {
+  check(`intent: ${c} → write`, classifyIntent(c) === "write");
+}
+check("intent: sed -e 's/i/j/' f is not in-place", classifyIntent("sed -e 's/i/j/' f") !== "write");
+
+// docker removal verbs.
+for (const c of ["docker rm -f web", "docker rmi app:old", "docker volume rm data", "docker compose down -v",
+  "docker compose -f x.yml down --volumes", "docker-compose down -v", "docker image rm app", "docker container rm -f web"]) {
+  check(`intent: ${c} → destructive`, classifyIntent(c) === "destructive");
+}
+for (const c of ["docker ps", "docker compose ps", "docker system df", "docker compose down"]) {
+  check(`intent: ${c} is not destructive`, classifyIntent(c) !== "destructive");
+}
+
+// docker …prune deletes containers/images/volumes — destructive, was `unknown`.
+for (const [c, want] of [
+  ["docker system p" + "rune -af", "destructive"], ["docker volume p" + "rune", "destructive"],
+  ["docker ps", "unknown"], ["docker system df", "unknown"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+check("warn: docker system prune is destructive (not silent unknown)", isWarn("docker system p" + "rune -af"));
 
 if (fail) { console.error("\n✗ bash-validation smoke FAILED"); process.exit(1); }
 console.log("\n✓ bash-validation smoke passed");
