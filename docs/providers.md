@@ -13,6 +13,7 @@ OB-1 speaks OpenAI-compatible HTTP for every provider path.
 | llama.cpp | `http://localhost:8080/v1` | optional |
 | vLLM | custom host | optional |
 | Groq | `https://api.groq.com/openai/v1` | `GROQ_API_KEY` |
+| Tsubasa | `https://api.tsubasa.sh/v1` | `TSUBASA_API_KEY` |
 | Custom | any OpenAI-compatible URL | `OB1_API_KEY` |
 
 ## Precedence
@@ -58,6 +59,19 @@ for that process, and neither variable is written to `settings.json`.
 ```sh
 GEMINI_API_KEY=... OB1_MODEL=gemini-2.5-pro ob1
 ```
+
+### Tsubasa
+
+Select **Tsubasa** in `/models`, enter your Tsubasa key, and choose `tsubasa-fast`
+or `tsubasa-pro`. OB-1 sends prompts and your key to `api.tsubasa.sh` using its
+existing OpenAI Chat Completions client.
+
+For a runtime-only route, set `TSUBASA_API_KEY` and `OB1_MODEL=tsubasa-fast`
+(or `tsubasa-pro`) before launching `ob1`. Saved providers and explicit
+`OB1_BASE_URL` settings keep their existing precedence.
+
+Both aliases have a 32,768-token context window. The output ceilings are 8,192
+for Fast and 16,384 for Pro. Leave reasoning and vision overrides disabled.
 
 ### Vision Escape Hatch
 

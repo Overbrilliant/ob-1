@@ -214,6 +214,22 @@ export const GROQ: ProviderProfile = {
   presets: [{ label: "Groq", hint: "hosted OpenAI-compatible endpoint", url: "https://api.groq.com/openai/v1" }],
 };
 
+export const TSUBASA: ProviderProfile = {
+  id: "tsubasa",
+  name: "Tsubasa",
+  tagline: "Tsubasa Fast and Pro through the OpenAI-compatible endpoint",
+  blurb: [
+    "Use your own Tsubasa API key. Prompts and the key are sent to api.tsubasa.sh.",
+    "Choose tsubasa-fast or tsubasa-pro; both have a 32,768-token context window.",
+  ],
+  wire: "openai",
+  docsUrl: "https://tsubasa.sh/docs/api",
+  defaultLocalUrl: "https://api.tsubasa.sh/v1",
+  defaultModel: "tsubasa-fast",
+  envKeys: ["TSUBASA_API_KEY"],
+  presets: [{ label: "Tsubasa", hint: "hosted OpenAI-compatible endpoint", url: "https://api.tsubasa.sh/v1" }],
+};
+
 // The hosted frontier tier is NOT a provider profile: those models are served by the managed OB-1 server
 // on subscription credits (see config.ts resolveProvider's managed-server path and index.ts
 // switchToManaged). BYOK/provider-neutral routes are profiles: the embedded Free models router, named
@@ -226,6 +242,7 @@ export const PROFILES: ProviderProfile[] = [
   LLAMA_CPP,
   VLLM,
   GROQ,
+  TSUBASA,
   CUSTOM,
 ];
 
