@@ -25,7 +25,17 @@ export type ValidationResult =
 
 // Leading-executable → intent. Only the FIRST token of each pipeline segment is classified by name;
 // redirections and a few inline operators are handled separately in classifyIntent.
-const READ_ONLY = new Set(["ls", "cat", "bat", "grep", "rg", "ag", "find", "fd", "head", "tail", "less", "more", "wc", "sort", "uniq", "cut", "tr", "awk", "echo", "printf", "pwd", "cd", "which", "type", "file", "stat", "du", "df", "date", "whoami", "id", "env", "printenv", "basename", "dirname", "realpath", "true", "false", "test", "diff", "cmp", "md5", "sha256sum", "jq", "yq", "tree", "column", "tee?"]);
+const READ_ONLY = new Set(["ls", "cat", "bat", "grep", "rg", "ag", "find", "fd", "head", "tail", "less", "more", "wc", "sort", "uniq", "cut", "tr", "awk", "echo", "printf", "pwd", "cd", "which", "type", "file", "stat", "du", "df", "date", "whoami", "id", "env", "printenv", "basename", "dirname", "realpath", "true", "false", "test", "diff", "cmp", "md5", "sha256sum", "jq", "yq", "tree", "column", "tee?",
+  // Pure readers (no file-writing mode worth modelling beyond the rules in embeddedIntent):
+  "sed", "nl", "od", "hexdump", "xxd", "strings", "readlink", "uname", "tac", "paste", "comm", "join", "fold",
+  "fmt", "expand", "unexpand", "rev", "seq", "md5sum", "sha1sum", "sha512sum", "shasum", "b2sum", "cksum",
+  "ps", "pgrep", "lsof", "whereis", "locale",
+  // Archive/compression tools: read-only by default HERE because embeddedIntent classifies every writing
+  // form (extract, create, compress in place) as a write and any unrecognised verb as unknown.
+  "tar", "gtar", "bsdtar", "jar", "unzip", "zipinfo", "7z", "7za", "7zr", "7zz", "cpio", "ar", "zip",
+  "zcat", "gzcat", "bzcat", "xzcat", "lzcat", "lz4cat", "zstdcat",
+  "gzip", "gunzip", "compress", "uncompress", "pigz", "unpigz", "bzip2", "bunzip2", "pbzip2", "bzip3", "lzma", "unlzma",
+  "plzip", "lzip", "lz4", "lz4c", "unlz4", "lzop", "unlzop", "xz", "unxz", "zstd", "zstdmt", "unzstd", "brotli"]);
 const NETWORK = new Set(["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp", "ping", "dig", "nslookup", "host"]);
 const PROCESS = new Set(["kill", "pkill", "killall", "systemctl", "service", "launchctl", "reboot", "shutdown", "halt", "poweroff"]);
 const WRITE = new Set(["cp", "mv", "mkdir", "rmdir", "touch", "tee", "ln", "chmod", "chown", "chgrp", "install", "patch", "git"]);
@@ -459,6 +469,12 @@ function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inn
     return;
   }
   if (AWK.test(tok)) {
+    // gawk's inplace extension rewrites every input file: `-i inplace`, `-iinplace`, `--include=inplace`.
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i]!;
+      const lib = w === "-i" || w === "--include" ? words[i + 1] ?? "" : (w.match(/^(?:-i|--include=)(.+)$/)?.[1] ?? "");
+      if (/^inplace(?:\.awk)?$/.test(lib)) bump("write");
+    }
     // awk is READ_ONLY, but its program can shell out: `system("…")`, `print … | "cmd"`, `"cmd" | getline`.
     // Only this awk's own arguments are scanned, so `grep 'system("x")' f | awk '{print}'` stays read-only.
     const prog = words.filter((w) => !w.startsWith("-")).join("\n");
@@ -497,7 +513,9 @@ function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inn
       const w = words[i]!;
       if (w === "-e" || w === "--expression") scripts.push(words[++i] ?? "");
       else if (w.startsWith("--expression=")) scripts.push(w.slice(13));
-      else if (w === "-f" || w === "--file" || w === "-l" || w === "--line-length") i++;
+      else if (w === "-f" || w === "--file") { bump("unknown"); i++; } // script in a file: can't see its w/e commands
+      else if (/^--file=/.test(w)) bump("unknown");
+      else if (w === "-l" || w === "--line-length") i++;
       else if (!w.startsWith("-") && !scripts.length) { scripts.push(w); break; }
     }
     for (const sc of scripts) {
@@ -515,7 +533,32 @@ function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inn
     }
     return;
   }
-  if (tok === "tar") {
+  if (tok === "find") {
+    // GNU find's FILE-writing output predicates: `-fprint F` / `-fprint0 F` / `-fls F` / `-fprintf F FMT`
+    // create or truncate F. find is READ_ONLY, so `find . -fprint hits.txt` classified as read-only and
+    // ran in plan mode with no approval — a write the read-only promise forbids. (`-print`/`-ls`/`-printf`
+    // go to stdout and stay reads.)
+    if (words.some((w) => /^-(?:fprint0?|fprintf|fls)$/.test(w))) bump("write");
+    return;
+  }
+  if (tok === "tar" || tok === "gtar" || tok === "bsdtar" || tok === "jar") {
+    // tar/jar were unknown for every invocation, so plan mode (read-only) EXECUTED `tar xf backup.tar`:
+    // the read-only promise is that nothing on disk changes. The verb can sit anywhere in any short-option
+    // cluster (`-zxvf`, `-Jcf`, `-C dir -xf`) or be the old-style bare first word (`xzf`), so collect the
+    // letters of every short cluster instead of guessing which word is "the" cluster. c/r/u/A (and jar's
+    // i) write the archive, x writes the tree unless `-O`/`--to-stdout` sends it to stdout, t/d read.
+    // No recognisable verb stays `unknown` (plan mode blocks it).
+    const shortLetters = words.filter((w) => /^-[a-zA-Z]+$/.test(w)).map((w) => w.slice(1)).join("")
+      + (words[0] && /^[a-zA-Z]+$/.test(words[0]) ? words[0] : "");
+    const long = words.filter((w) => w.startsWith("--")).map((w) => w.replace(/=.*$/, ""));
+    const hasLong = (...n: string[]) => long.some((w) => n.includes(w.slice(2)));
+    const toStdout = hasLong("to-stdout") || shortLetters.includes("O");
+    const writesArchive = /[cruA]/.test(shortLetters) || (tok === "jar" && shortLetters.includes("i"))
+      || hasLong("create", "append", "update", "catenate", "concatenate", "delete");
+    const extracts = shortLetters.includes("x") || hasLong("extract", "get");
+    const reads = /[td]/.test(shortLetters) || hasLong("list", "diff", "compare", "test-label");
+    if (writesArchive || (extracts && !toStdout)) bump("write");
+    else if (!extracts && !reads) bump("unknown");
     // tar's exec hooks run whatever they're given: --checkpoint-action=exec=CMD, --to-command, compress/info scripts.
     for (let i = 0; i < words.length; i++) {
       const m = words[i]!.match(/^--(checkpoint-action|to-command|use-compress-program|info-script|new-volume-script|rsh-command)(?:=([\s\S]*))?$/)
@@ -561,6 +604,27 @@ function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inn
     }
     return;
   }
+  if (tok === "sort" && words.some((w) => /^--output(?:=|$)/.test(w) || /^-[bdfgiMhnRrVcCmsuz]*o/.test(w))) bump("write"); // sort -o FILE
+  if (tok === "uniq") {
+    // `uniq [OPTION]… [INPUT [OUTPUT]]` — a second operand is a file uniq (over)writes.
+    let n = 0;
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i]!;
+      if (w === "--") { n += words.length - i - 1; break; }
+      if (/^-[fsw]$/.test(w)) { i++; continue; }
+      if (w.startsWith("-") && w !== "-") continue;
+      n++;
+    }
+    if (n >= 2) bump("write");
+    return;
+  }
+  if (tok === "yq" && words.some((w) => /^--inplace(?:=|$)/.test(w) || /^-[a-zA-Z]*i[a-zA-Z]*$/.test(w))) { bump("write"); return; } // yq -i
+  if (tok === "tree" && words.some((w) => w === "-o" || w.startsWith("-o"))) { bump("write"); return; } // tree -o FILE
+  if ((tok === "less" || tok === "more") && words.some((w) => /^-[oO]/.test(w) || /^--(?:log-file|LOG-FILE)(?:=|$)/.test(w))) { bump("write"); return; }
+  if (tok === "date" && words.some((w) => w === "-s" || /^--set(?:=|$)/.test(w) || /^\d{8,}(?:\.\d+)?$/.test(w))) { bump("process"); return; } // sets the clock
+  if (tok === "file" && words.some((w) => w === "-C" || w === "--compile")) { bump("write"); return; }
+  if (tok === "xxd" && words.includes("-r") && words.filter((w) => !w.startsWith("-")).length >= 2) { bump("write"); return; }
+  if (tok === "bat" && words[0] === "cache") { bump("write"); return; }
   if (tok === "sort" || tok === "diff" || tok === "rg") {
     // Read-only viewers that EXEC a helper passed as an option value: `sort --compress-program CMD`
     // (runs CMD as the temp-file compressor), `diff --filter CMD` (runs CMD over each file first),
@@ -589,6 +653,61 @@ function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inn
       const inner = (m[1] ?? m[2] ?? m[3] ?? "").replace(/\\(.)/g, "$1");
       if (inner.trim()) sub(inner); else bump("destructive");
     }
+    return;
+  }
+  if (tok === "zipinfo") return; // lists only
+  if (tok === "unzip") {
+    // unzip extracts (writes files) unless told to list/test/pipe: -l list, -v verbose list, -Z zipinfo,
+    // -t test, -p/-c extract to stdout. Any of those letters in a cluster (`-qql`, `-lv`) is a read.
+    if (!words.some((w) => /^-[a-zA-Z]*[lvZtpc][a-zA-Z]*$/.test(w) || /^--(?:list|test|stdout)$/.test(w))) bump("write");
+    return;
+  }
+  if (/^7z[arz]?$/.test(tok)) {
+    // 7z's verb is the first non-flag word: l(ist) t(est) h(ash) i(nfo) read, everything else writes.
+    const verb = words.find((w) => !w.startsWith("-")) ?? "";
+    if (/^(?:l|t|h|i)$/.test(verb)) return;
+    bump(verb ? "write" : "unknown");
+    return;
+  }
+  if (tok === "cpio") {
+    // cpio modes: -i/--extract copies files IN (writes the tree) unless -t/--list only lists;
+    // -p/--pass-through copies a tree (writes); -o/--create writes the archive to stdout (a `>` is
+    // caught as a write on its own). Mode letters are collected across every short cluster (`-i -t`, `-ivt`).
+    const letters = words.filter((w) => /^-[a-zA-Z]+$/.test(w)).map((w) => w.slice(1)).join("");
+    const has = (c: string, l: string) => letters.includes(c) || words.includes(`--${l}`);
+    if (has("p", "pass-through")) bump("write");
+    else if (has("i", "extract") && !has("t", "list")) bump("write");
+    else if (!has("t", "list") && !has("o", "create")) bump("unknown");
+    return;
+  }
+  if (tok === "ar") {
+    // `ar KEY archive …`: the operation letter is in the first word (optionally dash-prefixed).
+    // t (table) and p (print) read; d/m/q/r/s/x (delete, move, append, replace, index, extract) write.
+    const key = (words[0] ?? "").replace(/^-/, "");
+    if (/^[a-zA-Z]+$/.test(key) && /[tp]/.test(key) && !/[dmqrsx]/.test(key)) return;
+    bump(/[dmqrsx]/.test(key) ? "write" : "unknown");
+    return;
+  }
+  if (/^(?:zcat|gzcat|bzcat|xzcat|lzcat|lz4cat|zstdcat)$/.test(tok)) return; // stdout only
+  if (/^(?:gzip|gunzip|compress|uncompress|pigz|unpigz|bzip2|bunzip2|pbzip2|bzip3|lzma|unlzma|plzip|lzip|lz4|lz4c|unlz4|lzop|unlzop|xz|unxz|zstd|zstdmt|unzstd|brotli)$/.test(tok)) {
+    // The compressor family rewrites its input (foo.txt → foo.txt.gz, original removed) unless it is
+    // told to write to stdout or only check the file. Which letters mean that differs: -c (stdout) and
+    // -t (test) everywhere; -l is "list" for gzip/xz/zstd/lzop but "legacy format" for lz4, and brotli
+    // has no -l at all. An explicit output file (`-o F` / `--output`) always writes.
+    const readLetters = /^(?:lz4|lz4c|unlz4|brotli)$/.test(tok) ? /[ct]/ : /[ctl]/;
+    const clusters = words.filter((w) => /^-[a-zA-Z0-9]+$/.test(w)).map((w) => w.slice(1).replace(/[0-9]/g, ""));
+    const outFile = words.some((w) => w === "-o" || /^--output(?:=|$)/.test(w)) || clusters.some((c) => c.endsWith("o"));
+    const toStdout = words.some((w) => /^--(?:stdout|to-stdout|test|list)$/.test(w)) || clusters.some((c) => readLetters.test(c));
+    if (outFile || !toStdout) bump("write");
+    return;
+  }
+  if (tok === "zip") {
+    // zip writes the archive. Its only pure reads: -sf/--show-files (list) and -T/--test on an existing
+    // archive with no files to add. (-l converts line endings and -p stores paths — both still write.)
+    if (words.some((w) => w === "-sf" || w === "--show-files")) return;
+    const positional = words.filter((w) => !w.startsWith("-"));
+    if (words.some((w) => w === "-T" || w === "--test") && positional.length <= 1 && words.every((w) => !w.startsWith("-") || w === "-T" || w === "--test" || w === "-q")) return;
+    bump("write");
     return;
   }
   if (tok === "sqlite3" || tok === "psql" || tok === "mysql" || tok === "mariadb") {
@@ -711,6 +830,10 @@ function classify(cmd: string, depth: number): CommandIntent {
       else if (
         /\b(commit|push|merge|rebase|checkout|switch|restore|stash|tag|add|rm|mv|init|apply|cherry-pick|revert|pull|fetch|worktree)\b/.test(rest)
         || /\bbranch\s+(-[dDmMcC]\b|[^-\s])/.test(rest)                                  // branch delete/move/copy or create-by-name
+        || /\barchive\b[^|;&]*\s(?:-o\S*|--output(?:=|\s))/.test(rest)                  // archive -o FILE
+        || (/\bformat-patch\b/.test(rest) && !/\s--stdout\b/.test(rest))              // writes NNNN-*.patch files
+        || /\bbundle\s+create\b/.test(rest)
+        || /(?:^|\s)--output(?:=|\s)/.test(rest)                                          // diff/log/show --output=FILE
         || (/\bconfig\s+\S/.test(rest) && !/\bconfig\b[^|;&]*(--get|--list|\s-l\b)/.test(rest)) // config set (not --get/--list/-l)
       ) bump("write");
       else bump("read-only"); // status/log/diff/show/branch(list)/config --get/…
@@ -736,8 +859,13 @@ export function validateBashCommand(command: string, opts: ValidateOpts = {}): V
   const intent = classifyIntent(cmd);
 
   // modeValidation — plan (read-only) mode forbids anything that changes state.
-  if (opts.planMode && (intent === "write" || intent === "destructive" || intent === "process")) {
-    return { kind: "block", reason: `Plan mode is read-only — a ${intent} command (\`${firstWords(cmd)}\`) can't run. Switch to Act mode first.` };
+  // Default-deny: only commands the classifier positively knows to be read-only run. `unknown` (any command
+  // not on the READ_ONLY list, e.g. `make`, `npm install`, `split`) and `network` (`curl -o`, `wget`,
+  // `rsync` — which also write local files) used to run here, so every tool the rules didn't model was
+  // an escape from the read-only promise.
+  if (opts.planMode && intent !== "read-only") {
+    const why = intent === "unknown" ? "isn't on the read-only allow-list" : intent === "network" ? "is a network command (it can fetch into or sync local files)" : `is a ${intent} command`;
+    return { kind: "block", reason: `Plan mode is read-only — \`${firstWords(cmd)}\` ${why}. Switch to Act mode first.` };
   }
 
   // pathValidation — catastrophic deletes / writes to system paths are refused outright (even in autopilot).
