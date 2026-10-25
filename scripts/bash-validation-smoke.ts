@@ -111,6 +111,27 @@ const intent: [string, string][] = [
   [`sed -n '/x/w out.txt' file`, "write"],
   [`tar xf a.tar --checkpoint-action=exec='rm -rf /tmp/x'`, "destructive"],
   [`tar xf a.tar --to-command='rm -rf x'`, "destructive"],
+  // read-only viewers that exec an option-value helper via `sh -c`: sort --compress-program,
+  // diff --filter, rg --pre / --hostname-bin (the same smuggling class as find -exec / xargs).
+  [`sort --compress-program='rm -rf /tmp/x' file`, "destructive"],
+  ["sort --compress-program rm -rf file", "destructive"],
+  [`diff --filter='rm -rf /tmp/x' a b`, "destructive"],
+  [`rg --pre='rm -rf /tmp/x' foo .`, "destructive"],
+  [`rg --pre 'rm -rf /' needle`, "destructive"],
+  ["rg --pre wc foo", "read-only"],                              // benign helper stays benign
+  ["sort --compress-program zstd file", "write"],                 // the helper is itself a file-rewriting compressor
+  // the same family grew two more members later: bat --pager/--preprocessor and GNU diff --paginate=CMD.
+  [`bat --pager='rm -rf /tmp/x' notes.md`, "destructive"],
+  ["bat --pager rm -rf notes.md", "destructive"],
+  [`bat --preprocessor='rm -rf /tmp/x' f`, "destructive"],
+  ["bat --paging never notes.md", "read-only"],                    // mode option, not a command
+  ["bat notes.md", "read-only"],
+  [`diff --paginate='rm -rf /tmp/x' a b`, "destructive"],
+  ["diff --paginate a b", "read-only"],                            // bare --paginate pages through pr
+  [`git grep -O'rm -rf /tmp/x' pat`, "destructive"],             // -O[CMD] pipes hits through CMD
+  ["git bisect run rm -rf /tmp/x", "destructive"],               // bisect run executes CMD per step
+  ["git bisect run npm test", "unknown"],
+  ["git bisect good", "read-only"],
   [`git -c core.pager='rm -rf /tmp/x' log`, "destructive"],
   [`git -c alias.x='!rm -rf build' x`, "destructive"],
   ["docker run -v /:/host alpine rm -rf /host", "destructive"],
@@ -142,16 +163,16 @@ const intent: [string, string][] = [
   [`grep "rsync --delete" README.md`, "read-only"],
   ["awk '{print $1}' f.txt", "read-only"],
   [`awk '{print $1 | "sort -u"}' f`, "unknown"],                  // unchanged: the plain split already sees `"sort -u"`
-  ["tar -xf a.tar", "unknown"],
-  ["tar -czf out.tgz src", "unknown"],
+  ["tar -xf a.tar", "write"],
+  ["tar -czf out.tgz src", "write"],
   ["rsync -av src/ dst/", "network"],
   ["rsync -av --exclude=delete src/ dst/", "network"],
   ["watch ls", "unknown"],
   ["watch -n 2 git status", "unknown"],
   ["watch -n 1 date", "unknown"],
   ["parallel --jobs 4 echo done", "unknown"],
-  ["sed -n 1p f", "unknown"],
-  ["sed 's/e /x/' f", "unknown"],
+  ["sed -n 1p f", "read-only"],                                  // sed is a reader unless -i / w / e / -f
+  ["sed 's/e /x/' f", "read-only"],
   [`docker run --rm node:20 sh -c "npm test"`, "unknown"],     // inner command decides, not the sh wrapper
   ["docker run -it ubuntu bash", "unknown"],
   ["git -c user.name='Jo Doe' commit -m x", "write"],          // plain config value is not a command
@@ -184,7 +205,7 @@ const intent: [string, string][] = [
   ["nice rm -rf /", "destructive"],                 // plain nice (no -n) must still be stripped
   ["nice cp a b", "write"],
   ["timeout 5s", "unknown"],                        // timeout with no command
-  ["env -S \"rm -rf /\"", "unknown"],               // unparseable env flag form → unknown, NEVER read-only
+  ["env -S \"rm -rf /\"", "destructive"],           // --split-string: the value IS the command (was unknown; now classified)
 ];
 for (const [cmd, want] of intent) check(`intent: ${cmd}  → ${want}`, classifyIntent(cmd) === want);
 
@@ -316,6 +337,186 @@ for (const [c, want] of [
 ] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
 check("allow: ionice -c 3 rm -rf build is only a warn, not a block", !isBlock("ionice -c 3 rm -rf build"));
 check("allow: stdbuf -oL grep rm f (rm is an argument)", isAllow("stdbuf -oL grep rm f"));
+
+// namespace / user-switching / tracing runners + socat EXEC + env -S: commands smuggled past the classifier
+// because the wrapper token was never stripped (same failure class as env/timeout/scheduling wrappers).
+for (const c of [
+  "su root -c 'rm -rf /'", "su - root -c \"rm -rf /\"", "runuser -u root -- rm -rf /", "runuser root -c 'rm -rf /'",
+  "chroot /mnt rm -rf /", "chroot /mnt /bin/rm -rf /etc", "nsenter -t 1 -m rm -rf /", "nsenter --target 1 --mount -- rm -rf /",
+  "systemd-run rm -rf /", "script -qc 'rm -rf /' /dev/null", "valgrind rm -rf /",
+  "/usr/sbin/chroot /mnt rm -rf /", "sudo su root -c 'rm -rf /'",
+  "socat tcp-listen:1234 EXEC:\"rm -rf /\"",
+  "env -S 'rm -rf /'", "env --split-string='rm -rf /'", "env -i -S 'rm -rf /'",
+]) check(`block: ${c}`, isBlock(c));
+for (const c of [
+  "systemd-run rm -rf /tmp/x", "systemd-run --unit=x --description=y rm -rf /tmp/x",
+  "strace rm -rf /tmp/x", "ltrace -e x rm -rf /tmp/x", "socat - SYSTEM:'rm -rf /tmp/x'",
+]) check(`warn (destructive, /tmp path): ${c}`, isWarn(c));
+check("warn: su root -c 'rm -rf build' (destructive, project path)", isWarn("su root -c 'rm -rf build'"));
+check("warn: strace rm -rf build", isWarn("strace rm -rf build"));
+check("plan mode blocks chroot rm", isBlock("chroot /mnt rm x", { planMode: true }));
+check("plan mode blocks su -c rm", isBlock("su root -c 'rm x'", { planMode: true }));
+check("plan mode blocks systemd-run rm", isBlock("systemd-run rm x", { planMode: true }));
+// benign forms keep sane intent (never false read-only, but no catastrophic block)
+check("intent: su root (bare login shell) is the wrapper, not destructive", classifyIntent("su root") === "unknown");
+check("intent: nsenter -t 1 -m (shell only) is the wrapper", classifyIntent("nsenter -t 1 -m") === "unknown");
+check("intent: strace ls is the wrapper (keyword scan sees only ls)", classifyIntent("strace ls") === "unknown");
+check("allow: gdb -batch -ex run ./x (no known command word)", isAllow("gdb -batch -ex run ./x"));
+check("allow: env FOO=rm cmd (rm is an assignment value, not a command)", classifyIntent("env FOO=rm cmd") !== "destructive");
+check("intent: env -i /bin/ls is not destructive", classifyIntent("env -i /bin/ls") !== "destructive");
+check("allow: socat TCP-LISTEN:80,fork TCP:localhost:8080", isAllow("socat TCP-LISTEN:80,fork TCP:localhost:8080"));
+// git under a tracing/namespace runner is classified by its subcommand, not bumped to write by the bare word.
+// (The runner itself is not on the read-only allow-list, so plan mode's default-deny still blocks it.)
+for (const c of ["strace -f git status", "valgrind git log", "chroot /mnt git log", "ltrace git diff"]) {
+  check(`read-only git under a runner is not a write: ${c}`, !["write", "destructive", "process"].includes(classifyIntent(c)));
+}
+check("intent: strace git push --force is destructive", classifyIntent("strace git push --force") === "destructive");
+check("intent: chroot /mnt git commit -m x is a write", classifyIntent("chroot /mnt git commit -m x") === "write");
+check("intent: su git -c 'rm -rf build' (user named git) is still destructive", classifyIntent("su git -c 'rm -rf build'") === "destructive");
+check("intent: su root -c 'rm -rf /' still destructive", classifyIntent("su root -c 'rm -rf /'") === "destructive");
+check("block: su root -c 'rm -rf /' still blocked", isBlock("su root -c 'rm -rf /'"));
+// script's positional FILE is the log file, not a command.
+check("intent: script -q rm (log file named rm) is not destructive", classifyIntent("script -q rm") !== "destructive");
+check("intent: script -c 'rm -rf build' out.log is destructive", classifyIntent("script -c 'rm -rf build' out.log") === "destructive");
+check("intent: script --command='rm x' is destructive", classifyIntent("script --command='rm x'") === "destructive");
+check("intent: script -q log rm -rf build (BSD: command after file) is destructive", classifyIntent("script -q log rm -rf build") === "destructive");
+
+// ── time wrapper, sed -i, SQL clients, docker prune (same smuggling class) ──
+// `time` was stripped only as a bare word; any flag (`-v`, `-p`, `-o FILE`) made the leading token the
+// flag → unknown, so `time -v rm -rf /` skipped plan mode, the destructive warning and the path block.
+for (const [c, want] of [
+  ["time -v rm -rf /tmp/x", "destructive"], ["time -p ls", "read-only"], ["time -o run.log rm x", "destructive"],
+  ["/usr/bin/time -v rm -rf /tmp/x", "destructive"], ["time make", "unknown"], ["time ls", "read-only"],
+  ["nohup time -v rm -rf build", "destructive"], ["time -v -- ls", "read-only"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+check("plan mode blocks time -v rm (flag hid the command)", isBlock("time -v rm -rf /tmp/x", { planMode: true }));
+check("unparseable time flag is never read-only", classifyIntent("time --future-flag 5 cat f") !== "read-only");
+
+// sed -i rewrites the FILE: a write (plan-mode block + approval), not the old `unknown` pass-through.
+for (const [c, want] of [
+  ["sed -i 's/a/b/' f", "write"], ["sed -i.bak 's/a/b/' f", "write"], ["sed --in-place 's/a/b/' f", "write"],
+  ["sed --in-place=.bak 's/a/b/' f", "write"], ["sed -n 5p f", "read-only"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+check("plan mode blocks sed -i (in-place edit is a write)", isBlock("sed -i 's/a/b/' file.txt", { planMode: true }));
+check("allow: plain sed stays a read (no -i)", isAllow("sed 's/a/b/' file.txt"));
+
+// SQL clients run whatever statement they are handed.
+for (const [c, want] of [
+  ["sqlite3 app.db 'delete from users'", "destructive"], ["mysql -e \"drop table t\"", "destructive"],
+  ["psql db -c 'update t set x=1'", "write"], ["psql db -c 'select 1'", "unknown"],
+  ["sqlite3 app.db 'select * from t'", "unknown"], ["mysql -e \"insert into t values (1)\"", "write"],
+] as const) check(`intent: ${c.replace(/\s+/g, " ").slice(0, 42)} → ${want}`, classifyIntent(c) === want);
+check("plan mode blocks sqlite3 DELETE", isBlock("sqlite3 app.db 'delete from t'", { planMode: true }));
+check("warn: mysql DROP TABLE is destructive", isWarn("mysql -e \"drop table t\""));
+// Only the statement text is classified (never a db/file name or redirect target), string literals are
+// stripped, and only each statement's LEADING keyword counts — these used to be false writes/deletes.
+for (const c of [
+  "sqlite3 update.db 'select 1'", "psql -c \"select replace(name,'a','b') from t\"",
+  "sqlite3 app.db \"select * from t where name like '%update%'\"", "psql -c \"select * from audit where action='delete'\"",
+  "sqlite3 app.db < drop.sql", "sqlite3 app.db <drop.sql", "mysql delete_me -e 'select 1'", "psql -f create.sql db",
+]) {
+  const i = classifyIntent(c);
+  check(`sql false positive stays a read: ${c} (${i})`, i !== "write" && i !== "destructive");
+  // Plan mode is default-deny: a SQL client is never on the read-only list (a SELECT can call side-effecting
+  // functions; `< file.sql` / `-f` hide the statements), so it is blocked there — just not as a write.
+  check(`plan mode blocks (default-deny, not a write): ${c}`, isBlock(c, { planMode: true }));
+}
+for (const [c, want] of [
+  ["psql -c \"delete from t\"", "destructive"], ["sqlite3 a.db \"drop table t\"", "destructive"],
+  ["mysql -e \"update t set x=1\"", "write"], ["mysql --execute='insert into t values (1)'", "write"],
+  ["psql --command='select 1; truncate t'", "destructive"], ["mariadb -e\"alter table t add c int\"", "write"],
+  ["sqlite3 -cmd 'delete from t' a.db", "destructive"], ["psql -c \"  DELETE FROM t\"", "destructive"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+
+// sed in-place inside a combined flag cluster.
+for (const c of ["sed -Ei 's/a/b/' f", "sed -ni 'p' f", "sed -i.bak 's/a/b/' f", "sed -nEi.bak 's/a/b/' f"]) {
+  check(`intent: ${c} → write`, classifyIntent(c) === "write");
+}
+check("intent: sed -e 's/i/j/' f is not in-place", classifyIntent("sed -e 's/i/j/' f") !== "write");
+
+// docker removal verbs.
+for (const c of ["docker rm -f web", "docker rmi app:old", "docker volume rm data", "docker compose down -v",
+  "docker compose -f x.yml down --volumes", "docker-compose down -v", "docker image rm app", "docker container rm -f web"]) {
+  check(`intent: ${c} → destructive`, classifyIntent(c) === "destructive");
+}
+for (const c of ["docker ps", "docker compose ps", "docker system df", "docker compose down"]) {
+  check(`intent: ${c} is not destructive`, classifyIntent(c) !== "destructive");
+}
+
+// docker …prune deletes containers/images/volumes — destructive, was `unknown`.
+for (const [c, want] of [
+  ["docker system p" + "rune -af", "destructive"], ["docker volume p" + "rune", "destructive"],
+  ["docker ps", "unknown"], ["docker system df", "unknown"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+check("warn: docker system prune is destructive (not silent unknown)", isWarn("docker system p" + "rune -af"));
+
+// Archive extractors, compressors and find's file-writing predicates were `unknown`/`read-only` for every
+// invocation, so read-only PLAN MODE executed them and changed the tree with no approval. Writes now;
+// the stdout/test-only forms stay non-writes so reads keep working.
+for (const [c, want] of [
+  ["tar xf backup.tar", "write"], ["tar -xzf app.tar.gz -C /srv/app", "write"], ["tar czf out.tgz src", "write"],
+  ["tar --extract --file a.tar", "write"], ["tar --create -f out.tar src", "write"], ["tar --delete -f a.tar", "write"],
+  ["jar xf app.jar", "write"],
+  ["unzip secrets.zip", "write"], ["7z x archive.7z", "write"], ["7za a out.7z src", "write"],
+  ["gzip notes.txt", "write"], ["gunzip data.csv.gz", "write"], ["xz -9 payloads.bin", "write"],
+  ["zstd -19 core.dump", "write"], ["bzip2 core", "write"], ["zip out.zip report.pdf", "write"],
+  ["find . -fprint hits.txt", "write"], ["find . -name x -fprintf rep.txt %p", "write"], ["find . -fls l.txt", "write"],
+] as const) check(`intent: ${c} → ${want}`, classifyIntent(c) === want);
+for (const c of [
+  "tar tvf app.tar.gz", "tar --list -f app.tar", "tar --to-stdout -xf a.tar",
+  "unzip -l secrets.zip", "unzip -t secrets.zip", "unzip -p secrets.zip note.txt", "7z l archive.7z", "7z t archive.7z",
+  "gzip -c notes.txt", "gzip -t notes.gz", "zcat notes.gz", "xzcat f.xz", "bzip2 -t archive.bz2",
+  "zip -sf out.zip", "find . -type f -print", "find . -printf %p", "find . -ls",
+] as const) {
+  const i = classifyIntent(c);
+  check(`archive read stays non-write: ${c} (${i})`, i !== "write" && i !== "destructive");
+  check(`plan mode allows: ${c}`, !isBlock(c, { planMode: true }));
+}
+check("plan mode blocks tar xf", isBlock("tar xf backup.tar", { planMode: true }));
+check("plan mode blocks unzip", isBlock("unzip secrets.zip", { planMode: true }));
+check("plan mode blocks gzip file", isBlock("gzip notes.txt", { planMode: true }));
+check("tar --to-command hook still classified", classifyIntent("tar xf a.tar --to-command='rm -rf x'") === "destructive");
+
+// Review follow-ups: verb letters anywhere in a cluster, directory values before the verb, bsdtar/ar,
+// zip's -l/-p (line endings / paths — still writes), lz4's -l (legacy format) and the lz4c compressor.
+for (const c of [
+  "tar -zxvf app.tgz", "tar -jxf a.tbz", "tar -Jcf o.txz src", "tar -zcvf o.tgz src", "tar -pxf a.tar",
+  "tar -C tmp -xf a.tar", "tar -C src -xzf a.tgz", "tar x -f backup.tar", "bsdtar -xf a.tar", "gtar -xf a.tar",
+  "jar cf out.jar x", "ar x lib.a", "ar rcs lib.a o.o", "zip -l out.zip x", "zip -rp out.zip dir", "zip -T out.zip newfile",
+  "lz4 -l f", "lz4c f", "lz4 f out.lz4", "zstd -o out.zst f", "zstd -c f -o out.zst", "7z e a.7z", "7z -y x a.7z",
+  "unzip -o a.zip", "unzip -d /tmp/x a.zip", "cpio -id < a.cpio", "cpio -p dst < list", "cpio --extract < a.cpio",
+] as const) check(`archive write: ${c} → write`, classifyIntent(c) === "write");
+for (const c of [
+  "tar -tzvf a.tgz", "tar tf a.tar", "tar -xOf a.tar f", "tar -xf a.tar -O", "jar tf app.jar", "bsdtar -tf a.tar",
+  "zipinfo a.zip", "unzip -v a.zip", "unzip -Z a.zip", "unzip -qq -l a.zip", "zip -T out.zip",
+  "cpio -it < a.cpio", "cpio -ivt < a.cpio", "cpio -t < a.cpio", "ar t lib.a", "ar p lib.a x.o",
+  "lz4 -c f", "zstd -dc f.zst", "gzip -dc f.gz", "7z i", "7z -bb3 l a.7z",
+] as const) check(`archive read: ${c} → read-only`, classifyIntent(c) === "read-only");
+
+// PLAN MODE IS DEFAULT-DENY: only commands classified read-only run. Everything else — unknown tools,
+// network commands (which also write local files), and read-only tools used with a writing option — is
+// blocked. These were the escapes the archive review listed.
+for (const c of [
+  "curl -o out.html https://x", "curl -O https://x/f", "curl --output f https://x", "curl https://example.com",
+  "wget https://x/f", "rsync -av src/ dst/", "scp a host:b",
+  "sort -o out in", "sort -uo out in", "sort in --output=out", "uniq in out", "uniq -c in out",
+  "yq -i '.a=1' f.yaml", "yq --inplace '.a=1' f.yaml", "awk -i inplace '{print}' f", "gawk --include=inplace '{print}' f",
+  "git archive -o out.zip HEAD", "git archive --output=out.tar HEAD", "git format-patch -3", "git diff --output=d.txt",
+  "git bundle create repo.bundle --all", "tree -o t.txt", "less -o log.txt f", "xxd -r dump out", "date -s 12:00",
+  "sed -f script.sed f", "split -b 1M f part", "csplit f 3", "shuf -o out in", "mkfifo p", "mktemp", "mktemp -d",
+  "npm install", "pip install x", "make", "cargo build", "go build", "sqlite3 db \".output f\"",
+  "base64 -d f -o out", "openssl enc -out f", "ssh-keygen -f k -N ''", "ffmpeg -i a.mp4 b.mp4", "convert a.png b.jpg",
+  "ed -s f", "vim -c wq f", "setfacl -m u:x:r f", "xattr -w k v f", "exiftool -all= f.jpg", "strace -f git status",
+] as const) check(`plan mode blocks (default-deny): ${c}`, isBlock(c, { planMode: true }));
+for (const c of [
+  "ls -la", "ls", "cat README.md", "cat f | grep x | wc -l", "rg foo src", "rg -n 'x' --type ts", "grep -rn TODO src",
+  "head -50 f", "tail -n 20 f", "wc -l f", "find . -type f -name '*.ts'", "fd ts src", "tree -L 2", "pwd", "echo hi",
+  "git status", "git status --short", "git log --oneline -5", "git diff", "git diff HEAD~1 -- src", "git show HEAD",
+  "git branch -a", "git blame f", "git archive HEAD | tar -t", "git format-patch --stdout -1",
+  "sed -n 1,20p f", "awk '{print $1}' f", "sort f | uniq -c", "uniq -c in", "jq . package.json", "yq '.a' f.yaml",
+  "diff a b", "stat f", "du -sh .", "which bun", "date", "date -Iseconds", "xxd f", "ps aux", "sha256sum f",
+  "tar tf a.tar | head", "unzip -l a.zip", "zcat f.gz | head", "cat f 2>&1 | head",
+] as const) check(`plan mode allows (read-only): ${c}`, isAllow(c, { planMode: true }));
 
 if (fail) { console.error("\n✗ bash-validation smoke FAILED"); process.exit(1); }
 console.log("\n✓ bash-validation smoke passed");
