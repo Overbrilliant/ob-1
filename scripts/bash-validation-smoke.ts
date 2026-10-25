@@ -120,6 +120,14 @@ const intent: [string, string][] = [
   [`rg --pre 'rm -rf /' needle`, "destructive"],
   ["rg --pre wc foo", "read-only"],                              // benign helper stays benign
   ["sort --compress-program zstd file", "write"],                 // the helper is itself a file-rewriting compressor
+  // the same family grew two more members later: bat --pager/--preprocessor and GNU diff --paginate=CMD.
+  [`bat --pager='rm -rf /tmp/x' notes.md`, "destructive"],
+  ["bat --pager rm -rf notes.md", "destructive"],
+  [`bat --preprocessor='rm -rf /tmp/x' f`, "destructive"],
+  ["bat --paging never notes.md", "read-only"],                    // mode option, not a command
+  ["bat notes.md", "read-only"],
+  [`diff --paginate='rm -rf /tmp/x' a b`, "destructive"],
+  ["diff --paginate a b", "read-only"],                            // bare --paginate pages through pr
   [`git grep -O'rm -rf /tmp/x' pat`, "destructive"],             // -O[CMD] pipes hits through CMD
   ["git bisect run rm -rf /tmp/x", "destructive"],               // bisect run executes CMD per step
   ["git bisect run npm test", "unknown"],

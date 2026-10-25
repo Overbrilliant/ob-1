@@ -625,16 +625,26 @@ function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inn
   if (tok === "file" && words.some((w) => w === "-C" || w === "--compile")) { bump("write"); return; }
   if (tok === "xxd" && words.includes("-r") && words.filter((w) => !w.startsWith("-")).length >= 2) { bump("write"); return; }
   if (tok === "bat" && words[0] === "cache") { bump("write"); return; }
-  if (tok === "sort" || tok === "diff" || tok === "rg") {
+  if (tok === "sort" || tok === "diff" || tok === "rg" || tok === "bat") {
     // Read-only viewers that EXEC a helper passed as an option value: `sort --compress-program CMD`
     // (runs CMD as the temp-file compressor), `diff --filter CMD` (runs CMD over each file first),
     // rg `--pre CMD` / `--hostname-bin CMD`. All run their argument through `/bin/sh -c`, so
     // `rg --pre 'rm -rf /' needle` used to classify as plain read-only — plan mode allowed it and the
     // catastrophic-path block never looked at it. Same class as `find -exec`/`xargs`: mutation
     // smuggled as an ARGUMENT of a read-only executable.
+    // bat and GNU diff grew the same hole later: bat `--pager CMD` runs CMD (via `sh -c`) to page the
+    // output and `--preprocessor CMD` runs CMD per input file (bat's own docs: "specify a preprocess
+    // command"); GNU diff `--paginate[=COMMAND]` pipes the diff through COMMAND with sh. All were
+    // plain read-only before this. bat's `--paging never|always|auto` takes a MODE, not a command —
+    // only `--pager` (which always takes a command; the mode option has a different name).
     for (let i = 0; i < words.length; i++) {
-      const m = words[i]!.match(/^--(?:compress-program|filter|pre|hostname-bin)(?:=([\s\S]*))?$/);
-      if (m) sub(m[1] ?? words[++i] ?? "");
+      const m = words[i]!.match(/^--(?:compress-program|filter|pre|hostname-bin|pager|preprocessor|paginate)(?:=([\s\S]*))?$/);
+      if (!m) continue;
+      // `--paginate` (GNU diff) is the one OPTIONAL-value member: bare `--paginate` pages through `pr`
+      // and its next word is a FILE, so only the `=` form carries a command there. Every other option
+      // in this family requires its command as the value.
+      if (m[1] == null && m[0] === "--paginate") continue;
+      sub(m[1] ?? words[++i] ?? "");
     }
     return;
   }
