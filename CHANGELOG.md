@@ -4,6 +4,16 @@ All notable OB-1 CLI changes are documented here.
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-10-25
+
+- Bash safety: more commands that hid a mutation inside another command are now classified by what they
+  run, so they no longer run in Plan mode without approval. `su`/`runuser`/`chroot`/`nsenter`/
+  `systemd-run`/`script`/`strace`/`ltrace`/`valgrind`/`gdb`, `socat EXEC:` and `env -S` wrap a command;
+  `sort --compress-program`, `diff --filter`, `diff --paginate=CMD`, `rg --pre`, `bat --pager` and
+  `bat --preprocessor`, `git grep -O` and `git bisect run` execute one. `time -FLAGS`, `sed -i`, SQL-client
+  mutations, `docker prune`, `tar`/`unzip`/`7z`/`gzip`/`zip` writes and `find -fprint` are no longer
+  read-only.
+
 ## [0.3.13] - 2026-09-25
 
 - Bash safety: commands run through scheduling and buffering wrappers are now classified by the command
