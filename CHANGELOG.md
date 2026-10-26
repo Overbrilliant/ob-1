@@ -4,6 +4,12 @@ All notable OB-1 CLI changes are documented here.
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-10-26
+
+- Free models: a free provider that stops responding now fails over to the next model after 30 seconds,
+  with no retries of the stalled one. Before, one hung keyless provider could hold a turn for about four
+  and a half minutes (90 seconds × 3 connect attempts) before failover.
+
 ## [0.3.14] - 2026-10-25
 
 - Bash safety: more commands that hid a mutation inside another command are now classified by what they
