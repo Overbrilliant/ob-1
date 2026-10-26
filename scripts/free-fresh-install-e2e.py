@@ -167,16 +167,22 @@ def run_onboard(ob1_bin: str, env: dict[str, str], work_dir: str, settings_dir: 
 def run_first_token(ob1_bin: str, env: dict[str, str], work_dir: str) -> int:
     print("-> sending first prompt through the embedded free router")
     prompt = "Reply with exactly: OB-1 online.\n"
-    proc = subprocess.run(
-        [ob1_bin],
-        input=prompt,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        cwd=work_dir,
-        env=env,
-        timeout=180,
-    )
+    try:
+        proc = subprocess.run(
+            [ob1_bin],
+            input=prompt,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=work_dir,
+            env=env,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired as exc:
+        partial = exc.output or b""
+        if isinstance(partial, str):
+            partial = partial.encode("utf-8", "replace")
+        fail("first-token prompt hung for 180s with no answer", strip_ansi(partial))
     output = strip_ansi(proc.stdout.encode("utf-8", "replace"))
     if proc.returncode == 0 and re.search(r"OB-1 online|online", output, re.IGNORECASE):
         print("ok first-token prompt succeeded")
