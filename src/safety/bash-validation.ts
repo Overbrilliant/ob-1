@@ -25,11 +25,25 @@ export type ValidationResult =
 
 // Leading-executable → intent. Only the FIRST token of each pipeline segment is classified by name;
 // redirections and a few inline operators are handled separately in classifyIntent.
-const READ_ONLY = new Set(["ls", "cat", "bat", "grep", "rg", "ag", "find", "fd", "head", "tail", "less", "more", "wc", "sort", "uniq", "cut", "tr", "awk", "echo", "printf", "pwd", "cd", "which", "type", "file", "stat", "du", "df", "date", "whoami", "id", "env", "printenv", "basename", "dirname", "realpath", "true", "false", "test", "diff", "cmp", "md5", "sha256sum", "jq", "yq", "tree", "column", "tee?"]);
+const READ_ONLY = new Set(["ls", "cat", "bat", "grep", "rg", "ag", "find", "fd", "head", "tail", "less", "more", "wc", "sort", "uniq", "cut", "tr", "awk", "echo", "printf", "pwd", "cd", "which", "type", "file", "stat", "du", "df", "date", "whoami", "id", "env", "printenv", "basename", "dirname", "realpath", "true", "false", "test", "diff", "cmp", "md5", "sha256sum", "jq", "yq", "tree", "column", "tee?",
+  // Pure readers (no file-writing mode worth modelling beyond the rules in embeddedIntent):
+  "sed", "nl", "od", "hexdump", "xxd", "strings", "readlink", "uname", "tac", "paste", "comm", "join", "fold",
+  "fmt", "expand", "unexpand", "rev", "seq", "md5sum", "sha1sum", "sha512sum", "shasum", "b2sum", "cksum",
+  "ps", "pgrep", "lsof", "whereis", "locale",
+  // Archive/compression tools: read-only by default HERE because embeddedIntent classifies every writing
+  // form (extract, create, compress in place) as a write and any unrecognised verb as unknown.
+  "tar", "gtar", "bsdtar", "jar", "unzip", "zipinfo", "7z", "7za", "7zr", "7zz", "cpio", "ar", "zip",
+  "zcat", "gzcat", "bzcat", "xzcat", "lzcat", "lz4cat", "zstdcat",
+  "gzip", "gunzip", "compress", "uncompress", "pigz", "unpigz", "bzip2", "bunzip2", "pbzip2", "bzip3", "lzma", "unlzma",
+  "plzip", "lzip", "lz4", "lz4c", "unlz4", "lzop", "unlzop", "xz", "unxz", "zstd", "zstdmt", "unzstd", "brotli"]);
 const NETWORK = new Set(["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp", "ping", "dig", "nslookup", "host"]);
 const PROCESS = new Set(["kill", "pkill", "killall", "systemctl", "service", "launchctl", "reboot", "shutdown", "halt", "poweroff"]);
 const WRITE = new Set(["cp", "mv", "mkdir", "rmdir", "touch", "tee", "ln", "chmod", "chown", "chgrp", "install", "patch", "git"]);
-const DESTRUCTIVE = new Set(["rm", "shred", "srm", "mkfs", "dd", "fdisk", "parted", "wipefs", "format"]);
+/** Command-running wrappers that fall back to a keyword scan of their arguments when their options don't parse. */
+const WRAPPER_FALLBACK = new Set(["ionice", "stdbuf", "taskset", "chrt", "setsid", "unbuffer", "timeout", "time",
+  // Namespace/user/tracing runners whose COMMAND position we deliberately don't parse (see leadingToken):
+  "su", "runuser", "chroot", "nsenter", "systemd-run", "script", "strace", "ltrace", "valgrind", "gdb"]);
+const DESTRUCTIVE = new Set(["rm", "shred", "srm", "mkfs", "dd", "fdisk", "parted", "wipefs", "format", "truncate", "unlink"]);
 
 /** Strip leading `sudo`/`env …`/`timeout …`/`nice …` wrappers and return the real leading token of a
  *  segment. `env` and `timeout` are the dangerous ones: `env` used to fall through UNstripped and sits in
@@ -41,11 +55,35 @@ function leadingToken(segment: string): { tok: string; rest: string } {
   let s = segment.trim();
   // drop env assignments (FOO=bar baz) and common wrappers
   for (;;) {
-    const m = s.match(/^([A-Za-z_][\w]*=\S*|sudo|command|nohup|time|exec)\s+/);
+    // `/usr/bin/env rm -rf /`, `/usr/bin/sudo …`, `/usr/bin/ionice …`: a path-prefixed WRAPPER is the same
+    // wrapper. Without this, `/usr/bin/env rm -rf /` classified as `env` → read-only (runs in Plan mode, and
+    // the catastrophic-path block never fired) and every other path-prefixed wrapper as `unknown`.
+    s = s.replace(WRAPPER_PATH, "");
+    const m = s.match(/^([A-Za-z_][\w]*=\S*|command|nohup|exec|busybox)\s+/);
     if (m) { s = s.slice(m[0].length); continue; }
+    // Privilege wrappers: sudo and its look-alikes doas (BSD), pkexec (polkit), run0 (systemd). Skip their
+    // own flags, including the ones that take a value (`doas -u root rm …`), so `doas rm -rf /` is seen as
+    // rm and hits the same catastrophic-path block as `sudo rm -rf /`. Only flags left → the wrapper token.
+    const pw = s.match(/^(sudo|doas|pkexec|run0)(?=\s|$)/);
+    if (pw) {
+      let t = s.slice(pw[0].length).trimStart();
+      for (let f: RegExpMatchArray | null; (f = t.match(PRIV_FLAG) ?? t.match(/^-\S*(?:\s+|$)/)); ) t = t.slice(f[0].length);
+      if (!t) return { tok: pw[1]!, rest: "" };
+      s = t;
+      continue;
+    }
     // `env [-flags] [VAR=val …] cmd …` — `env` with nothing after it just prints the environment, and
     // with only flags/assignments still to come it stays `env` (read-only) because the loop stops below.
     if (/^env(\s|$)/.test(s)) {
+      // `env -S 'rm -rf /'` / `env --split-string='rm -rf /'` (--split-string): the quoted argument is the
+      // WHOLE command line. The blanket `-\S+` skip below ate `-S` and treated `'rm` as the command word →
+      // token `env` → read-only, so a catastrophic delete planned as read-only and the path block never ran.
+      // Hand the split string's text back as `rest` with tok `env` — WRAPPER_FALLBACK's keyword scan classifies it.
+      const split = s.match(/^env\s+(?:(?:-\S+|[A-Za-z_]\w*=\S*)\s+)*?(?:-S|--split-string)(?:=|\s+)/);
+      if (split) {
+        // Stop stripping; embeddedIntent's env branch extracts and classifies the split-string value.
+        return { tok: "env", rest: s.slice("env".length) };
+      }
       s = s.replace(/^env\s*/, "");
       let m2: RegExpExecArray | null;
       while ((m2 = /^(?:-\S+|[A-Za-z_]\w*=\S*)\s+/.exec(s))) s = s.slice(m2[0].length); // skip -i and FOO=bar
@@ -53,22 +91,64 @@ function leadingToken(segment: string): { tok: string; rest: string } {
       if (/^-\S+$/.test(s)) return { tok: "env", rest: "" };                             // trailing flag w/ arg (`env -u PATH`) → conservative
       continue;
     }
+    // Namespace / user-switching / tracing runners that exec a COMMAND exactly like sudo does:
+    // `su [-] USER [-c CMD]`, `runuser [-u USER] [USER] [-c CMD]`, `chroot NEWROOT [CMD]`, `nsenter [-opts] [CMD]`,
+    // `systemd-run [opts] CMD`, `script [-c CMD] [file]`, `strace|ltrace|valgrind|gdb [opts] CMD`. None were
+    // stripped, so all classified as `unknown` — skipping plan-mode enforcement, the destructive warning and the
+    // catastrophic-path block (`chroot /mnt rm -rf /`, `su root -c 'rm -rf /'`, `systemd-run rm -rf /tmp/x`).
+    // Their command-position grammars differ per flavour (user positional before -c, namespaces, --unit=…), so
+    // rather than mis-parse them we stop at the wrapper token and let WRAPPER_FALLBACK keyword-scan the rest:
+    // over-approximate on purpose, never a false read-only.
+    if (/^(?:su|runuser|chroot|nsenter|systemd-run|script|strace|ltrace|valgrind|gdb)(?=\s|$)/.test(s)) {
+      const name = s.match(/^(\S+)/)![1]!;
+      const rest = s.slice(name.length).trim();
+      if (!rest) return { tok: name, rest: "" };
+      return { tok: name, rest };
+    }
     // `timeout [-flags] DURATION cmd …` (GNU coreutils). Stop on anything unrecognized → `timeout` token → unknown.
     if (/^timeout(\s|$)/.test(s)) {
-      const m2 = s.match(/^timeout\s+(?:-\S+\s+)*(?:\d+(?:\.\d+)?[smhdw]?|\d+(?:\.\d+)?:\d+(?::\d+)?)\s+/);
+      // `-s SIG` / `-k DUR` / `--signal SIG` / `--kill-after DUR` take a separate-word value.
+      const m2 = s.match(/^timeout\s+(?:(?:-[sk]|--signal|--kill-after)\s+\S+\s+|-\S+\s+)*(?:\d+(?:\.\d+)?[smhdw]?|\d+(?:\.\d+)?:\d+(?::\d+)?)\s+/);
       if (!m2) return { tok: "timeout", rest: s.slice("timeout".length) };
       s = s.slice(m2[0].length);
       continue;
     }
+    // `time [-flags] DURATION-less cmd` — GNU time and the bash/zsh builtin both take flags before the
+    // command (`time -v make`, `time -p ls`, `time -o run.log cmd`). Without stripping them the leading
+    // token is `-v` → `unknown`, so `time -v rm -rf /` skipped plan-mode enforcement, the destructive
+    // warning and the catastrophic-path block — the same failure `env`/`timeout` had. An unrecognised
+    // flag stops stripping and keeps the rest for the WRAPPER_FALLBACK keyword scan.
+    if (/^time(?=\s|$)/.test(s)) {
+      const m2 = s.match(/^time\s+(?:(?:(?:-[pv]|-[of]\S+|--(?:quiet|posix|verbose)|--(?:output|format)=\S*|--)|-[of]\s+\S+)\s+)*/);
+      if (!m2) return { tok: "time", rest: s.slice("time".length) };
+      s = s.slice(m2[0].length);
+      if (!s) return { tok: "time", rest: "" };  // bare `time` / flags only: nothing timed yet
+      continue;
+    }
     // `nice [-n ADJ] cmd` / `nice ADJ cmd` — strip the adjustment so `nice -n 5 cp a b` classifies as write.
     if (/^nice(\s|$)/.test(s)) {
-      const m2 = s.match(/^nice\s+(?:-n\s+-?\d+|-?\d+\s)\s*/);
+      const m2 = s.match(/^nice\s+(?:-n\s*[-+]?\d+\s|--adjustment(?:=|\s+)[-+]?\d+\s|-?\d+\s)\s*/);
       if (m2) { s = s.slice(m2[0].length); continue; }
       if (/^nice\s+-n\s*$/.test(s)) return { tok: "nice", rest: "" };
       // bare `nice` (prints scheduling priority) → read-only
       if (s === "nice") return { tok: "nice", rest: "" };
       // plain `nice cmd …` (no adjustment): strip the wrapper like before, so `nice rm -rf /` stays destructive.
       s = s.replace(/^nice\s+/, "");
+      continue;
+    }
+    // Scheduling / buffering wrappers (coreutils, util-linux, expect) that exec a COMMAND after their own
+    // options — the same failure mode as `env`/`timeout` above: `ionice -c2 rm -rf /` and friends classified
+    // as `unknown`, skipping plan-mode enforcement, the destructive warning, and the catastrophic-path block.
+    const sw = s.match(/^(ionice|stdbuf|taskset|chrt|setsid|unbuffer)(?=\s|$)/);
+    if (sw) {
+      const name = sw[1]!;
+      const t = wrapperRest(s.slice(name.length), SCHED_WRAPPERS[name]!);
+      // No COMMAND (bare wrapper, `-p PID` / `--help` mode) → the wrapper token itself → `unknown` (never
+      // `read-only`: `taskset -p 0x3 PID` / `chrt -p 99 PID` change a running process). An option we can't
+      // parse also stops here, but keeps the rest so classify() can fall back to a keyword scan.
+      if (t.kind === "none") return { tok: name, rest: "" };
+      if (t.kind === "fail") return { tok: name, rest: t.rest };
+      s = t.rest;
       continue;
     }
     break;
@@ -79,9 +159,614 @@ function leadingToken(segment: string): { tok: string; rest: string } {
   return { tok: base, rest: s.slice(tok.length) };
 }
 
+/** sudo/doas/pkexec/run0 flags that take a value (`-u root`, `-uroot`, `--user=root`, `--chdir /x`). */
+const PRIV_FLAG = /^(?:-[ugCDhprtUTa](?:\s+|(?=\S))[^\s-]\S*|--(?:user|group|chdir|close-from|host|prompt|role|type|other-user|command-timeout|setenv|nice|unit|property|description|slice|machine|background)(?:=|\s+)\S+)(?:\s+|$)/;
+
+/** Wrapper names recognised with a path prefix (`/usr/bin/env` → `env`). */
+const WRAPPER_PATH = /^\S*\/(?=(?:sudo|doas|pkexec|run0|env|timeout|nice|nohup|time|busybox|ionice|stdbuf|taskset|chrt|setsid|unbuffer|su|runuser|chroot|nsenter|systemd-run|script|strace|ltrace|valgrind|gdb)(?:\s|$))/;
+
+/** Option grammar of a `WRAPPER [options] [positional] COMMAND …` wrapper. Short letters may cluster (`-vf`);
+ *  a value letter takes the rest of its word or the next word (`-c3`, `-c 3`); long options take `=v` or a
+ *  separate word. `none` letters/names (`-p PID`, `--help`) mean no COMMAND follows. */
+interface WrapperSpec {
+  shortVal?: string; shortBool?: string; none?: string;
+  longVal?: string[]; longBool?: string[]; longNone?: string[];
+  /** One optional positional before COMMAND (taskset's mask, chrt's priority). */
+  positional?: RegExp;
+  /** Options that replace the positional (`taskset -c LIST cmd` has no mask word). */
+  replacesPositional?: string[];
+}
+const SCHED_WRAPPERS: Record<string, WrapperSpec> = {
+  ionice: { shortVal: "cn", shortBool: "t", none: "pPuhV", longVal: ["class", "classdata"], longBool: ["ignore"], longNone: ["pid", "pgid", "uid", "help", "version"] },
+  stdbuf: { shortVal: "ioe", none: "hV", longVal: ["input", "output", "error"], longNone: ["help", "version"] },
+  taskset: { shortVal: "c", shortBool: "a", none: "phV", longVal: ["cpu-list"], longBool: ["all-tasks"], longNone: ["pid", "help", "version"], positional: /^\S+$/, replacesPositional: ["c", "cpu-list"] },
+  chrt: {
+    shortVal: "TPD", shortBool: "bdfiorRamv", none: "phV",
+    longVal: ["sched-runtime", "sched-period", "sched-deadline"],
+    longBool: ["batch", "deadline", "fifo", "idle", "other", "rr", "reset-on-fork", "all-tasks", "max", "verbose"],
+    longNone: ["pid", "help", "version"], positional: /^-?\d+$/,
+  },
+  setsid: { shortBool: "cfw", none: "hV", longBool: ["ctty", "fork", "wait"], longNone: ["help", "version"] },
+  unbuffer: { shortBool: "p" },
+};
+
+/** Parse a wrapper's own options off `t` (the text after the wrapper name) and return the COMMAND text.
+ *  `none` = no command follows (bare wrapper, pid/help mode); `fail` = an option outside the grammar, so the
+ *  caller stays conservative (wrapper token → `unknown`, plus a keyword scan of `rest`). Getopt-style: options
+ *  stop at `--` or the first non-option word (all of these wrappers use `+` / POSIXLY_CORRECT parsing). */
+function wrapperRest(t: string, spec: WrapperSpec): { kind: "cmd" | "none" | "fail"; rest: string } {
+  let rest = t.trimStart();
+  const word = () => rest.match(/^\S+/)?.[0] ?? "";
+  const shift = () => { rest = rest.slice(word().length).trimStart(); };
+  let endOpts = false;
+  let positional = spec.positional;
+  for (;;) {
+    const w = word();
+    if (!w) return { kind: "none", rest: "" };
+    if (!endOpts && w === "--") { endOpts = true; shift(); continue; }
+    if (!endOpts && w.startsWith("--")) {
+      const eq = w.indexOf("=");
+      const name = w.slice(2, eq < 0 ? undefined : eq);
+      if (spec.longNone?.includes(name)) return { kind: "none", rest: "" };
+      if (spec.replacesPositional?.includes(name)) positional = undefined;
+      if (spec.longVal?.includes(name)) { shift(); if (eq < 0) shift(); continue; }
+      if (spec.longBool?.includes(name) && eq < 0) { shift(); continue; }
+      return { kind: "fail", rest };
+    }
+    if (!endOpts && /^-./.test(w)) {
+      let takesNext = false;
+      for (let k = 1; k < w.length; k++) {
+        const ch = w[k]!;
+        if (spec.none?.includes(ch)) return { kind: "none", rest: "" };
+        if (spec.shortBool?.includes(ch)) continue;
+        if (spec.shortVal?.includes(ch)) {
+          if (spec.replacesPositional?.includes(ch)) positional = undefined;
+          takesNext = k === w.length - 1;            // `-c 3` (value is the next word) vs `-c3`
+          break;
+        }
+        return { kind: "fail", rest };
+      }
+      shift();
+      if (takesNext) { if (!word()) return { kind: "fail", rest }; shift(); }
+      continue;
+    }
+    if (positional?.test(w)) { positional = undefined; shift(); continue; }
+    return { kind: "cmd", rest };
+  }
+}
+
+/** Skip `xargs`'s own options and return the command it will run (`xargs -n 1 -I {} rm {}` → `rm {}`). */
+function xargsCommand(rest: string): string {
+  let s = rest.trimStart();
+  for (;;) {
+    // options whose argument is a SEPARATE word (`-n 1`, `-I {}`, `--max-args 1`), then any other flag/attached form
+    const m = s.match(/^(?:-[aEdILnPs]|--(?:arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var))\s+\S+\s*/)
+      ?? s.match(/^-\S*\s*/);
+    if (!m || !m[0]) return s;
+    s = s.slice(m[0].length);
+  }
+}
+
+/** Split a command line on UNQUOTED separators (`|`, `||`, `&&`, `;`, `&`, newline, `(`, `)`, backtick).
+ *  Unlike the plain split in classify(), quoted text stays in its segment: `python3 -c "a; b"` is one
+ *  segment and `grep 'x | awk' f` never yields an `awk` segment. `2>&1` / `&>` / `>&2` are not separators. */
+function shellSegments(cmd: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let q = "";
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (q) {
+      if (c === q) q = "";
+      else if (c === "\\" && q === '"' && i + 1 < cmd.length) { cur += c + cmd[++i]; continue; }
+      cur += c;
+      continue;
+    }
+    if (c === "\\" && i + 1 < cmd.length) { cur += c + cmd[++i]; continue; }
+    if (c === "'" || c === '"') { q = c; cur += c; continue; }
+    const fdDup = c === "&" && (cmd[i - 1] === ">" || cmd[i - 1] === "<" || cmd[i + 1] === ">");
+    if (!fdDup && (c === "|" || c === ";" || c === "&" || c === "\n" || c === "(" || c === ")" || c === "`")) {
+      if (cur.trim()) out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += c;
+  }
+  if (cur.trim()) out.push(cur);
+  return out;
+}
+
+/** Bodies of command substitutions `$(…)` and `` `…` `` outside single quotes — the shell runs them first,
+ *  even inside double quotes, so `echo "$(rm -rf x)"` must be classified as at least `rm -rf x`. */
+function substitutions(cmd: string): string[] {
+  const out: string[] = [];
+  let q = "";
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i]!;
+    if (q === "'") { if (c === "'") q = ""; continue; }
+    if (c === "\\") { i++; continue; }
+    if (c === "'" && !q) { q = "'"; continue; }
+    if (c === '"') { q = q ? "" : '"'; continue; }
+    if (c === "`") {
+      const end = cmd.indexOf("`", i + 1);
+      if (end < 0) break;
+      out.push(cmd.slice(i + 1, end));
+      i = end;
+    } else if (c === "$" && cmd[i + 1] === "(" && cmd[i + 2] !== "(") {
+      let depth = 0;
+      let j = i + 1;
+      for (; j < cmd.length; j++) { if (cmd[j] === "(") depth++; else if (cmd[j] === ")" && --depth === 0) break; }
+      out.push(cmd.slice(i + 2, j));
+      i = j;
+    }
+  }
+  return out;
+}
+
+/** Split one segment into shell words with the quoting removed (`-c "a b" 'c'` → [`-c`, `a b`, `c`]). */
+function shellWords(seg: string): string[] {
+  const out: string[] = [];
+  let cur: string | null = null;
+  let q = "";
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]!;
+    if (q) {
+      if (c === q) q = "";
+      else if (c === "\\" && q === '"' && /["\\$`]/.test(seg[i + 1] ?? "")) cur += seg[++i];
+      else cur += c;
+      continue;
+    }
+    if (/\s/.test(c)) { if (cur !== null) out.push(cur); cur = null; continue; }
+    if (c === "'" || c === '"') { q = c; cur ??= ""; continue; }
+    if (c === "\\" && i + 1 < seg.length) { cur = (cur ?? "") + seg[++i]; continue; }
+    cur = (cur ?? "") + c;
+  }
+  if (cur !== null) out.push(cur);
+  return out;
+}
+
+/** `docker compose [global opts] down -v|--volumes|--rmi …` removes named volumes / images: destructive. */
+function composeIntent(words: string[], bump: (i: CommandIntent) => void): void {
+  let j = 0;
+  while (j < words.length && words[j]!.startsWith("-")) j += /^(?:-f|--file|-p|--project-name|--profile|--env-file)$/.test(words[j]!) ? 2 : 1;
+  if (words[j] !== "down") return;
+  if (words.slice(j + 1).some((w) => /^-[a-zA-Z]*v[a-zA-Z]*$/.test(w) || /^--(?:volumes|rmi)(?:=|$)/.test(w))) bump("destructive");
+}
+
+/** The SQL statement text a client was handed (words already unquoted by shellWords): psql `-c/--command`,
+ *  mysql/mariadb `-e/--execute`, sqlite3 `-cmd` plus every positional after the database file. Database
+ *  names, `-f` script files and redirections (`< drop.sql`) are never statements. */
+function sqlStatements(tok: string, words: string[]): string[] {
+  const out: string[] = [];
+  if (tok === "sqlite3") {
+    let db = false;
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i]!;
+      if (/^\d*[<>]/.test(w)) { if (/^\d*[<>]{1,2}&?$/.test(w)) i++; continue; }  // redirect (+ its target)
+      if (w.startsWith("-")) {
+        const o = w.replace(/^--?/, "");
+        if (o === "cmd") out.push(words[++i] ?? "");
+        else if (/^(?:init|separator|newline|nullvalue|vfs|mmap|maxsize|escape)$/.test(o)) i++;
+        continue;
+      }
+      if (!db) { db = true; continue; }                                                  // the database file
+      out.push(w);
+    }
+    return out;
+  }
+  const [short, long] = tok === "psql" ? ["c", "command"] : ["e", "execute"];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === `-${short}` || w === `--${long}`) out.push(words[++i] ?? "");
+    else if (w.startsWith(`--${long}=`)) out.push(w.slice(long.length + 3));
+    else if (w.startsWith(`-${short}`) && w.length > 2) out.push(w.slice(2));
+  }
+  return out;
+}
+
+/** Remove SQL string literals / quoted identifiers so their contents never look like a leading keyword. */
+const stripSqlLiterals = (sql: string) =>
+  sql.replace(/'(?:[^'\\]|''|\\.)*'|"(?:[^"\\]|""|\\.)*"|`[^`]*`/g, "''");
+
+/** Re-join words for a runner that execs argv directly (docker run): quote any word with spaces. */
+const joinArgv = (w: string[]) => w.map((x) => (/[\s;&|]/.test(x) ? `'${x.replace(/'/g, `'\\''`)}'` : x)).join(" ");
+
+const INTERPRETER = /^(?:python[\d.]*|pypy[\d.]*|perl[\d.]*|ruby[\d.]*|node|nodejs|bun|deno|php[\d.]*|lua[\d.]*|luajit|Rscript|osascript)$/;
+const AWK = /^(?:awk|gawk|mawk|nawk)$/;
+
+/** Inline program text an interpreter was given (`python3 -I -c CODE`, `perl -lne CODE`, `node --eval=CODE`,
+ *  `php -r CODE`, `deno eval CODE`), plus whether it edits files in place (`perl -i`, `ruby -i`). Only the
+ *  interpreter's own options are scanned: the first non-option word is a script path, which is not inline code. */
+function inlineCode(tok: string, words: string[]): { code: string[]; inPlace: boolean } {
+  const lang = tok.replace(/[\d.]+$/, "");
+  const code: string[] = [];
+  let inPlace = false;
+  if (lang === "deno") {
+    if (words[0] === "eval") { const c = words.slice(1).find((w) => !w.startsWith("-")); if (c) code.push(c); }
+    return { code, inPlace };
+  }
+  // flags whose value is a separate word, per interpreter (so `node -r mod -e X` / `python -W x -c X` parse).
+  const argFlag: Record<string, RegExp> = {
+    python: /^-[WXQ]$/, pypy: /^-[WXQ]$/, node: /^(?:-r|--require|--import|--loader|--experimental-loader|-C|--conditions|--env-file)$/,
+    nodejs: /^(?:-r|--require|--import|--loader)$/, bun: /^(?:-r|--preload|--cwd|--env-file|--config|-c)$/,
+    ruby: /^-[rICEFx]$/, perl: /^-[IMmx]$/, php: /^-[cdzf]$/, lua: /^-[l]$/, luajit: /^-[lbj]$/, Rscript: /^$/, osascript: /^-[lis]$/,
+  };
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w === "--" || !w.startsWith("-") || w === "-") break;
+    const next = () => { const c = words[++i]; if (c != null) code.push(c); };
+    if (lang === "python" || lang === "pypy") {
+      if (/^-[bBdEhiIOPqRsSuvVx]*c$/.test(w)) { next(); break; }        // `-c`, `-Ic`, `-uc`
+      if (/^-[bBdEhiIOPqRsSuvVx]*c./.test(w)) { code.push(w.replace(/^-[a-zA-Z]*?c/, "")); break; }
+    } else if (lang === "node" || lang === "nodejs" || lang === "bun") {
+      if (/^(?:-e|--eval|-p|--print|-pe)$/.test(w)) { next(); continue; }
+      const eq = w.match(/^--(?:eval|print)=([\s\S]*)$/);
+      if (eq) { code.push(eq[1]!); continue; }
+    } else if (lang === "perl" || lang === "ruby") {
+      // switch clusters: `-e`, `-ne`, `-lane`, `-pi`, `-i.bak`, `-pie`. `-M`/`-I`/`-m`/`-r` swallow the rest.
+      if (/^-[IMmrx]./.test(w)) continue;
+      const sw = w.slice(1).match(/^[a-zA-Z0-9]*/)![0];
+      const e = sw.search(/[eE]/);
+      const pre = e < 0 ? sw : sw.slice(0, e);
+      if (pre.includes("i")) inPlace = true;
+      if (e >= 0 && /^[aclnpsStTuUwWX0-9i]*$/.test(pre)) {
+        const attached = w.slice(2 + e);
+        if (attached) code.push(attached); else next();
+        continue;
+      }
+    } else if (lang === "php") {
+      if (/^-[rRBE]$/.test(w)) { next(); continue; }
+    } else if (/^-e$/.test(w)) { next(); continue; }                     // lua, luajit, Rscript, osascript
+    if (argFlag[lang]?.test(w)) i++;
+  }
+  return { code, inPlace };
+}
+
+// Destructive filesystem APIs in inline code (python/node/ruby/perl/php/lua/R/deno). Specific names only —
+// a bare `remove(` would flag `xs.remove(1)` (list.remove) as destructive.
+const CODE_DESTRUCTIVE = /\b(?:rmtree|rmSync|rmdirSync|unlinkSync|rm_rf|rm_r|rm_f|remove_entry\w*|remove_tree|rimraf|removedirs|shred)\b|\bos\.(?:remove|unlink|rmdir)\b|__import__\(\s*['"]os['"]\s*\)\s*\.\s*(?:remove|unlink|rmdir)\b|\b(?:fs|fsp|promises)\s*\.\s*(?:rm|rmdir|unlink|truncate)\s*\(|\bDeno\.remove(?:Sync)?\b|\bFileUtils\s*\.\s*(?:rm|remove)|\b(?:File|Dir|Files)\s*\.\s*(?:delete|unlink|rmdir)\b|\bfile\.remove\s*\(|\bunlink\b|\brmdir\s*\(|\.(?:unlink|rmdir|truncate)\s*\(|\btruncate\s*\(/;
+// Calls that hand a string to a shell / exec a program. A literal first argument (`os.system('rm -rf x')`,
+// `subprocess.run(["rm", "x"])`, `system("…")`) is classified as a command; anything else is opaque.
+const CODE_SHELL_OUT = /(?:\b(?:os\s*\.\s*(?:system|popen|exec\w*|spawn\w*)|subprocess\s*\.\s*\w+|commands\s*\.\s*getoutput|pty\s*\.\s*spawn|(?:IO|Open3|Process)\s*\.\s*\w+|Bun\s*\.\s*spawn(?:Sync)?|Deno\s*\.\s*(?:run|Command)|shell_exec|passthru|proc_open|popen|system|exec(?:Sync|File|FileSync)?|spawn(?:Sync)?)(?:\s*\(\s*|\s+(?=['"[]))|\bdo shell script\s+)/g;
+// Non-destructive file writes in inline code.
+const CODE_WRITE = /\bopen\s*\([^)]*,\s*(?:mode\s*=\s*)?['"][rbt]*[wax+]|\bopen\s*\(?[^;)]*['"]\s*\+?[>|]|(?<!std(?:out|err))\.(?:write|write_text|write_bytes|writelines|touch|mkdir|rename|symlink_to|chmod)\s*\(|\b(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|copyFile|copyFileSync|mkdirSync|renameSync|symlinkSync|chmodSync|cpSync|file_put_contents|fwrite|makedirs|copytree|copyfile|writeLines|saveRDS|sink|dir\.create|file\.copy|file\.rename|file\.create)\s*\(|\bshutil\s*\.\s*(?:copy\w*|move)|\bos\s*\.\s*(?:rename|replace|mkdir|symlink|link|chmod|chown|utime)\b|\b(?:File|IO)\s*\.\s*(?:write|open\s*\([^)]*['"][wa])|\bFileUtils\b|\b(?:Bun|Deno)\s*\.\s*write\w*|\bfopen\s*\([^)]*,\s*['"][wax]|\bio\.open\s*\([^)]*,\s*['"][wa]/;
+
+/** Intent of inline program text. Shell-outs are classified by the command they run; destructive file APIs
+ *  are destructive; file writes are writes; anything else stays `unknown` (arbitrary code, but no signal) so a
+ *  harmless `python -c "print(1)"` is not called a write — it still never reads as read-only. */
+function codeIntent(code: string, lang: string, bump: (i: CommandIntent) => void, sub: (inner: string) => void): void {
+  bump("unknown");
+  if (CODE_DESTRUCTIVE.test(code)) bump("destructive");
+  for (const m of code.matchAll(CODE_SHELL_OUT)) {
+    const after = code.slice(m.index! + m[0].length);
+    const lits = after.match(/^\[\s*((?:(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\s*,?\s*)+)\]/)?.[1] ?? after.match(/^((?:(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")\s*,?\s*)+)/)?.[1];
+    if (lits == null) { bump("destructive"); continue; }       // opaque command (variable, f-string, concat): assume the worst
+    const parts = [...lits.matchAll(/'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"/g)].map((p) => (p[1] ?? p[2] ?? "").replace(/\\(.)/g, "$1"));
+    const inner = parts.join(" ");
+    if (lang === "python" && /^exec\b/.test(m[0])) { codeIntent(inner, lang, bump, sub); continue; } // exec("…") is more Python
+    if (inner.trim()) sub(inner); else bump("destructive");
+  }
+  // perl/ruby/php backticks and qx{}/%x() run a shell; Bun's $`…` template runs Bun Shell.
+  const shellLits = lang === "perl" || lang === "ruby" || lang === "php"
+    ? [...code.matchAll(/`([^`]*)`|\bqx\s*([({[</|!])([\s\S]*?)[)}\]>/|!]|%x\s*[({[]([\s\S]*?)[)}\]]/g)].map((m) => m[1] ?? m[3] ?? m[4] ?? "")
+    : lang === "node" || lang === "nodejs" || lang === "bun" ? [...code.matchAll(/\$`([^`]*)`/g)].map((m) => m[1]!) : [];
+  for (const s of shellLits) sub(s);
+  if (CODE_WRITE.test(code)) bump("write");
+}
+
+/** Inspect ONE quote-aware segment for a command smuggled into its arguments, keyed off its real command word. */
+function embeddedIntent(seg: string, bump: (i: CommandIntent) => void, sub: (inner: string) => void): void {
+  const { tok, rest } = leadingToken(seg);
+  if (!tok) return;
+  const words = shellWords(rest);
+  if (INTERPRETER.test(tok)) {
+    // `python3 -c CODE`, `perl -e CODE`, `node -e/--eval/-p CODE`, `php -r CODE`, … run program text that no
+    // segment token shows: `python3 -c "import shutil; shutil.rmtree('/')"` used to read as a bare `unknown`.
+    const lang = tok.replace(/[\d.]+$/, "");
+    const { code, inPlace } = inlineCode(tok, words);
+    for (const c of code) codeIntent(c, lang, bump, sub);
+    if (inPlace) bump("write");
+    return;
+  }
+  if (AWK.test(tok)) {
+    // gawk's inplace extension rewrites every input file: `-i inplace`, `-iinplace`, `--include=inplace`.
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i]!;
+      const lib = w === "-i" || w === "--include" ? words[i + 1] ?? "" : (w.match(/^(?:-i|--include=)(.+)$/)?.[1] ?? "");
+      if (/^inplace(?:\.awk)?$/.test(lib)) bump("write");
+    }
+    // awk is READ_ONLY, but its program can shell out: `system("…")`, `print … | "cmd"`, `"cmd" | getline`.
+    // Only this awk's own arguments are scanned, so `grep 'system("x")' f | awk '{print}'` stays read-only.
+    const prog = words.filter((w) => !w.startsWith("-")).join("\n");
+    for (const m of prog.matchAll(/\bsystem\s*\(\s*(?:"((?:[^"\\]|\\.)*)")?/g)) {
+      if (m[1] == null) bump("destructive"); else sub(m[1].replace(/\\(.)/g, "$1"));
+    }
+    for (const m of prog.matchAll(/\|&?\s*"((?:[^"\\]|\\.)*)"|"((?:[^"\\]|\\.)*)"\s*\|&?\s*getline/g)) {
+      const inner = (m[1] ?? m[2] ?? "").replace(/\\(.)/g, "$1");
+      if (/^\s*(?:\S*\/)?(?:ba|z|da|k|fi)?sh(?:\s|$)/.test(inner)) bump("destructive"); // `print … | "sh"`: awk output IS the script
+      else sub(inner);
+    }
+    return;
+  }
+  if (tok === "watch" || tok === "parallel" || tok === "sem") {
+    // `watch [opts] CMD…` re-runs CMD via `sh -c` (all words joined); GNU `parallel`/`sem [opts] CMD ::: args`
+    // runs CMD per job — with no CMD, each `:::` argument is itself a command.
+    const withArg = tok === "watch" ? /^(?:-n|--interval|-q|--equexit)$/ : /^(?:-[jSaIdEnNL]|--(?:jobs|sshlogin|arg-file|colsep|delimiter|results|tmpdir|timeout|delay|max-args|retries|memfree|load|joblog|workdir|id|semaphorename|env|basefile|transfer-file|return))$/;
+    let i = 0;
+    for (; i < words.length && words[i]!.startsWith("-"); i++) { if (words[i] === "--") { i++; break; } if (withArg.test(words[i]!)) i++; }
+    const cmdEnd = words.findIndex((w, j) => j >= i && /^:::+\+?$/.test(w));
+    const inner = words.slice(i, cmdEnd < 0 ? undefined : cmdEnd);
+    if (inner.length) sub(inner.join(" "));
+    else if (cmdEnd >= 0) for (const a of words.slice(cmdEnd + 1)) if (!/^:::+\+?$/.test(a)) sub(a);
+    return;
+  }
+  if (tok === "sed") {
+    // `sed -i` / `--in-place[=SUFFIX]` rewrites the FILE — a write, not a read, even when the script is a
+    // plain substitution. Without this `sed -i 's/a/b/' file` classified unknown: it slipped through plan
+    // mode and the approval gate (isDestructiveCall never sees unknown) and silently edited files.
+    // The `i` may sit inside a flag cluster (`-Ei`, `-ni`, `-nEi.bak`) — any run of sed's value-less short
+    // flags followed by `i` is in-place; a cluster reaching `e`/`f`/`l` first takes a value instead (`-ei`).
+    if (words.some((w) => /^-[nrEsuzbc]*i/.test(w) || /^--in-place(?:=|$)/.test(w))) bump("write");
+    // sed's `e CMD` command runs CMD; `s///e` runs the pattern space; `w file` / `s///w file` write files.
+    const scripts: string[] = [];
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i]!;
+      if (w === "-e" || w === "--expression") scripts.push(words[++i] ?? "");
+      else if (w.startsWith("--expression=")) scripts.push(w.slice(13));
+      else if (w === "-f" || w === "--file") { bump("unknown"); i++; } // script in a file: can't see its w/e commands
+      else if (/^--file=/.test(w)) bump("unknown");
+      else if (w === "-l" || w === "--line-length") i++;
+      else if (!w.startsWith("-") && !scripts.length) { scripts.push(w); break; }
+    }
+    for (const sc of scripts) {
+      let rest2 = sc;
+      for (const m of sc.matchAll(/(?:^|[;\n{}]|\d|\$|\/)\s*s(.)(?:(?!\1)[^\\\n]|\\.)*\1(?:(?!\1)[^\\\n]|\\.)*\1([gpiImMe0-9]*)(w\s*\S+)?/g)) {
+        if (m[2]!.includes("e")) bump("destructive");
+        if (m[3]) bump("write");
+        rest2 = rest2.replace(m[0], m[0].charAt(0) === "s" ? " " : m[0].charAt(0) + " ");
+      }
+      const addr = String.raw`(?:\d+|\$|\/(?:[^\/\\]|\\.)*\/)?(?:\s*,\s*(?:\d+|\$|\/(?:[^\/\\]|\\.)*\/))?\s*!?\s*`;
+      for (const m of rest2.matchAll(new RegExp(String.raw`(?:^|[;\n{}])\s*${addr}e(?:\s+([^;\n}]*))?\s*(?=$|[;\n}])`, "g"))) {
+        if (m[1]?.trim()) sub(m[1]); else bump("destructive");
+      }
+      if (new RegExp(String.raw`(?:^|[;\n{}])\s*${addr}[wW]\s+\S`).test(rest2)) bump("write");
+    }
+    return;
+  }
+  if (tok === "find") {
+    // GNU find's FILE-writing output predicates: `-fprint F` / `-fprint0 F` / `-fls F` / `-fprintf F FMT`
+    // create or truncate F. find is READ_ONLY, so `find . -fprint hits.txt` classified as read-only and
+    // ran in plan mode with no approval — a write the read-only promise forbids. (`-print`/`-ls`/`-printf`
+    // go to stdout and stay reads.)
+    if (words.some((w) => /^-(?:fprint0?|fprintf|fls)$/.test(w))) bump("write");
+    return;
+  }
+  if (tok === "tar" || tok === "gtar" || tok === "bsdtar" || tok === "jar") {
+    // tar/jar were unknown for every invocation, so plan mode (read-only) EXECUTED `tar xf backup.tar`:
+    // the read-only promise is that nothing on disk changes. The verb can sit anywhere in any short-option
+    // cluster (`-zxvf`, `-Jcf`, `-C dir -xf`) or be the old-style bare first word (`xzf`), so collect the
+    // letters of every short cluster instead of guessing which word is "the" cluster. c/r/u/A (and jar's
+    // i) write the archive, x writes the tree unless `-O`/`--to-stdout` sends it to stdout, t/d read.
+    // No recognisable verb stays `unknown` (plan mode blocks it).
+    const shortLetters = words.filter((w) => /^-[a-zA-Z]+$/.test(w)).map((w) => w.slice(1)).join("")
+      + (words[0] && /^[a-zA-Z]+$/.test(words[0]) ? words[0] : "");
+    const long = words.filter((w) => w.startsWith("--")).map((w) => w.replace(/=.*$/, ""));
+    const hasLong = (...n: string[]) => long.some((w) => n.includes(w.slice(2)));
+    const toStdout = hasLong("to-stdout") || shortLetters.includes("O");
+    const writesArchive = /[cruA]/.test(shortLetters) || (tok === "jar" && shortLetters.includes("i"))
+      || hasLong("create", "append", "update", "catenate", "concatenate", "delete");
+    const extracts = shortLetters.includes("x") || hasLong("extract", "get");
+    const reads = /[td]/.test(shortLetters) || hasLong("list", "diff", "compare", "test-label");
+    if (writesArchive || (extracts && !toStdout)) bump("write");
+    else if (!extracts && !reads) bump("unknown");
+    // tar's exec hooks run whatever they're given: --checkpoint-action=exec=CMD, --to-command, compress/info scripts.
+    for (let i = 0; i < words.length; i++) {
+      const m = words[i]!.match(/^--(checkpoint-action|to-command|use-compress-program|info-script|new-volume-script|rsh-command)(?:=([\s\S]*))?$/)
+        ?? (/^-[IF]$/.test(words[i]!) ? [words[i]!, "short", undefined] : null);
+      if (!m) continue;
+      let v = m[2] ?? words[++i] ?? "";
+      if (m[1] === "checkpoint-action") { if (!v.startsWith("exec=")) continue; v = v.slice(5); }
+      sub(v);
+    }
+    return;
+  }
+  if (tok === "rsync") {
+    // --delete* makes the destination match the source by DELETING files; --remove-source-files deletes the source.
+    if (words.some((w) => /^--(?:delete(?:-\w+)?|del|remove-source-files)$/.test(w))) bump("destructive");
+    return;
+  }
+  if (tok === "git") {
+    // `git -c key=value` where the key's value is run as a command (pager, editor, ssh, alias `!cmd`, …).
+    // Plain config (`-c user.name='Jo Doe'`) is not a command and is ignored.
+    for (let i = 0; i < words.length && words[i]!.startsWith("-"); i++) {
+      if (/^(?:-C|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--config-env)$/.test(words[i]!)) { i++; continue; }
+      if (words[i] !== "-c") continue;
+      const kv = words[++i] ?? "";
+      const eq = kv.indexOf("=");
+      if (eq < 0) continue;
+      const key = kv.slice(0, eq).toLowerCase();
+      if (/^(?:core\.(?:pager|editor|sshcommand|fsmonitor|askpass)|alias\..+|pager\..+|sequence\.editor|diff\.external|.+\.textconv|diff\..+\.command|gpg(?:\.\w+)?\.program|credential(?:\..+)?\.helper|filter\..+\.(?:clean|smudge|process)|merge\..+\.driver|uploadpack\.packobjectshook|remote\..+\.(?:uploadpack|receivepack))$/.test(key)) {
+        sub(kv.slice(eq + 1).replace(/^!/, ""));
+      }
+    }
+    // `git grep -O[CMD]` / `--open-files-in-pager[=CMD]` pipes hits through CMD (default `less`);
+    // `git bisect run CMD…` executes CMD per bisect step. Both run a caller-supplied command after the
+    // subcommand word, so they live outside the leading-options loop above.
+    for (let i = 0; i < words.length; i++) {
+      const m = words[i]!.match(/^(?:--open-files-in-pager(?:=([\s\S]*))?|-O([\s\S]*))$/);
+      const val = m ? (m[1] ?? m[2] ?? "") : "";
+      if (val.trim()) sub(val);
+      if (words[i] === "bisect" && words[i + 1] === "run") {
+        const inner = words.slice(i + 2);
+        if (inner.length) sub(joinArgv(inner));
+        break;
+      }
+    }
+    return;
+  }
+  if (tok === "sort" && words.some((w) => /^--output(?:=|$)/.test(w) || /^-[bdfgiMhnRrVcCmsuz]*o/.test(w))) bump("write"); // sort -o FILE
+  if (tok === "uniq") {
+    // `uniq [OPTION]… [INPUT [OUTPUT]]` — a second operand is a file uniq (over)writes.
+    let n = 0;
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i]!;
+      if (w === "--") { n += words.length - i - 1; break; }
+      if (/^-[fsw]$/.test(w)) { i++; continue; }
+      if (w.startsWith("-") && w !== "-") continue;
+      n++;
+    }
+    if (n >= 2) bump("write");
+    return;
+  }
+  if (tok === "yq" && words.some((w) => /^--inplace(?:=|$)/.test(w) || /^-[a-zA-Z]*i[a-zA-Z]*$/.test(w))) { bump("write"); return; } // yq -i
+  if (tok === "tree" && words.some((w) => w === "-o" || w.startsWith("-o"))) { bump("write"); return; } // tree -o FILE
+  if ((tok === "less" || tok === "more") && words.some((w) => /^-[oO]/.test(w) || /^--(?:log-file|LOG-FILE)(?:=|$)/.test(w))) { bump("write"); return; }
+  if (tok === "date" && words.some((w) => w === "-s" || /^--set(?:=|$)/.test(w) || /^\d{8,}(?:\.\d+)?$/.test(w))) { bump("process"); return; } // sets the clock
+  if (tok === "file" && words.some((w) => w === "-C" || w === "--compile")) { bump("write"); return; }
+  if (tok === "xxd" && words.includes("-r") && words.filter((w) => !w.startsWith("-")).length >= 2) { bump("write"); return; }
+  if (tok === "bat" && words[0] === "cache") { bump("write"); return; }
+  if (tok === "sort" || tok === "diff" || tok === "rg" || tok === "bat") {
+    // Read-only viewers that EXEC a helper passed as an option value: `sort --compress-program CMD`
+    // (runs CMD as the temp-file compressor), `diff --filter CMD` (runs CMD over each file first),
+    // rg `--pre CMD` / `--hostname-bin CMD`. All run their argument through `/bin/sh -c`, so
+    // `rg --pre 'rm -rf /' needle` used to classify as plain read-only — plan mode allowed it and the
+    // catastrophic-path block never looked at it. Same class as `find -exec`/`xargs`: mutation
+    // smuggled as an ARGUMENT of a read-only executable.
+    // bat and GNU diff grew the same hole later: bat `--pager CMD` runs CMD (via `sh -c`) to page the
+    // output and `--preprocessor CMD` runs CMD per input file (bat's own docs: "specify a preprocess
+    // command"); GNU diff `--paginate[=COMMAND]` pipes the diff through COMMAND with sh. All were
+    // plain read-only before this. bat's `--paging never|always|auto` takes a MODE, not a command —
+    // only `--pager` (which always takes a command; the mode option has a different name).
+    for (let i = 0; i < words.length; i++) {
+      const m = words[i]!.match(/^--(?:compress-program|filter|pre|hostname-bin|pager|preprocessor|paginate)(?:=([\s\S]*))?$/);
+      if (!m) continue;
+      // `--paginate` (GNU diff) is the one OPTIONAL-value member: bare `--paginate` pages through `pr`
+      // and its next word is a FILE, so only the `=` form carries a command there. Every other option
+      // in this family requires its command as the value.
+      if (m[1] == null && m[0] === "--paginate") continue;
+      sub(m[1] ?? words[++i] ?? "");
+    }
+    return;
+  }
+  if (tok === "env") {
+    // `env -S 'rm -rf /'` / `--split-string='…'`: the argument IS the command line (env splits and execs it).
+    // leadingToken can't reach the inner command through its flag-skipping loop, and a keyword scan of the
+    // raw segment text would fire on plain `env FOO=rm cmd`, so only the split-string VALUE is classified.
+    const split = rest.match(/(?:^|\s)(?:-S|--split-string)(?:=|\s+)("((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|\S+)/);
+    if (split) { sub((split[2] ?? split[3] ?? "").replace(/\\(.)/g, "$1")); }
+    return;
+  }
+  if (tok === "socat") {
+    // socat's EXEC: / SYSTEM: / OPEN: address options run the argument as a program/shell command:
+    // `socat TCP-LISTEN:4444 EXEC:'rm -rf /'` (the classic bind-shell shape) classified as plain `unknown`.
+    for (const m of rest.matchAll(/\b(?:EXEC|SYSTEM|exec|system)\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|([^,\s]+))/g)) {
+      const inner = (m[1] ?? m[2] ?? m[3] ?? "").replace(/\\(.)/g, "$1");
+      if (inner.trim()) sub(inner); else bump("destructive");
+    }
+    return;
+  }
+  if (tok === "zipinfo") return; // lists only
+  if (tok === "unzip") {
+    // unzip extracts (writes files) unless told to list/test/pipe: -l list, -v verbose list, -Z zipinfo,
+    // -t test, -p/-c extract to stdout. Any of those letters in a cluster (`-qql`, `-lv`) is a read.
+    if (!words.some((w) => /^-[a-zA-Z]*[lvZtpc][a-zA-Z]*$/.test(w) || /^--(?:list|test|stdout)$/.test(w))) bump("write");
+    return;
+  }
+  if (/^7z[arz]?$/.test(tok)) {
+    // 7z's verb is the first non-flag word: l(ist) t(est) h(ash) i(nfo) read, everything else writes.
+    const verb = words.find((w) => !w.startsWith("-")) ?? "";
+    if (/^(?:l|t|h|i)$/.test(verb)) return;
+    bump(verb ? "write" : "unknown");
+    return;
+  }
+  if (tok === "cpio") {
+    // cpio modes: -i/--extract copies files IN (writes the tree) unless -t/--list only lists;
+    // -p/--pass-through copies a tree (writes); -o/--create writes the archive to stdout (a `>` is
+    // caught as a write on its own). Mode letters are collected across every short cluster (`-i -t`, `-ivt`).
+    const letters = words.filter((w) => /^-[a-zA-Z]+$/.test(w)).map((w) => w.slice(1)).join("");
+    const has = (c: string, l: string) => letters.includes(c) || words.includes(`--${l}`);
+    if (has("p", "pass-through")) bump("write");
+    else if (has("i", "extract") && !has("t", "list")) bump("write");
+    else if (!has("t", "list") && !has("o", "create")) bump("unknown");
+    return;
+  }
+  if (tok === "ar") {
+    // `ar KEY archive …`: the operation letter is in the first word (optionally dash-prefixed).
+    // t (table) and p (print) read; d/m/q/r/s/x (delete, move, append, replace, index, extract) write.
+    const key = (words[0] ?? "").replace(/^-/, "");
+    if (/^[a-zA-Z]+$/.test(key) && /[tp]/.test(key) && !/[dmqrsx]/.test(key)) return;
+    bump(/[dmqrsx]/.test(key) ? "write" : "unknown");
+    return;
+  }
+  if (/^(?:zcat|gzcat|bzcat|xzcat|lzcat|lz4cat|zstdcat)$/.test(tok)) return; // stdout only
+  if (/^(?:gzip|gunzip|compress|uncompress|pigz|unpigz|bzip2|bunzip2|pbzip2|bzip3|lzma|unlzma|plzip|lzip|lz4|lz4c|unlz4|lzop|unlzop|xz|unxz|zstd|zstdmt|unzstd|brotli)$/.test(tok)) {
+    // The compressor family rewrites its input (foo.txt → foo.txt.gz, original removed) unless it is
+    // told to write to stdout or only check the file. Which letters mean that differs: -c (stdout) and
+    // -t (test) everywhere; -l is "list" for gzip/xz/zstd/lzop but "legacy format" for lz4, and brotli
+    // has no -l at all. An explicit output file (`-o F` / `--output`) always writes.
+    const readLetters = /^(?:lz4|lz4c|unlz4|brotli)$/.test(tok) ? /[ct]/ : /[ctl]/;
+    const clusters = words.filter((w) => /^-[a-zA-Z0-9]+$/.test(w)).map((w) => w.slice(1).replace(/[0-9]/g, ""));
+    const outFile = words.some((w) => w === "-o" || /^--output(?:=|$)/.test(w)) || clusters.some((c) => c.endsWith("o"));
+    const toStdout = words.some((w) => /^--(?:stdout|to-stdout|test|list)$/.test(w)) || clusters.some((c) => readLetters.test(c));
+    if (outFile || !toStdout) bump("write");
+    return;
+  }
+  if (tok === "zip") {
+    // zip writes the archive. Its only pure reads: -sf/--show-files (list) and -T/--test on an existing
+    // archive with no files to add. (-l converts line endings and -p stores paths — both still write.)
+    if (words.some((w) => w === "-sf" || w === "--show-files")) return;
+    const positional = words.filter((w) => !w.startsWith("-"));
+    if (words.some((w) => w === "-T" || w === "--test") && positional.length <= 1 && words.every((w) => !w.startsWith("-") || w === "-T" || w === "--test" || w === "-q")) return;
+    bump("write");
+    return;
+  }
+  if (tok === "sqlite3" || tok === "psql" || tok === "mysql" || tok === "mariadb") {
+    // SQL clients execute whatever statement they are handed: `sqlite3 app.db 'delete from users'` and
+    // `mysql -e "drop table t"` ran with `unknown` intent — no plan-mode block, no destructive warning.
+    // Only the STATEMENT TEXT is classified — never database names, file names or redirect targets
+    // (`sqlite3 update.db 'select 1'`, `sqlite3 app.db < drop.sql` are not mutations) — and within it only
+    // the LEADING keyword of each `;`-separated statement, after string literals are removed, so
+    // `select replace(…)` and `where action='delete'` stay reads. Plain `select` stays `unknown`.
+    for (const stmt of sqlStatements(tok, words)) {
+      for (const part of stripSqlLiterals(stmt).split(";")) {
+        if (/^\s*(?:drop|delete|truncate)\b/i.test(part)) bump("destructive");
+        else if (/^\s*(?:update|insert|alter|create|replace)\b/i.test(part)) bump("write");
+      }
+    }
+    return;
+  }
+  if (tok === "docker-compose" || tok === "podman-compose") { composeIntent(words, bump); return; }
+  if (tok === "docker" || tok === "podman") {
+    // `docker …prune` deletes containers/images/volumes/build cache; it ran as `unknown` and never even
+    // reached the destructive approval warning (`docker system prune -af` wipes everything not running).
+    // Same for the removal verbs: `docker rm -f` / `docker rmi` / `docker {container,image,volume} rm` delete
+    // containers, images and volumes, and `docker compose down -v` (or `--rmi`) deletes named volumes/images.
+    // Read verbs (`docker ps`, `docker compose ps`, `docker system df`) are untouched.
+    const w0 = words[0], w1 = words[1];
+    if (/^(?:system|container|image|volume|network|builder)$/.test(w0 ?? "") && w1 === "prune") bump("destructive");
+    if (w0 === "rm" || w0 === "rmi" || /^(?:container|image|volume)$/.test(w0 ?? "") && (w1 === "rm" || w1 === "remove")) bump("destructive");
+    if (w0 === "compose") composeIntent(words.slice(1), bump);
+    // `docker run [opts] IMAGE CMD…` / `docker exec [opts] CTR CMD…` / `docker compose run|exec [opts] SVC CMD…`:
+    // classify CMD like any command, so `docker run -v /:/h alpine rm -rf /h` is destructive but
+    // `docker run --rm node:20 sh -c "npm test"` is only as strong as `npm test`.
+    let w = words;
+    if (w[0] === "container") w = w.slice(1);
+    if (w[0] === "compose") { let j = 1; while (j < w.length && w[j]!.startsWith("-")) j += /^(?:-f|--file|-p|--project-name|--profile|--env-file)$/.test(w[j]!) ? 2 : 1; w = w.slice(j); }
+    if (w[0] !== "run" && w[0] !== "exec") return;
+    const withArg = /^(?:-[a-zA-Z]*[veplwuhmaLc]|--(?:volume|env|env-file|publish|workdir|user|label|hostname|memory|attach|name|network|net|entrypoint|mount|platform|cpus|cpu-shares|add-host|cap-add|cap-drop|device|restart|pull|log-driver|log-opt|tmpfs|ulimit|security-opt|gpus|shm-size|dns|ipc|pid|runtime|stop-signal|health-cmd|expose|link|volumes-from|cidfile|cgroupns|group-add|label-file|detach-keys|uts|userns|isolation|storage-opt|sysctl|volume-driver|annotation))$/;
+    let i = 1;
+    for (; i < w.length && w[i]!.startsWith("-"); i++) { if (w[i] === "--") { i++; break; } if (withArg.test(w[i]!)) i++; }
+    const inner = w.slice(i + 1);                               // skip IMAGE / container / service
+    if (inner.length) sub(joinArgv(inner));
+  }
+}
+
 /** Classify the STRONGEST intent across a whole command line (split on pipes/&&/||/;). */
 export function classifyIntent(command: string): CommandIntent {
-  const cmd = String(command ?? "");
+  return classify(String(command ?? ""), 0);
+}
+
+function classify(cmd: string, depth: number): CommandIntent {
   // Start at the LEAST severe so a benign command stays read-only; each segment can only raise severity.
   let worst: CommandIntent = "read-only";
   const bump = (i: CommandIntent) => { if (INTENT_RANK[i] > INTENT_RANK[worst]) worst = i; };
@@ -93,10 +778,58 @@ export function classifyIntent(command: string): CommandIntent {
   if (/(^|[^>&])>>?\s*\S/.test(redir) || /&>>?\s*[^&\s]/.test(cmd) || /\btee\b/.test(cmd)) bump("write");
   // Fork-bomb / truncation idioms.
   if (/:\s*\(\s*\)\s*\{|\b:\(\)\{/.test(cmd) || /\bDROP\s+TABLE\b/i.test(cmd)) bump("destructive");
+  // Commands hidden in ARGUMENTS. Per-segment classification only sees the leading token, so a command
+  // that runs another command (`find -exec X`, `fd -x X`, `xargs X`, `sh -c 'X'`, `eval X`) must be
+  // classified as at least X — otherwise `find / -exec rm -rf {} ;`, `xargs -n1 rm`, and even
+  // `sh -c 'rm -rf /'` ran with read-only/unknown intent and skipped every gate (plan mode, the
+  // destructive warning, the catastrophic-path block). `find … -delete` is rm by another name.
+  const sub = (inner: string) => { if (depth < 4 && inner.trim()) bump(classify(inner, depth + 1)); };
+  // find's `\;` / `';'` terminator is not a shell separator — neutralise it so `find … -exec … \; -delete` is seen.
+  const fcmd = cmd.replace(/\\;|';'|";"/g, " \u0000 ");
+  if (/(?:^|[\s/])find\s/.test(cmd)) {
+    if (/(?:^|[\s/])find\s(?:[^|;&]*\s)?-delete\b/.test(fcmd)) bump("destructive");
+    for (const m of fcmd.matchAll(/\s-(?:exec|execdir|ok|okdir)\s+([^\u0000]+?)(?=\s\u0000|\s\+(?:\s|$)|$)/g)) sub(m[1]!);
+  }
+  for (const m of cmd.matchAll(/(?:^|[\s/])fd\s(?:[^|;&]*?\s)?(?:-x|-X|--exec|--exec-batch)(?:\s+|=)(.+)/g)) sub(m[1]!);
+  for (const m of cmd.matchAll(/(?:^|[\s/|;&(])xargs(?:\s+(.*)|$)/g)) sub(xargsCommand(m[1] ?? ""));
+  for (const m of cmd.matchAll(/(?:^|[\s/|;&(])(?:ba|z|da|k)?sh\s+(?:-[-a-zA-Z]+\s+)*-[a-zA-Z]*c[a-zA-Z]*\s+(?:'([^']*)'|"((?:[^"\\]|\\.)*)"|([^\s;&|]+))/g)) sub(m[1] ?? m[2] ?? m[3] ?? "");
+  for (const m of cmd.matchAll(/(?:^|[\s|;&(])eval\s+(.+)/g)) sub(m[1]!.replace(/['"]/g, ""));
+  // Commands embedded in a runner's ARGUMENTS (interpreter one-liners, awk system(), watch, parallel,
+  // sed `e`, tar/git exec hooks, docker run/exec). Keyed off the real command word of each quote-aware
+  // segment, so the same words inside a quoted argument (`grep 'system("x")' f`) are never mistaken for it.
+  for (const seg of shellSegments(cmd)) embeddedIntent(seg, bump, sub);
+  for (const inner of substitutions(cmd)) sub(inner);
   for (const seg of cmd.split(/\|\||&&|;|\||\n/)) {
     if (!seg.trim()) continue;
     const { tok, rest } = leadingToken(seg);
     if (!tok) continue;
+    if (WRAPPER_FALLBACK.has(tok) && rest.trim()) {
+      // A scheduling wrapper whose options we couldn't parse (`chrt --new-flag 5 rm -rf /`): we don't know
+      // where its COMMAND starts, so treat any known command word in its arguments as a possible command.
+      // Over-approximate on purpose — only reached for options outside the wrapper's grammar.
+      let words = rest.trim().split(/\s+/);
+      if (tok === "script") {
+        // `script [opts] [FILE]` — FILE is the typescript LOG, not a command (`script -q rm` logs to ./rm).
+        // The command comes from `-c/--command CMD` (util-linux) or, on BSD/macOS, the words AFTER FILE.
+        let r = rest;
+        const cm = r.match(/(?:^|\s)(?:-[a-zA-Z]*c|--command)(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/);
+        if (cm) { sub(cm[1]!.replace(/^(["'])([\s\S]*)\1$/, "$2")); r = r.replace(cm[0], " "); }
+        words = r.trim().split(/\s+/).filter(Boolean);
+        const file = words.findIndex(w => !w.startsWith("-"));
+        words = file < 0 ? [] : words.slice(file + 1);
+      }
+      for (let i = 0; i < words.length; i++) {
+        const b = words[i]!.replace(/^['"]+|['"]+$/g, "").replace(/^.*\//, "");
+        // git's intent depends on its subcommand (`strace -f git status` is a read), so classify the git
+        // invocation itself rather than treating the bare word as a write. Keep scanning after it: the word
+        // may be an option value (`su git -c 'rm -rf /'`), so later command words still count.
+        if (b === "git") { sub(words.slice(i).join(" ").replace(/['"]/g, "")); continue; }
+        if (DESTRUCTIVE.has(b) || b.startsWith("mkfs")) bump("destructive");
+        else if (PROCESS.has(b)) bump("process");
+        else if (WRITE.has(b)) bump("write");
+        else if (NETWORK.has(b)) bump("network");
+      }
+    }
     if (DESTRUCTIVE.has(tok) || tok.startsWith("mkfs")) bump("destructive");
     else if (PROCESS.has(tok)) bump("process");
     else if (tok === "git") {
@@ -107,6 +840,10 @@ export function classifyIntent(command: string): CommandIntent {
       else if (
         /\b(commit|push|merge|rebase|checkout|switch|restore|stash|tag|add|rm|mv|init|apply|cherry-pick|revert|pull|fetch|worktree)\b/.test(rest)
         || /\bbranch\s+(-[dDmMcC]\b|[^-\s])/.test(rest)                                  // branch delete/move/copy or create-by-name
+        || /\barchive\b[^|;&]*\s(?:-o\S*|--output(?:=|\s))/.test(rest)                  // archive -o FILE
+        || (/\bformat-patch\b/.test(rest) && !/\s--stdout\b/.test(rest))              // writes NNNN-*.patch files
+        || /\bbundle\s+create\b/.test(rest)
+        || /(?:^|\s)--output(?:=|\s)/.test(rest)                                          // diff/log/show --output=FILE
         || (/\bconfig\s+\S/.test(rest) && !/\bconfig\b[^|;&]*(--get|--list|\s-l\b)/.test(rest)) // config set (not --get/--list/-l)
       ) bump("write");
       else bump("read-only"); // status/log/diff/show/branch(list)/config --get/…
@@ -132,8 +869,13 @@ export function validateBashCommand(command: string, opts: ValidateOpts = {}): V
   const intent = classifyIntent(cmd);
 
   // modeValidation — plan (read-only) mode forbids anything that changes state.
-  if (opts.planMode && (intent === "write" || intent === "destructive" || intent === "process")) {
-    return { kind: "block", reason: `Plan mode is read-only — a ${intent} command (\`${firstWords(cmd)}\`) can't run. Switch to Act mode first.` };
+  // Default-deny: only commands the classifier positively knows to be read-only run. `unknown` (any command
+  // not on the READ_ONLY list, e.g. `make`, `npm install`, `split`) and `network` (`curl -o`, `wget`,
+  // `rsync` — which also write local files) used to run here, so every tool the rules didn't model was
+  // an escape from the read-only promise.
+  if (opts.planMode && intent !== "read-only") {
+    const why = intent === "unknown" ? "isn't on the read-only allow-list" : intent === "network" ? "is a network command (it can fetch into or sync local files)" : `is a ${intent} command`;
+    return { kind: "block", reason: `Plan mode is read-only — \`${firstWords(cmd)}\` ${why}. Switch to Act mode first.` };
   }
 
   // pathValidation — catastrophic deletes / writes to system paths are refused outright (even in autopilot).
@@ -141,8 +883,11 @@ export function validateBashCommand(command: string, opts: ValidateOpts = {}): V
     // Normalize away trivial shell-equivalent rewrites that defeat the literal path patterns: quotes
     // (`'/etc'`), redundant slashes (`//etc` → `/etc`), and brace var form (`${HOME}` → `$HOME`). Without
     // this, `rm -rf //etc`, `rm -rf '/etc'`, and `rm -rf ${HOME}` all escape the hard block.
-    const np = cmd.replace(/['"]/g, "").replace(/\$\{(\w+)\}/g, "$$$1").replace(/\/{2,}/g, "/");
-    if (CATASTROPHIC_RM.test(np) || /\brm\b[^|;&]*\s(\/|~|\$HOME)(\s|$)/.test(np)) {
+    // Call punctuation is spaced out too, so a delete embedded in code (`system("rm -rf /")`,
+    // `subprocess.run(["rm","-rf","/"])`, `shutil.rmtree('/')`) meets the same patterns.
+    const np = cmd.replace(/['"]/g, "").replace(/\$\{(\w+)\}/g, "$$$1").replace(/\/{2,}/g, "/").replace(/[()[\],{}]/g, " ");
+    if (CATASTROPHIC_RM.test(np) || /\brm\b[^|;&]*\s(\/|~|\$HOME)(\s|$)/.test(np)
+      || /\b(?:rmtree|rmSync|rm_rf|rm_r|remove_tree|rimraf)\s+(\/|~\/?|\$HOME)(\s|$)/.test(np)) {
       return { kind: "block", reason: `refusing a recursive delete of a root/home path (\`${firstWords(cmd)}\`) — this is almost never intended` };
     }
     if (/\bdd\b[^|;&]*of=\/dev\/(disk|sd|hd|vd|xvd|nvme|mmcblk|loop|rdisk)/.test(np) || /\bmkfs\b/.test(cmd) || /\bwipefs\b/.test(cmd)) {

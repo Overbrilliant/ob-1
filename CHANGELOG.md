@@ -4,6 +4,48 @@ All notable OB-1 CLI changes are documented here.
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-10-25
+
+- Bash safety: more commands that hid a mutation inside another command are now classified by what they
+  run, so they no longer run in Plan mode without approval. `su`/`runuser`/`chroot`/`nsenter`/
+  `systemd-run`/`script`/`strace`/`ltrace`/`valgrind`/`gdb`, `socat EXEC:` and `env -S` wrap a command;
+  `sort --compress-program`, `diff --filter`, `diff --paginate=CMD`, `rg --pre`, `bat --pager` and
+  `bat --preprocessor`, `git grep -O` and `git bisect run` execute one. `time -FLAGS`, `sed -i`, SQL-client
+  mutations, `docker prune`, `tar`/`unzip`/`7z`/`gzip`/`zip` writes and `find -fprint` are no longer
+  read-only.
+
+## [0.3.13] - 2026-09-25
+
+- Bash safety: commands run through scheduling and buffering wrappers are now classified by the command
+  they run. `ionice`, `stdbuf`, `taskset`, `chrt`, `setsid` and `unbuffer` are parsed like `sudo`/`env`/
+  `timeout`, including their own options (`ionice -c 3 -n 7`, `stdbuf -o L`, `taskset -c 0` or a mask,
+  `chrt -f 99`, `setsid -fw`, `--`). So `ionice -c3 rm -rf /` or `taskset -c 0 rm -rf /` is refused, not
+  run as `unknown`. Path-prefixed wrappers (`/usr/bin/env`, `/usr/bin/sudo`, `/usr/bin/nice`, …) are
+  stripped too: `/usr/bin/env rm -rf /` used to read as read-only and could run in Plan mode. Also:
+  `nice -n5`, `nice --adjustment=N`, `timeout -s SIG` / `-k DUR`. `taskset -p`, `chrt -p` and
+  `ionice -p` (which change a running process) are no longer read-only.
+
+## [0.3.12] - 2026-09-24
+
+- Bash safety: commands smuggled into another command's arguments are now classified by what they
+  actually run. Interpreter one-liners (`python3 -c`, `perl -e/-E`, `node -e/--eval/-p`, `ruby -e`,
+  `php -r`, `deno eval`, …) are scanned for destructive file APIs (`shutil.rmtree`, `os.remove`,
+  `fs.rmSync`, `unlinkSync`, `rm_rf`, …), shell-outs (`os.system`, `subprocess`, `execSync`, `system()`)
+  and file writes, and harmless ones stay `unknown` rather than `write`. Also covered: `awk`/`gawk`/`mawk`
+  `system()` and pipes to `sh`, `watch`, `parallel`/`sem`, `sed` `e`/`s///e`, tar `--checkpoint-action=exec`
+  / `--to-command`, command-valued `git -c` keys, `rsync --delete*`/`--remove-source-files`, `docker
+  run/exec/compose`, and `$(…)`/backtick substitution. `doas`, `pkexec` and `run0` are stripped like
+  `sudo` (value-taking flags such as `sudo -u root` are now skipped too), so `doas rm -rf /` is refused.
+  Root/home targets inside code (`system("rm -rf /")`, `shutil.rmtree('/')`) are refused like `rm -rf /`.
+
+## [0.3.11] - 2026-09-23
+
+- Bash safety: commands run from another command's arguments are now classified too. `find … -delete`
+  and the command behind `find -exec/-execdir/-ok/-okdir`, `fd -x/-X`, `xargs`, `sh/bash/zsh -c '…'` and
+  `eval` count toward the line's intent, so `find / -exec rm -rf {} \;`, `xargs -n1 rm`,
+  `sh -c 'rm -rf /'` and `busybox rm -rf /` are no longer read-only or unknown: plan mode blocks them,
+  the approval prompt flags them, and root/home/system-path targets are refused. `truncate` and
+  `unlink` are now destructive, and `busybox` is stripped like `sudo`.
 - Test-edit guard for the self-fix loop: during a self-correction round, `write_file` / `edit_file` /
   `architect_edit` to a path matching a test pattern (`test/`, `tests/`, `spec/`, `__tests__/`,
   `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`) is refused and the model is told to fix the source or
