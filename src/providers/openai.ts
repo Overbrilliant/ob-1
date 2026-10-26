@@ -243,6 +243,8 @@ export async function callOpenAI(opts: CallOpts): Promise<ModelResponse> {
     headers,
     body: JSON.stringify(openAIBody(opts)),
     signal: opts.signal,
+    idleMs: opts.idleMs,
+    retries: opts.retries,
   })) {
     if (ev.usage) {
       // OpenAI/OpenRouter report cached_tokens as a SUBSET of prompt_tokens (cache reads bill at a

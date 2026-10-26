@@ -38,6 +38,10 @@ export { STRATEGIES, DEFAULT_STRATEGY } from "./scoring.ts";
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
 const MAX_ATTEMPTS = 8; // failover hops per logical call (callModel's outer retry loops on top for backoff)
+// Per-hop stall bound. The default 90s idle × 3 connect attempts let one hung keyless provider hold a turn
+// for minutes before failover (2026-10-26 fresh-install CI timed out at 180s); 30s with no in-hop retries
+// keeps failover fast while leaving room for slow first tokens.
+const HOP_IDLE_MS = 30_000;
 
 // ── Public types (the phase-2 UX contract) ────────────────────────────────────
 
@@ -254,6 +258,8 @@ export async function callFree(
         signal: opts.signal,
         onRetry: opts.onRetry,
         idempotencyKey: opts.idempotencyKey,
+        idleMs: HOP_IDLE_MS,
+        retries: 0,
       });
 
       // Success: reconcile token windows with actuals, record reliability/latency, reset auth fails.

@@ -109,4 +109,11 @@ export interface CallOpts {
    *  a retried request that already billed instead of double-charging. Sent as the `Idempotency-Key`
    *  request header; unknown headers are harmlessly ignored by third-party OpenAI-compatible endpoints. */
   idempotencyKey?: string;
+  /** Stall bound for this call: abort when no bytes (headers or stream chunks) arrive for this long.
+   *  Undefined ⇒ http.ts default (90s). The free router passes a short one so a hung keyless provider
+   *  fails over in seconds instead of holding the turn. */
+  idleMs?: number;
+  /** Connect-level retries inside streamSSE. Undefined ⇒ http.ts default (2). The free router passes 0:
+   *  it fails over to another provider itself, so retrying a stalled one only multiplies the wait. */
+  retries?: number;
 }
