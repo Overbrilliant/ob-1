@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> **OB-1 is in maintenance mode (since 18 November 2026).**
+> It still installs and runs, and it stays free and open source under Apache-2.0.
+> No new features are planned. We fix serious bugs and security problems only,
+> and replies to issues and pull requests can be slow.
+> The documentation now lives in this repository, in [`docs/`](docs/).
+
 ```text
    ██████╗ ██████╗      ██╗
   ██╔═══██╗██╔══██╗    ███║
