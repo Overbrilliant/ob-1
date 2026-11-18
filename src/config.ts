@@ -105,6 +105,18 @@ export function detectEnvProvider(env: NodeJS.ProcessEnv = process.env): EnvProv
     };
   }
 
+  const tsubasa = envVal(env, "TSUBASA_API_KEY");
+  if (tsubasa) {
+    return {
+      source: "TSUBASA_API_KEY",
+      label: "Tsubasa",
+      provider: "openai",
+      apiKey: tsubasa,
+      baseUrl: "https://api.tsubasa.sh/v1",
+      model: model ?? "tsubasa-fast",
+    };
+  }
+
   return undefined;
 }
 

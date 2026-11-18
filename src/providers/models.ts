@@ -41,6 +41,13 @@ export const MODELS: ModelSpec[] = [
   { match: /qwen/i,                          id: "qwen/qwen3.6-plus",              label: "Qwen 3.6 Plus",     contextWindow: 1_000_000, maxOutput: 65_536,  inPrice: 0.33, outPrice: 1.95, reasoning: { effort: true, visible: true }, vision: true, notes: "default" },
 ];
 
+// BYOK metadata affects limits and request shaping without listing these models in the
+// managed OB-1 subscription picker above. Capabilities are opt-in, as for frontier models.
+const BYOK_MODELS: ModelSpec[] = [
+  { match: /^tsubasa-fast$/, label: "Tsubasa Fast", contextWindow: 32_768, maxOutput: 8_192 },
+  { match: /^tsubasa-pro$/, label: "Tsubasa Pro", contextWindow: 32_768, maxOutput: 16_384 },
+];
+
 /** Default output ceiling for an unknown model — generous, so we don't truncate large artifacts. */
 export const DEFAULT_MAX_OUTPUT = 16_384;
 
@@ -49,7 +56,7 @@ export const DEFAULT_MAX_OUTPUT = 16_384;
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 
 export function modelSpec(id: string): ModelSpec | undefined {
-  return MODELS.find((m) => m.match.test(id));
+  return MODELS.find((m) => m.match.test(id)) ?? BYOK_MODELS.find((m) => m.match.test(id));
 }
 
 /** A router alias — not a concrete model, but an instruction for the proxy to pick one per request

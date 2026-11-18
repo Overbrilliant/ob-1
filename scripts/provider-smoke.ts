@@ -4,8 +4,11 @@
 // Usage: bun run scripts/provider-smoke.ts
 import { toOpenAIMessages, openAIBody, extractDelta, callOpenAI } from "../src/providers/openai.ts";
 import { streamSSE } from "../src/providers/http.ts";
-import { maxOutputFor, describeModel, DEFAULT_MAX_OUTPUT, isRouterModel, supportsEffort, modelReasoning, reasoningVisible, modelSupportsVision, visionEnabled } from "../src/providers/models.ts";
+import { MODELS, contextWindowFor, maxOutputFor, describeModel, DEFAULT_MAX_OUTPUT, isRouterModel, supportsEffort, modelReasoning, reasoningVisible, modelSupportsVision, visionEnabled } from "../src/providers/models.ts";
 import type { Message, CallOpts } from "../src/providers/types.ts";
+
+import { TSUBASA, profileById } from "../src/providers/profiles.ts";
+import { detectEnvProvider } from "../src/config.ts";
 
 let fail = false;
 const check = (name: string, ok: boolean) => { console.log(`${ok ? "✓" : "✗"} ${name}`); if (!ok) fail = true; };
@@ -99,6 +102,21 @@ check("registry: qwen3.6-plus ceiling > old 4096 default", maxOutputFor("qwen/qw
 check("registry: claude sonnet ceiling is large", maxOutputFor("claude-sonnet-4-6") >= 32000);
 check("registry: unknown model → generous default", maxOutputFor("totally-made-up-model") === DEFAULT_MAX_OUTPUT);
 check("registry: describeModel returns a string", typeof describeModel("qwen/qwen3.6-plus") === "string" && describeModel("qwen/qwen3.6-plus").includes("output"));
+
+// --- Tsubasa BYOK route: limits and conservative capability selection ---
+check("Tsubasa profile is visible and uses the native OpenAI route",
+  profileById("tsubasa") === TSUBASA && TSUBASA.wire === "openai" && TSUBASA.defaultModel === "tsubasa-fast");
+for (const [model, output] of [["tsubasa-fast", 8192], ["tsubasa-pro", 16384]] as const) {
+  check(`${model}: exact context/output limits`, contextWindowFor(model) === 32768 && maxOutputFor(model) === output);
+  check(`${model}: no unqualified reasoning or vision capability`, !supportsEffort(model) && !modelSupportsVision(model));
+  const route = detectEnvProvider({ TSUBASA_API_KEY: "fixture-tsubasa", OB1_MODEL: model });
+  check(`${model}: isolated key and endpoint`, route?.apiKey === "fixture-tsubasa" && route.baseUrl === "https://api.tsubasa.sh/v1" && route.model === model);
+  check(`${model}: no unsupported reasoning field`, !("reasoning_effort" in openAIBody({ ...base, model, effort: supportsEffort(model) ? "medium" : undefined })));
+}
+check("Tsubasa models are not advertised as managed subscription models", !MODELS.some((m) => m.match.test("tsubasa-fast") || m.match.test("tsubasa-pro")));
+check("missing Tsubasa key creates no route", detectEnvProvider({ TSUBASA_API_KEY: " " }) === undefined);
+check("Tsubasa key does not leak into an explicit custom endpoint", detectEnvProvider({ TSUBASA_API_KEY: "fixture-tsubasa", OB1_BASE_URL: "http://localhost:9876/v1" })?.apiKey === undefined);
+check("existing named-key precedence is preserved", detectEnvProvider({ TSUBASA_API_KEY: "fixture-tsubasa", OPENAI_API_KEY: "fixture-openai" })?.apiKey === "fixture-openai");
 
 // --- reasoning capability (per-model surfacing) ---
 check("capability: known reasoning model takes effort", supportsEffort("qwen/qwen3.6-plus") && supportsEffort("anthropic/claude-opus-4.8"));
